@@ -629,6 +629,31 @@ class App:
         output.mkdir(parents=True, exist_ok=True)
         os.startfile(str(output))
 
+    def _build_job_from_controls(
+        self,
+        spf,
+        max_frames,
+        metashape_exe,
+        colmap_exe,
+        lichtfield_exe,
+        licht_point_count,
+        licht_grid,
+    ):
+        backend = normalize_backend(self.backend_var.get())
+        return material_tracks_to_job_config(
+            tracks=self.material_tracks,
+            output_dir=Path(self.output_var.get()),
+            seconds_per_frame=spf,
+            max_frames=max_frames,
+            metashape_exe=metashape_exe,
+            backend=backend,
+            colmap_exe=colmap_exe,
+            run_lichtfield=backend == COLMAP_BACKEND and self.run_lichtfield_var.get(),
+            lichtfield_exe=lichtfield_exe,
+            lichtfield_point_count=licht_point_count,
+            lichtfield_bilateral_grid=licht_grid,
+        )
+
     def start(self):
         if self.running:
             return
@@ -688,18 +713,14 @@ class App:
             if not messagebox.askyesno("覆盖旧输出", f"将清理以下旧输出后重新生成：\n{names}\n\n继续吗？"):
                 return
 
-        job = material_tracks_to_job_config(
-            tracks=self.material_tracks,
-            output_dir=output_dir,
-            seconds_per_frame=spf,
+        job = self._build_job_from_controls(
+            spf=spf,
             max_frames=max_frames,
             metashape_exe=metashape_exe,
-            backend=backend,
             colmap_exe=colmap_exe,
-            run_lichtfield=backend == COLMAP_BACKEND and self.run_lichtfield_var.get(),
             lichtfield_exe=lichtfield_exe,
-            lichtfield_point_count=licht_point_count,
-            lichtfield_bilateral_grid=licht_grid,
+            licht_point_count=licht_point_count,
+            licht_grid=licht_grid,
         )
 
         self.running = True

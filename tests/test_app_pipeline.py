@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app import JobConfig, MaterialTrack, MultiTrackJobConfig, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
+from app import App, JobConfig, MaterialTrack, MultiTrackJobConfig, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
 
 
 class FakeProcess:
@@ -13,6 +13,14 @@ class FakeProcess:
 
     def wait(self):
         return 0
+
+
+class FakeVar:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self):
+        return self.value
 
 
 class AppPipelineTests(unittest.TestCase):
@@ -54,6 +62,37 @@ class AppPipelineTests(unittest.TestCase):
                 max_frames=0,
                 metashape_exe="metashape.exe",
             )
+
+    def test_gui_control_mapping_builds_colmap_lichtfield_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pano = root / "a.osv"
+            output = root / "out"
+            pano.write_bytes(b"video")
+            app = object.__new__(App)
+            app.material_tracks = [MaterialTrack(track_type="panorama_video", label="pano", paths=[pano])]
+            app.output_var = FakeVar(str(output))
+            app.backend_var = FakeVar("colmap")
+            app.run_lichtfield_var = FakeVar(True)
+
+            job = App._build_job_from_controls(
+                app,
+                spf=1.0,
+                max_frames=3,
+                metashape_exe="metashape.exe",
+                colmap_exe="colmap.exe",
+                lichtfield_exe="lichtfield-studio.exe",
+                licht_point_count=120000,
+                licht_grid=16,
+            )
+
+            self.assertEqual(job.backend, "colmap")
+            self.assertEqual(job.colmap_exe, "colmap.exe")
+            self.assertTrue(job.run_lichtfield)
+            self.assertEqual(job.lichtfield_exe, "lichtfield-studio.exe")
+            self.assertEqual(job.lichtfield_point_count, 120000)
+            self.assertEqual(job.lichtfield_bilateral_grid, 16)
+            self.assertEqual(job.output_dir, output.resolve())
 
     def test_single_video_gui_pipeline_uses_manifest_backend(self):
         with tempfile.TemporaryDirectory() as tmp:
