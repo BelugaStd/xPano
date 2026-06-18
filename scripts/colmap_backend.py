@@ -10,8 +10,14 @@ class ColmapBackendConfig:
     colmap_exe: str = "colmap"
     camera_model: str = "OPENCV_FISHEYE"
     image_extension: str = ".jpg"
-    max_image_size: int = 0
+    max_image_size: int = 1600
+    max_num_features: int = 4096
+    num_threads: int = 4
     single_camera: bool = False
+    single_camera_per_folder: bool = True
+    use_gpu: bool = False
+    matcher: str = "sequential"
+    sequential_overlap: int = 6
 
 
 @dataclass(frozen=True)
@@ -65,8 +71,9 @@ def build_colmap_plan(manifest, output_dir, config=None):
     image_entries = []
     for index, frame, left, right in frame_sources:
         for side, source in [("left", left), ("right", right)]:
-            target_name = f"{index:06d}_{side}{config.image_extension}"
+            target_name = f"{side}/{index:06d}{config.image_extension}"
             target = image_dir / target_name
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             image_entries.append(
                 {
@@ -89,15 +96,51 @@ def build_colmap_plan(manifest, output_dir, config=None):
             config.camera_model,
             "--ImageReader.single_camera",
             "1" if config.single_camera else "0",
-            "--SiftExtraction.max_image_size",
+            "--ImageReader.single_camera_per_folder",
+            "1" if config.single_camera_per_folder else "0",
+            "--FeatureExtraction.max_image_size",
             str(config.max_image_size),
+            "--FeatureExtraction.num_threads",
+            str(config.num_threads),
+            "--FeatureExtraction.use_gpu",
+            "1" if config.use_gpu else "0",
+            "--SiftExtraction.max_num_features",
+            str(config.max_num_features),
         ],
-        [
-            config.colmap_exe,
-            "exhaustive_matcher",
-            "--database_path",
-            str(database_path),
-        ],
+    ]
+    if config.matcher == "sequential":
+        commands.append(
+            [
+                config.colmap_exe,
+                "sequential_matcher",
+                "--database_path",
+                str(database_path),
+                "--FeatureMatching.num_threads",
+                str(config.num_threads),
+                "--FeatureMatching.use_gpu",
+                "1" if config.use_gpu else "0",
+                "--SequentialMatching.overlap",
+                str(config.sequential_overlap),
+                "--SequentialMatching.expand_rig_images",
+                "1",
+            ]
+        )
+    elif config.matcher == "exhaustive":
+        commands.append(
+            [
+                config.colmap_exe,
+                "exhaustive_matcher",
+                "--database_path",
+                str(database_path),
+                "--FeatureMatching.num_threads",
+                str(config.num_threads),
+                "--FeatureMatching.use_gpu",
+                "1" if config.use_gpu else "0",
+            ]
+        )
+    else:
+        raise ValueError(f"Unsupported COLMAP matcher: {config.matcher}")
+    commands.append(
         [
             config.colmap_exe,
             "mapper",
@@ -107,8 +150,8 @@ def build_colmap_plan(manifest, output_dir, config=None):
             str(image_dir),
             "--output_path",
             str(sparse_dir),
-        ],
-    ]
+        ]
+    )
 
     manifest_path = output_dir / "xpano_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

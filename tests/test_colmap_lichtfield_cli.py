@@ -53,11 +53,22 @@ class ColmapBackendPlanTests(unittest.TestCase):
             self.assertEqual(plan.image_dir.name, "colmap_images")
             self.assertEqual(plan.sparse_dir.name, "sparse")
             self.assertEqual([cmd[0] for cmd in plan.commands], ["colmap.exe", "colmap.exe", "colmap.exe"])
-            self.assertEqual([cmd[1] for cmd in plan.commands], ["feature_extractor", "exhaustive_matcher", "mapper"])
+            self.assertEqual([cmd[1] for cmd in plan.commands], ["feature_extractor", "sequential_matcher", "mapper"])
             self.assertIn("--ImageReader.camera_model", plan.commands[0])
             self.assertIn("OPENCV_FISHEYE", plan.commands[0])
-            self.assertTrue((plan.image_dir / "000001_left.jpg").exists())
-            self.assertTrue((plan.image_dir / "000001_right.jpg").exists())
+            self.assertIn("--FeatureExtraction.max_image_size", plan.commands[0])
+            self.assertIn("1600", plan.commands[0])
+            self.assertNotIn("--SiftExtraction.max_image_size", plan.commands[0])
+            self.assertIn("--SiftExtraction.max_num_features", plan.commands[0])
+            self.assertIn("4096", plan.commands[0])
+            self.assertIn("--FeatureExtraction.num_threads", plan.commands[0])
+            self.assertIn("4", plan.commands[0])
+            self.assertIn("--FeatureExtraction.use_gpu", plan.commands[0])
+            self.assertIn("--ImageReader.single_camera_per_folder", plan.commands[0])
+            self.assertIn("--FeatureMatching.use_gpu", plan.commands[1])
+            self.assertIn("--SequentialMatching.overlap", plan.commands[1])
+            self.assertTrue((plan.image_dir / "left" / "000001.jpg").exists())
+            self.assertTrue((plan.image_dir / "right" / "000001.jpg").exists())
             image_manifest = json.loads(plan.image_manifest_path.read_text(encoding="utf-8"))
             self.assertEqual([item["side"] for item in image_manifest], ["left", "right"])
 
@@ -96,7 +107,36 @@ class ColmapBackendPlanTests(unittest.TestCase):
             self.assertFalse((plan.image_dir / "999999_left.jpg").exists())
             self.assertFalse((plan.sparse_dir / "0" / "cameras.bin").exists())
             self.assertFalse(plan.database_path.exists())
-            self.assertEqual(sorted(path.name for path in plan.image_dir.glob("*.jpg")), ["000001_left.jpg", "000001_right.jpg"])
+            self.assertEqual(sorted(str(path.relative_to(plan.image_dir)).replace("\\", "/") for path in plan.image_dir.rglob("*.jpg")), ["left/000001.jpg", "right/000001.jpg"])
+
+    def test_colmap_plan_can_use_exhaustive_matcher_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            left = root / "frame_left.jpg"
+            right = root / "frame_right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            manifest = {
+                "schema_version": 1,
+                "workflow": "xpano_multi_track",
+                "tracks": [
+                    {
+                        "track_id": "track_001_osmo",
+                        "track_type": "panorama_video",
+                        "metashape_mode": "dual_fisheye_station",
+                        "export_mode": "cubemap",
+                        "frames": [{"left": str(left), "right": str(right)}],
+                    }
+                ],
+            }
+
+            plan = build_colmap_plan(
+                manifest,
+                output_dir=root / "out",
+                config=ColmapBackendConfig(matcher="exhaustive"),
+            )
+
+            self.assertEqual(plan.commands[1][1], "exhaustive_matcher")
 
     def test_colmap_plan_validates_inputs_before_clearing_old_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
