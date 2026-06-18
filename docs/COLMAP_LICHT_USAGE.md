@@ -26,7 +26,38 @@ The Metashape executable is skipped for the COLMAP backend.
 
 ## Executable Discovery
 
-The software can use plain command names from `PATH`, manually selected executable paths, or these environment variables:
+The software prefers a bundled COLMAP executable under `tools/colmap`, so users do not need to install COLMAP globally or edit `PATH`.
+
+Recommended bundled install:
+
+```powershell
+INSTALL_COLMAP.bat
+```
+
+This downloads the official `colmap-x64-windows-nocuda.zip` release into `tools/colmap`. For the larger CUDA build:
+
+```powershell
+INSTALL_COLMAP.bat -Variant cuda
+```
+
+Supported bundled layouts include:
+
+```text
+tools/colmap/COLMAP.bat
+tools/colmap/colmap.exe
+tools/colmap/bin/colmap.exe
+tools/colmap/<release-folder>/COLMAP.bat
+tools/colmap/<release-folder>/bin/colmap.exe
+```
+
+The resolver order is:
+
+1. `XPANO_COLMAP`
+2. bundled COLMAP under `tools/colmap`
+3. `PATH`
+4. common system install locations
+
+The software can also use manually selected executable paths or these environment variables:
 
 ```powershell
 $env:XPANO_COLMAP="C:\Path\To\COLMAP\colmap.exe"
@@ -103,8 +134,8 @@ The LICHT command receives:
 1. Add at least one panorama video track.
 2. Select an output folder.
 3. Choose `COLMAP` in the backend section.
-4. Open advanced parameters.
-5. Confirm or locate the COLMAP executable.
+4. If `tools/colmap` contains the bundled executable, no COLMAP path selection is required.
+5. Open advanced parameters only when you want to override the bundled executable.
 6. Optional: enable `LICHT Field Studio` post-processing and enter point count / bilateral grid.
 7. Click `Check Environment`.
 8. Run the job once all required dependencies show `OK`.

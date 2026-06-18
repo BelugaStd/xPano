@@ -53,6 +53,7 @@ Windows 环境：
 - Python 3.10+。
 - ffmpeg，并确保 `ffmpeg.exe` 在 `PATH` 中。
 - Agisoft Metashape，并确保 `metashape.exe` 在 `PATH` 中，或设置环境变量 `XPANO_METASHAPE` 指向完整路径。
+- 使用 COLMAP 后端时，推荐把便携版 COLMAP 放进项目内 `tools/colmap/`；GUI 和 CLI 会优先使用项目内版本，不需要用户再配置 `PATH`。
 
 Python 依赖：
 
@@ -71,6 +72,18 @@ INSTALL_DEPS.bat
 - 安装普通 Python 依赖。
 - 查找 `metashape.exe`。
 - 使用 Metashape 自带 Python 安装导出所需依赖。
+
+可选：安装项目内 COLMAP 便携版：
+
+```powershell
+INSTALL_COLMAP.bat
+```
+
+默认下载官方 No-CUDA 版到 `tools/colmap/`。如果需要 CUDA 版：
+
+```powershell
+INSTALL_COLMAP.bat -Variant cuda
+```
 
 ## 快速使用
 
@@ -217,6 +230,7 @@ python -m unittest tests.test_xpano_tracks tests.test_verify_xpano_output tests.
 
 - 不要提交本机输出目录、`.psx` 工程、抽帧图像、COLMAP 输出和错误日志。
 - 不要把 Metashape 本体打进仓库；用户需要自行安装并遵守 Agisoft 授权。
+- COLMAP 可放在 release 包的 `tools/colmap/` 内随软件分发；源码仓库默认忽略大二进制，避免超过 GitHub 单文件限制。
 - `download/` 是历史下载/迁移目录，不属于发布主体。
 - 混合轨道功能目前建议标为 experimental，直到有更多真实同场景数据验收。
 

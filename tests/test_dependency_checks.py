@@ -30,17 +30,50 @@ class DependencyChecksTests(unittest.TestCase):
             with patch.dict("scripts.dependency_checks.os.environ", {"XPANO_COLMAP": str(exe)}, clear=False):
                 self.assertEqual(locate_colmap(), str(exe))
 
+    def test_locates_bundled_colmap_before_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled = root / "tools" / "colmap" / "COLMAP.bat"
+            bundled.parent.mkdir(parents=True)
+            bundled.write_text("@echo off\n", encoding="utf-8")
+
+            with patch("scripts.dependency_checks.shutil.which", return_value=r"C:\Tools\colmap.exe"):
+                self.assertEqual(locate_colmap(project_root=root), str(bundled))
+
+    def test_locates_nested_bundled_colmap_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled = root / "tools" / "colmap" / "colmap-x64-windows-nocuda" / "bin" / "colmap.exe"
+            bundled.parent.mkdir(parents=True)
+            bundled.write_bytes(b"")
+
+            with patch("scripts.dependency_checks.shutil.which", return_value=None):
+                self.assertEqual(locate_colmap(project_root=root), str(bundled))
+
     def test_locates_lichtfield_from_path(self):
         with patch("scripts.dependency_checks.shutil.which", return_value=r"C:\Tools\lichtfield-studio.exe"):
             self.assertEqual(locate_lichtfield(), r"C:\Tools\lichtfield-studio.exe")
 
     def test_reports_missing_required_executable(self):
-        with patch("scripts.dependency_checks.shutil.which", return_value=None):
-            check = check_executable("COLMAP", "colmap", "colmap", required=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("scripts.dependency_checks._project_root", return_value=Path(tmp)), \
+                patch("scripts.dependency_checks.shutil.which", return_value=None):
+                check = check_executable("COLMAP", "colmap", "colmap", required=True)
 
         self.assertFalse(check.ok)
         self.assertTrue(check.required)
         self.assertIn("PATH", check.message)
+
+    def test_resolve_colmap_command_can_use_bundled_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled = root / "tools" / "colmap" / "COLMAP.bat"
+            bundled.parent.mkdir(parents=True)
+            bundled.write_text("@echo off\n", encoding="utf-8")
+
+            with patch("scripts.dependency_checks._project_root", return_value=root), \
+                patch("scripts.dependency_checks.shutil.which", return_value=None):
+                self.assertEqual(resolve_executable("colmap", "colmap"), str(bundled))
 
     def test_skips_optional_executable(self):
         check = check_executable("Metashape", "metashape.exe", "metashape.exe", required=False)

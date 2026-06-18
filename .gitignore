@@ -35,6 +35,12 @@ xpano_gui_error.log
 # Historical local copy, not part of the release root
 download/
 
+# Optional bundled third-party binaries. Keep small docs/scripts tracked.
+!tools/
+!tools/colmap/
+tools/colmap/*
+!tools/colmap/README.md
+
 # Large raw media and reconstruction artifacts
 *.osv
 *.insv

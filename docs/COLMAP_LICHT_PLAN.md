@@ -32,9 +32,11 @@ Extend the verified Metashape workflow into a backend-pluggable reconstruction p
 - GUI supports backend selection, COLMAP executable selection, LICHT executable selection, LICHT parameter entry, and environment checks.
 - CLI supports `--backend colmap`, `--colmap`, `--run-lichtfield`, `--lichtfield`, `--lichtfield-point-count`, `--lichtfield-bilateral-grid`, `--check-env`, and strict dependency checking.
 - Dependency checks and command planning are covered by regression tests.
+- COLMAP can now be bundled under `tools/colmap`; the GUI and CLI resolve this project-local copy before falling back to `PATH`.
+- `scripts/install_colmap.ps1` can download the official Windows No-CUDA or CUDA release into the project-local bundle directory.
 
 ## Remaining verification gap
 - The Metashape path is the stable reference path.
 - The COLMAP and LICHT paths are code-complete enough for command execution, but still need a real local end-to-end run once `colmap` and `lichtfield-studio` are installed or configured.
-- On the current development machine, `ffmpeg` and Metashape are discoverable, while COLMAP and LICHT Field Studio are not yet on PATH.
+- On the current development machine, `ffmpeg` and Metashape are discoverable. COLMAP no longer needs to be on PATH if the `tools/colmap` bundle is installed. LICHT Field Studio still needs either a selected executable, environment variable, or PATH entry.
 

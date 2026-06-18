@@ -24,6 +24,39 @@ def _first_existing(paths):
     return ""
 
 
+def _project_root():
+    return Path(__file__).resolve().parents[1]
+
+
+def _bundled_colmap_candidates(project_root=None):
+    root = Path(project_root) if project_root else _project_root()
+    base_dirs = [
+        root / "tools" / "colmap",
+        root / "third_party" / "colmap",
+    ]
+    candidates = []
+    for base in base_dirs:
+        candidates.extend(
+            [
+                base / "COLMAP.bat",
+                base / "colmap.bat",
+                base / "colmap.exe",
+                base / "bin" / "colmap.exe",
+            ]
+        )
+        if base.exists():
+            for child in sorted(path for path in base.iterdir() if path.is_dir()):
+                candidates.extend(
+                    [
+                        child / "COLMAP.bat",
+                        child / "colmap.bat",
+                        child / "colmap.exe",
+                        child / "bin" / "colmap.exe",
+                    ]
+                )
+    return candidates
+
+
 def locate_executable(default_name, env_var=None, path_names=None, candidate_paths=None):
     if env_var:
         explicit = os.environ.get(env_var)
@@ -37,10 +70,15 @@ def locate_executable(default_name, env_var=None, path_names=None, candidate_pat
     return found or default_name
 
 
-def locate_colmap():
+def locate_colmap(project_root=None):
+    explicit = os.environ.get("XPANO_COLMAP")
+    if explicit and Path(explicit).exists():
+        return explicit
+    bundled = _first_existing(_bundled_colmap_candidates(project_root=project_root))
+    if bundled:
+        return bundled
     return locate_executable(
         "colmap",
-        env_var="XPANO_COLMAP",
         path_names=["colmap.exe", "colmap", "COLMAP.bat"],
         candidate_paths=[
             r"C:\Program Files\COLMAP\colmap.exe",
@@ -78,6 +116,10 @@ def resolve_executable(executable, default_name):
         if not Path(executable).exists():
             raise FileNotFoundError(executable)
         return str(Path(executable))
+    if default_name.lower().startswith("colmap") and executable.lower() in {"colmap", "colmap.exe", "colmap.bat"}:
+        bundled = _first_existing(_bundled_colmap_candidates())
+        if bundled:
+            return bundled
     resolved = shutil.which(executable)
     if not resolved:
         raise RuntimeError(f"{executable} was not found in PATH")
