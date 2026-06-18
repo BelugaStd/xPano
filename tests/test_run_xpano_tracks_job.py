@@ -35,6 +35,44 @@ class RunXpanoTracksJobTests(unittest.TestCase):
         self.assertIn("COLMAP", output)
         self.assertIn("LICHT Field Studio", output)
 
+    def test_check_env_reports_lfs_densification_plugin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / "plugin"
+            plugin.mkdir()
+            (plugin / "densify.py").write_text("print('ok')", encoding="utf-8")
+            argv = [
+                "run_xpano_tracks_job.py",
+                "--check-env",
+                "--backend",
+                "colmap",
+                "--run-lfs-densify",
+                "--lfs-densify-plugin",
+                str(plugin),
+            ]
+
+            with patch.object(sys, "argv", argv), \
+                patch("scripts.dependency_checks.check_lfs_densify_imports") as import_check, \
+                patch("scripts.run_xpano_tracks_job.run_multi_track_pipeline") as runner, \
+                patch("builtins.print") as print_fn:
+                import_check.return_value = type(
+                    "Check",
+                    (),
+                    {
+                        "name": "LichtFeld densification dependencies",
+                        "requested": sys.executable,
+                        "required": True,
+                        "ok": True,
+                        "resolved": sys.executable,
+                        "message": "",
+                    },
+                )()
+                main()
+
+            runner.assert_not_called()
+            output = print_fn.call_args.args[0]
+            self.assertIn("LichtFeld densification plugin", output)
+            self.assertIn("OK:", output)
+
     def test_check_env_strict_fails_for_missing_dependencies(self):
         argv = [
             "run_xpano_tracks_job.py",
@@ -115,6 +153,9 @@ class RunXpanoTracksJobTests(unittest.TestCase):
                 "colmap",
                 "--colmap",
                 sys.executable,
+                "--colmap-density-preset",
+                "high-density",
+                "--colmap-use-gpu",
                 "--seconds-per-frame",
                 "1.0",
                 "--max-frames",
@@ -129,6 +170,8 @@ class RunXpanoTracksJobTests(unittest.TestCase):
             job = runner.call_args.args[0]
             self.assertEqual(job.backend, "colmap")
             self.assertEqual(job.colmap_exe, sys.executable)
+            self.assertEqual(job.colmap_density_preset, "high-density")
+            self.assertTrue(job.colmap_use_gpu)
 
     def test_main_accepts_lichtfield_parameters(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,6 +207,49 @@ class RunXpanoTracksJobTests(unittest.TestCase):
             self.assertEqual(job.lichtfield_exe, sys.executable)
             self.assertEqual(job.lichtfield_point_count, 120000)
             self.assertEqual(job.lichtfield_bilateral_grid, 16)
+
+    def test_main_accepts_lfs_densification_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pano = root / "a.osv"
+            output = root / "out"
+            plugin = root / "plugin"
+            pano.write_bytes(b"video")
+            plugin.mkdir()
+
+            argv = [
+                "run_xpano_tracks_job.py",
+                "--output",
+                str(output),
+                "--backend",
+                "colmap",
+                "--colmap",
+                sys.executable,
+                "--run-lfs-densify",
+                "--lfs-densify-plugin",
+                str(plugin),
+                "--lfs-densify-python",
+                sys.executable,
+                "--lfs-densify-roma",
+                "base",
+                "--lfs-densify-num-refs",
+                "3",
+                "--lfs-densify-max-points",
+                "50000",
+                "--pano",
+                str(pano),
+            ]
+
+            with patch.object(sys, "argv", argv), patch("scripts.run_xpano_tracks_job.run_multi_track_pipeline") as runner:
+                main()
+
+            job = runner.call_args.args[0]
+            self.assertTrue(job.run_lfs_densify)
+            self.assertEqual(job.lfs_densify_plugin, plugin.resolve())
+            self.assertEqual(job.lfs_densify_python, sys.executable)
+            self.assertEqual(job.lfs_densify_roma, "base")
+            self.assertEqual(job.lfs_densify_num_refs, 3)
+            self.assertEqual(job.lfs_densify_max_points, 50000)
 
     def test_metashape_backend_ignores_lichtfield_switch(self):
         with tempfile.TemporaryDirectory() as tmp:

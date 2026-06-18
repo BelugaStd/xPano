@@ -23,8 +23,10 @@ Extend the verified Metashape workflow into a backend-pluggable reconstruction p
 - GUI exists and drives the shared manifest pipeline.
 - COLMAP backend is implemented as an experimental native backend:
   - builds a COLMAP image set from xPano dual-fisheye manifest frames,
-  - runs `feature_extractor`, `exhaustive_matcher`, and `mapper`,
-  - validates `database.db` and sparse model outputs.
+  - runs memory-capped CPU `feature_extractor`, `sequential_matcher`, and `mapper`,
+  - keeps native COLMAP intermediates under `colmap/`,
+  - publishes the best native sparse model as the same downstream artifact shape
+    used by Metashape: cubemap `images/` and `sparse/0`.
 - LICHT Field Studio CLI integration is implemented as an optional post-COLMAP stage:
   - supports executable path selection,
   - supports point count and bilateral grid parameters,
@@ -37,6 +39,28 @@ Extend the verified Metashape workflow into a backend-pluggable reconstruction p
 
 ## Remaining verification gap
 - The Metashape path is the stable reference path.
-- The COLMAP and LICHT paths are code-complete enough for command execution, but still need a real local end-to-end run once `colmap` and `lichtfield-studio` are installed or configured.
+- The COLMAP path has been smoke-tested locally on 20 sampled panorama frames.
+  It now matches the Metashape output structure, but remains less accurate/sparser
+  than the verified Metashape Station workflow on the same test.
+  A 20-frame exhaustive-matcher probe was worse than the default sequential setup
+  on this dataset, so the low-memory sequential configuration remains the safer
+  default.
+  A probe with `Mapper.tri_ignore_two_view_tracks=0` also regressed to a tiny
+  two-image reconstruction on this dataset, so that option is not enabled by
+  default despite the thinner sparse point cloud.
+  A COLMAP rig-configurator probe following the official two-stage flow
+  completed successfully and increased sparse points from `1949` to `2404`, but
+  camera-center agreement with the Metashape reference became worse
+  (`0.0368` RMSE vs `0.0208` for the default run after similarity alignment).
+  Since downstream reconstruction is highly pose-sensitive, the rig probe is
+  not the default yet.
+  The accepted comparison run produced matching downstream structure
+  (`200` cubemap images, `10` PINHOLE cameras, `200` registered images), but
+  sparse geometry remained much thinner than Metashape (`1949` vs `15126`
+  points). Camera centers still matched the Metashape trajectory after similarity
+  alignment with about `0.0208` RMSE on `40` source fisheye camera centers, so the
+  COLMAP path is usable as a structural/backend alternative but not yet as an
+  accuracy-equivalent replacement for the Metashape Station workflow.
+- LICHT still needs a real local end-to-end run once `lichtfield-studio` is installed or configured.
 - On the current development machine, `ffmpeg` and Metashape are discoverable. COLMAP no longer needs to be on PATH if the `tools/colmap` bundle is installed. LICHT Field Studio still needs either a selected executable, environment variable, or PATH entry.
 

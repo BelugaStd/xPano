@@ -1,9 +1,13 @@
 import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
+from scripts.lichtfeld_densify import locate_densify_plugin, locate_densify_python
+from scripts.runtime_paths import app_root, first_existing, internal_root, locate_ffmpeg
 
 
 @dataclass(frozen=True)
@@ -16,24 +20,21 @@ class ExecutableCheck:
     message: str = ""
 
 
-def _first_existing(paths):
-    for path in paths:
-        path = Path(path)
-        if path.exists():
-            return str(path)
-    return ""
-
-
 def _project_root():
-    return Path(__file__).resolve().parents[1]
+    return app_root()
 
 
 def _bundled_colmap_candidates(project_root=None):
-    root = Path(project_root) if project_root else _project_root()
-    base_dirs = [
-        root / "tools" / "colmap",
-        root / "third_party" / "colmap",
-    ]
+    roots = [Path(project_root)] if project_root else [_project_root()]
+    internal = internal_root()
+    if getattr(sys, "frozen", False) and internal not in roots:
+        roots.append(internal)
+    base_dirs = []
+    for root in roots:
+        base_dirs.extend([
+            root / "tools" / "colmap",
+            root / "third_party" / "colmap",
+        ])
     candidates = []
     for base in base_dirs:
         candidates.extend(
@@ -66,7 +67,7 @@ def locate_executable(default_name, env_var=None, path_names=None, candidate_pat
         resolved = shutil.which(name)
         if resolved:
             return resolved
-    found = _first_existing(candidate_paths or [])
+    found = first_existing(candidate_paths or [])
     return found or default_name
 
 
@@ -74,7 +75,7 @@ def locate_colmap(project_root=None):
     explicit = os.environ.get("XPANO_COLMAP")
     if explicit and Path(explicit).exists():
         return explicit
-    bundled = _first_existing(_bundled_colmap_candidates(project_root=project_root))
+    bundled = first_existing(_bundled_colmap_candidates(project_root=project_root))
     if bundled:
         return bundled
     return locate_executable(
@@ -117,9 +118,13 @@ def resolve_executable(executable, default_name):
             raise FileNotFoundError(executable)
         return str(Path(executable))
     if default_name.lower().startswith("colmap") and executable.lower() in {"colmap", "colmap.exe", "colmap.bat"}:
-        bundled = _first_existing(_bundled_colmap_candidates())
+        bundled = first_existing(_bundled_colmap_candidates())
         if bundled:
             return bundled
+    if default_name.lower().startswith("ffmpeg") and executable.lower() in {"ffmpeg", "ffmpeg.exe"}:
+        bundled_or_path = locate_ffmpeg()
+        if Path(bundled_or_path).exists():
+            return bundled_or_path
     resolved = shutil.which(executable)
     if not resolved:
         raise RuntimeError(f"{executable} was not found in PATH")
@@ -143,8 +148,19 @@ def check_pipeline_dependencies(
     colmap_exe="colmap",
     lichtfield_exe="lichtfield-studio",
     run_lichtfield=False,
+    run_lfs_densify=False,
+    lfs_densify_python=None,
+    lfs_densify_plugin=None,
 ):
     backend = normalize_backend(backend)
+    plugin_path = Path(lfs_densify_plugin) if lfs_densify_plugin else locate_densify_plugin()
+    densify_python = (lfs_densify_python or locate_densify_python()).strip()
+    python_path = Path(densify_python)
+    python_exists = (
+        python_path.exists()
+        if python_path.is_absolute() or any(sep in densify_python for sep in ["\\", "/"])
+        else bool(shutil.which(densify_python))
+    )
     checks = [
         check_executable("ffmpeg", "ffmpeg", "ffmpeg", required=True),
         check_executable("Metashape", metashape_exe, "metashape.exe", required=backend == METASHAPE_BACKEND),
@@ -155,8 +171,100 @@ def check_pipeline_dependencies(
             "lichtfield-studio",
             required=backend == COLMAP_BACKEND and run_lichtfield,
         ),
+        ExecutableCheck(
+            name="LichtFeld densification plugin",
+            requested=str(plugin_path),
+            required=run_lfs_densify,
+            ok=(plugin_path / "densify.py").exists() if run_lfs_densify else True,
+            resolved=str(plugin_path) if (plugin_path / "densify.py").exists() else "",
+            message="Not required" if not run_lfs_densify else "Run INSTALL_LFS_DENSIFY.bat first",
+        ),
+        ExecutableCheck(
+            name="LichtFeld densification Python",
+            requested=densify_python,
+            required=run_lfs_densify,
+            ok=python_exists if run_lfs_densify else True,
+            resolved=str(python_path) if python_path.exists() else shutil.which(densify_python) or "",
+            message="Not required" if not run_lfs_densify else "Run INSTALL_LFS_DENSIFY.bat to create .venv-densify",
+        ),
     ]
+    if run_lfs_densify and python_exists:
+        checks.append(check_lfs_densify_imports(densify_python))
+        if (plugin_path / "densify.py").exists():
+            checks.append(check_lfs_densify_runner(densify_python, plugin_path))
     return checks
+
+
+def check_lfs_densify_imports(python_exe):
+    code = "import torch, pycolmap, PIL, scipy, tqdm, einops, rich, open3d; print('ok')"
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", code],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:
+        return ExecutableCheck(
+            name="LichtFeld densification dependencies",
+            requested=python_exe,
+            required=True,
+            ok=False,
+            message=str(exc),
+        )
+    return ExecutableCheck(
+        name="LichtFeld densification dependencies",
+        requested=python_exe,
+        required=True,
+        ok=result.returncode == 0,
+        resolved=python_exe if result.returncode == 0 else "",
+        message=(result.stderr or result.stdout or "Import check failed").strip() if result.returncode != 0 else "",
+    )
+
+
+def check_lfs_densify_runner(python_exe, plugin_path):
+    runner = first_existing([
+        internal_root() / "scripts" / "run_lichtfeld_densify_standalone.py",
+        _project_root() / "scripts" / "run_lichtfeld_densify_standalone.py",
+    ])
+    if not runner:
+        return ExecutableCheck(
+            name="LichtFeld densification runner",
+            requested=str(plugin_path),
+            required=True,
+            ok=False,
+            message="run_lichtfeld_densify_standalone.py was not found",
+        )
+    try:
+        result = subprocess.run(
+            [python_exe, runner, "--plugin-dir", str(plugin_path), "--help"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:
+        return ExecutableCheck(
+            name="LichtFeld densification runner",
+            requested=str(plugin_path),
+            required=True,
+            ok=False,
+            message=str(exc),
+        )
+    ok = result.returncode == 0 and "--scene_root" in result.stdout and "--roma_setting" in result.stdout
+    return ExecutableCheck(
+        name="LichtFeld densification runner",
+        requested=str(plugin_path),
+        required=True,
+        ok=ok,
+        resolved=runner if ok else "",
+        message=(result.stderr or result.stdout or "Runner check failed").strip() if not ok else "",
+    )
 
 
 def format_dependency_report(checks):

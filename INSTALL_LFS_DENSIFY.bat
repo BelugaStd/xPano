@@ -1,0 +1,3 @@
+@echo off
+cd /d "%~dp0"
+powershell -ExecutionPolicy Bypass -File "%~dp0scripts\install_lfs_densify.ps1" %*

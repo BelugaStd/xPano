@@ -8,14 +8,15 @@ import sys
 import threading
 import queue
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from scripts.colmap_backend import ColmapBackendConfig, build_colmap_plan, find_sparse_model_path, run_colmap_plan
+from scripts.colmap_backend import COLMAP_DENSITY_PRESETS, colmap_config_for_density_preset, build_colmap_plan, find_sparse_model_path, publish_colmap_output, run_colmap_plan
+from scripts.colmap_dense_merge import merge_dense_ply_into_colmap_points
 from scripts.dependency_checks import (
     check_pipeline_dependencies,
     format_dependency_report,
@@ -24,7 +25,9 @@ from scripts.dependency_checks import (
     resolve_executable,
 )
 from scripts.lichtfield_cli import LichtfieldStudioConfig, run_lichtfield_command
+from scripts.lichtfeld_densify import LichtfeldDensifyConfig, locate_densify_plugin, locate_densify_python, run_densify_command
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
+from scripts.runtime_paths import first_existing, internal_root, locate_ffmpeg
 from scripts.verify_xpano_output import verify_output
 from scripts.xpano_tracks import build_manifest, load_manifest, validate_manifest
 
@@ -67,10 +70,18 @@ class MultiTrackJobConfig:
     backend: str = METASHAPE_BACKEND
     manifest_path: Path = None
     colmap_exe: str = "colmap"
+    colmap_density_preset: str = "stable"
+    colmap_use_gpu: bool = False
     run_lichtfield: bool = False
     lichtfield_exe: str = "lichtfield-studio"
     lichtfield_point_count: int = 0
     lichtfield_bilateral_grid: int = 0
+    run_lfs_densify: bool = False
+    lfs_densify_python: str = None
+    lfs_densify_plugin: Path = None
+    lfs_densify_roma: str = "fast"
+    lfs_densify_num_refs: float = 8.0
+    lfs_densify_max_points: int = 0
 
 
 def material_tracks_to_job_config(
@@ -82,10 +93,18 @@ def material_tracks_to_job_config(
     overwrite_generated=True,
     backend=METASHAPE_BACKEND,
     colmap_exe="colmap",
+    colmap_density_preset="stable",
+    colmap_use_gpu=False,
     run_lichtfield=False,
     lichtfield_exe="lichtfield-studio",
     lichtfield_point_count=0,
     lichtfield_bilateral_grid=0,
+    run_lfs_densify=False,
+    lfs_densify_python=None,
+    lfs_densify_plugin=None,
+    lfs_densify_roma="fast",
+    lfs_densify_num_refs=8.0,
+    lfs_densify_max_points=0,
 ):
     panorama_videos = []
     standard_photo_tracks = []
@@ -115,10 +134,46 @@ def material_tracks_to_job_config(
         overwrite_generated=overwrite_generated,
         backend=backend,
         colmap_exe=colmap_exe,
+        colmap_density_preset=colmap_density_preset,
+        colmap_use_gpu=colmap_use_gpu,
         run_lichtfield=run_lichtfield,
         lichtfield_exe=lichtfield_exe,
         lichtfield_point_count=lichtfield_point_count,
         lichtfield_bilateral_grid=lichtfield_bilateral_grid,
+        run_lfs_densify=run_lfs_densify,
+        lfs_densify_python=lfs_densify_python,
+        lfs_densify_plugin=Path(lfs_densify_plugin).resolve() if lfs_densify_plugin else None,
+        lfs_densify_roma=lfs_densify_roma,
+        lfs_densify_num_refs=lfs_densify_num_refs,
+        lfs_densify_max_points=lfs_densify_max_points,
+    )
+
+
+def run_lfs_densification_stage(job, progress_cb, log_cb):
+    log_cb("开始 LichtFeld densification 致密化")
+    dense_ply = job.output_dir / "sparse" / "0" / "points3D_dense.ply"
+    run_densify_command(
+        LichtfeldDensifyConfig(
+            python_exe=job.lfs_densify_python,
+            plugin_dir=job.lfs_densify_plugin or locate_densify_plugin(),
+            scene_root=job.output_dir,
+            images_subdir="images",
+            out_name=dense_ply.name,
+            roma_setting=job.lfs_densify_roma,
+            num_refs=job.lfs_densify_num_refs,
+            max_points=job.lfs_densify_max_points,
+        ),
+        progress_cb=lambda value: progress_cb(min(99, value)),
+        log_cb=log_cb,
+    )
+    merge_result = merge_dense_ply_into_colmap_points(
+        sparse_model_dir=job.output_dir / "sparse" / "0",
+        dense_ply_path=dense_ply,
+        replace_points_bin=True,
+    )
+    log_cb(
+        "LichtFeld dense points merged into COLMAP: "
+        f"{merge_result['original_points']} + {merge_result['dense_points']} = {merge_result['merged_points']}"
     )
 
 
@@ -205,8 +260,10 @@ def clear_generated_outputs(output_dir: Path, log_cb, preserve_paths=None):
 def write_run_summary(job: JobConfig):
     backend = normalize_backend(getattr(job, "backend", METASHAPE_BACKEND))
     if backend == COLMAP_BACKEND:
-        image_dir = job.output_dir / "colmap" / "colmap_images"
-        sparse_dir = find_sparse_model_path(job.output_dir / "colmap" / "sparse")
+        image_dir = job.output_dir / "images"
+        sparse_dir = job.output_dir / "sparse" / "0"
+        if not sparse_dir.exists():
+            sparse_dir = find_sparse_model_path(job.output_dir / "colmap" / "sparse")
         export_verification = {
             "backend": backend,
             "image_dir": str(image_dir),
@@ -247,10 +304,17 @@ def write_run_summary(job: JobConfig):
         "export_verification": export_verification,
         "frames_jpg": len(list(frames_dir.rglob("*.jpg"))) if frames_dir.exists() else 0,
         "cubemap_images": len(list(image_dir.glob("*.jpg"))) if image_dir.exists() and backend == METASHAPE_BACKEND else 0,
-        "colmap_input_images": len(list(image_dir.glob("*.jpg"))) if image_dir.exists() and backend == COLMAP_BACKEND else 0,
+        "colmap_input_images": len(list(image_dir.rglob("*.jpg"))) if image_dir.exists() and backend == COLMAP_BACKEND else 0,
         "colmap_bins": {
             name: (sparse_dir / name).stat().st_size if (sparse_dir / name).exists() else 0
             for name in ["cameras.bin", "images.bin", "points3D.bin"]
+        },
+        "lfs_densification": {
+            "enabled": bool(getattr(job, "run_lfs_densify", False)),
+            "output": str(sparse_dir / "points3D_dense.ply"),
+            "exists": (sparse_dir / "points3D_dense.ply").exists(),
+            "roma": getattr(job, "lfs_densify_roma", ""),
+            "max_points": getattr(job, "lfs_densify_max_points", 0),
         },
         "project": str(job.output_dir / "work" / "xpano.psx"),
         "alignment_summary": str(job.output_dir / "xpano_alignment_summary.txt"),
@@ -290,21 +354,25 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
     if backend == COLMAP_BACKEND:
         log_cb("开始 COLMAP 自动处理")
         progress_cb(35)
+        colmap_config = colmap_config_for_density_preset(job.colmap_density_preset, colmap_exe=job.colmap_exe)
+        if job.colmap_use_gpu:
+            colmap_config = replace(colmap_config, use_gpu=True)
         plan = build_colmap_plan(
             load_manifest(manifest_path),
             output_dir=job.output_dir / "colmap",
-            config=ColmapBackendConfig(colmap_exe=job.colmap_exe),
+            config=colmap_config,
         )
         result = run_colmap_plan(plan, progress_cb=lambda value: progress_cb(min(95, value)), log_cb=log_cb)
+        final_result = publish_colmap_output(plan, job.output_dir)
         if job.run_lichtfield:
             log_cb("开始 LICHT Field Studio 后处理")
             progress_cb(95)
-            sparse_model_path = Path(result.get("sparse_model_path") or find_sparse_model_path(plan.sparse_dir))
+            sparse_model_path = Path(final_result.get("sparse_model_path") or result.get("sparse_model_path") or find_sparse_model_path(plan.sparse_dir))
             run_lichtfield_command(
                 LichtfieldStudioConfig(
                     executable=job.lichtfield_exe,
                     input_colmap=sparse_model_path,
-                    image_dir=plan.image_dir,
+                    image_dir=Path(final_result.get("image_dir", plan.image_dir)),
                     output_dir=job.output_dir / "lichtfield",
                     point_count=job.lichtfield_point_count,
                     bilateral_grid=job.lichtfield_bilateral_grid,
@@ -312,13 +380,20 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
                 progress_cb=lambda value: progress_cb(95 + int(4 * value / 100)),
                 log_cb=log_cb,
             )
+        if job.run_lfs_densify:
+            run_lfs_densification_stage(job, progress_cb, log_cb)
         write_run_summary(job)
         progress_cb(100)
         log_cb("完成")
         return
 
     log_cb("开始 Metashape 自动处理")
-    script = Path(__file__).parent / "scripts" / "metashape_pipeline.py"
+    script = first_existing([
+        internal_root() / "scripts" / "metashape_pipeline.py",
+        Path(__file__).parent / "scripts" / "metashape_pipeline.py",
+    ])
+    if not script:
+        raise FileNotFoundError("metashape_pipeline.py")
     cmd = [
         job.metashape_exe,
         "-r",
@@ -359,6 +434,8 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
     rc = proc.wait()
     if rc != 0:
         raise RuntimeError(f"Metashape 处理失败，返回码 {rc}")
+    if job.run_lfs_densify:
+        run_lfs_densification_stage(job, progress_cb, log_cb)
     write_run_summary(job)
     progress_cb(100)
     log_cb("完成")
@@ -398,9 +475,17 @@ class App:
         self.colmap_var = tk.StringVar(value=locate_colmap())
         self.lichtfield_var = tk.StringVar(value=locate_lichtfield())
         self.backend_var = tk.StringVar(value=METASHAPE_BACKEND)
+        self.colmap_density_var = tk.StringVar(value="stable")
+        self.colmap_use_gpu_var = tk.BooleanVar(value=False)
         self.run_lichtfield_var = tk.BooleanVar(value=False)
         self.licht_point_count_var = tk.StringVar(value="0")
         self.licht_grid_var = tk.StringVar(value="0")
+        self.run_lfs_densify_var = tk.BooleanVar(value=False)
+        self.lfs_densify_python_var = tk.StringVar(value=locate_densify_python())
+        self.lfs_densify_plugin_var = tk.StringVar(value=str(locate_densify_plugin()))
+        self.lfs_densify_roma_var = tk.StringVar(value="fast")
+        self.lfs_densify_num_refs_var = tk.StringVar(value="8")
+        self.lfs_densify_max_points_var = tk.StringVar(value="0")
         self.status_var = tk.StringVar(value="待机")
         self.track_count_var = tk.StringVar(value="0 个素材轨")
         self.advanced_visible = tk.BooleanVar(value=False)
@@ -496,11 +581,21 @@ class App:
         ttk.Label(self.advanced_frame, text="COLMAP").grid(row=1, column=0, sticky="w", padx=10, pady=4)
         ttk.Entry(self.advanced_frame, textvariable=self.colmap_var).grid(row=1, column=1, sticky="ew", padx=6, pady=4)
         ttk.Button(self.advanced_frame, text="… 定位", command=self.pick_colmap).grid(row=1, column=2, padx=(0, 10), pady=4)
-        ttk.Label(self.advanced_frame, text="LICHT").grid(row=2, column=0, sticky="w", padx=10, pady=4)
-        ttk.Entry(self.advanced_frame, textvariable=self.lichtfield_var).grid(row=2, column=1, sticky="ew", padx=6, pady=4)
-        ttk.Button(self.advanced_frame, text="… 定位", command=self.pick_lichtfield).grid(row=2, column=2, padx=(0, 10), pady=4)
+        ttk.Label(self.advanced_frame, text="COLMAP density").grid(row=2, column=0, sticky="w", padx=10, pady=4)
+        self.colmap_density_combo = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.colmap_density_var,
+            values=COLMAP_DENSITY_PRESETS,
+            state="readonly",
+        )
+        self.colmap_density_combo.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(6, 10), pady=4)
+        self.colmap_gpu_check = ttk.Checkbutton(self.advanced_frame, text="COLMAP CUDA/GPU", variable=self.colmap_use_gpu_var)
+        self.colmap_gpu_check.grid(row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 4))
+        ttk.Label(self.advanced_frame, text="LICHT").grid(row=4, column=0, sticky="w", padx=10, pady=4)
+        ttk.Entry(self.advanced_frame, textvariable=self.lichtfield_var).grid(row=4, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Button(self.advanced_frame, text="… 定位", command=self.pick_lichtfield).grid(row=4, column=2, padx=(0, 10), pady=4)
         self.licht_check = ttk.Checkbutton(self.advanced_frame, text="运行 LICHT Field Studio 后处理", variable=self.run_lichtfield_var, command=self._sync_backend_mode)
-        self.licht_check.grid(row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 4))
+        self.licht_check.grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 4))
         self.licht_frame = ttk.Frame(self.advanced_frame)
         self.licht_frame.columnconfigure(1, weight=1)
         ttk.Label(self.licht_frame, text="点数").grid(row=0, column=0, sticky="w", padx=10, pady=4)
@@ -514,6 +609,21 @@ class App:
         ttk.Label(progress_box, textvariable=self.status_var).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
         self.pb = ttk.Progressbar(progress_box, orient="horizontal", mode="determinate", maximum=100)
         self.pb.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+        self.lfs_densify_check = ttk.Checkbutton(self.advanced_frame, text="Run LichtFeld densification", variable=self.run_lfs_densify_var)
+        self.lfs_densify_check.grid(row=7, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 4))
+        ttk.Label(self.advanced_frame, text="RoMa").grid(row=8, column=0, sticky="w", padx=10, pady=4)
+        self.lfs_densify_roma_combo = ttk.Combobox(
+            self.advanced_frame,
+            textvariable=self.lfs_densify_roma_var,
+            values=("precise", "high", "base", "fast", "turbo"),
+            state="readonly",
+        )
+        self.lfs_densify_roma_combo.grid(row=8, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Label(self.advanced_frame, text="Max dense points").grid(row=9, column=0, sticky="w", padx=10, pady=(4, 10))
+        ttk.Entry(self.advanced_frame, textvariable=self.lfs_densify_max_points_var, width=12).grid(row=9, column=1, sticky="w", padx=6, pady=(4, 10))
+        ttk.Label(self.advanced_frame, text="Dense references").grid(row=10, column=0, sticky="w", padx=10, pady=(4, 10))
+        ttk.Entry(self.advanced_frame, textvariable=self.lfs_densify_num_refs_var, width=12).grid(row=10, column=1, sticky="w", padx=6, pady=(4, 10))
+
         self.stage_bars = {}
         for row, (key, label) in enumerate([("extract", "抽帧"), ("align", "重建"), ("export", "后处理")], start=2):
             ttk.Label(progress_box, text=label).grid(row=row, column=0, sticky="w", padx=10, pady=3)
@@ -568,8 +678,12 @@ class App:
         is_colmap = self.backend_var.get() == COLMAP_BACKEND
         if hasattr(self, "licht_check"):
             self.licht_check.configure(state="normal" if is_colmap else "disabled")
+        if hasattr(self, "colmap_density_combo"):
+            self.colmap_density_combo.configure(state="readonly" if is_colmap else "disabled")
+        if hasattr(self, "colmap_gpu_check"):
+            self.colmap_gpu_check.configure(state="normal" if is_colmap else "disabled")
         if is_colmap and self.run_lichtfield_var.get():
-            self.licht_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+            self.licht_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 4))
         else:
             self.licht_frame.grid_remove()
 
@@ -646,6 +760,9 @@ class App:
             colmap_exe=self.colmap_var.get(),
             lichtfield_exe=self.lichtfield_var.get(),
             run_lichtfield=self.run_lichtfield_var.get(),
+            run_lfs_densify=self.run_lfs_densify_var.get(),
+            lfs_densify_python=self.lfs_densify_python_var.get(),
+            lfs_densify_plugin=self.lfs_densify_plugin_var.get(),
         )
         report = format_dependency_report(checks)
         if hasattr(self, "log"):
@@ -667,6 +784,11 @@ class App:
         licht_grid,
     ):
         backend = normalize_backend(self.backend_var.get())
+        def control_value(name, default):
+            var = getattr(self, name, None)
+            return var.get() if var is not None else default
+
+        lfs_plugin = control_value("lfs_densify_plugin_var", "")
         return material_tracks_to_job_config(
             tracks=self.material_tracks,
             output_dir=Path(self.output_var.get()),
@@ -675,10 +797,18 @@ class App:
             metashape_exe=metashape_exe,
             backend=backend,
             colmap_exe=colmap_exe,
+            colmap_density_preset=self.colmap_density_var.get(),
+            colmap_use_gpu=control_value("colmap_use_gpu_var", False),
             run_lichtfield=backend == COLMAP_BACKEND and self.run_lichtfield_var.get(),
             lichtfield_exe=lichtfield_exe,
             lichtfield_point_count=licht_point_count,
             lichtfield_bilateral_grid=licht_grid,
+            run_lfs_densify=control_value("run_lfs_densify_var", False),
+            lfs_densify_python=control_value("lfs_densify_python_var", locate_densify_python()),
+            lfs_densify_plugin=Path(lfs_plugin) if str(lfs_plugin).strip() else None,
+            lfs_densify_roma=control_value("lfs_densify_roma_var", "fast"),
+            lfs_densify_num_refs=float(str(control_value("lfs_densify_num_refs_var", "8")).strip() or "8"),
+            lfs_densify_max_points=int(str(control_value("lfs_densify_max_points_var", "0")).strip() or "0"),
         )
 
     def start(self):
@@ -711,6 +841,21 @@ class App:
             messagebox.showerror("参数错误", "LICHT 点数和双边网格必须是大于等于 0 的整数")
             return
 
+        try:
+            lfs_densify_max_points = int(self.lfs_densify_max_points_var.get().strip() or "0")
+            if lfs_densify_max_points < 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Parameter error", "LichtFeld densification max points must be >= 0")
+            return
+        try:
+            lfs_densify_num_refs = float(self.lfs_densify_num_refs_var.get().strip() or "8")
+            if lfs_densify_num_refs <= 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Parameter error", "LichtFeld densification references must be > 0")
+            return
+
         output_dir = Path(self.output_var.get())
         backend = normalize_backend(self.backend_var.get())
         metashape_exe = self.metashape_var.get().strip() or "metashape.exe"
@@ -731,7 +876,8 @@ class App:
         except Exception as exc:
             messagebox.showerror("程序不可用", str(exc))
             return
-        if not shutil.which("ffmpeg"):
+        ffmpeg_path = locate_ffmpeg()
+        if not Path(ffmpeg_path).exists() and not shutil.which("ffmpeg"):
             messagebox.showerror("ffmpeg 不可用", "没有在 PATH 中找到 ffmpeg，请先安装 ffmpeg 并加入 PATH。")
             return
         stale = [path for path in generated_output_paths(output_dir) if path.exists()]

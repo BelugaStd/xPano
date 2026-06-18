@@ -1,10 +1,12 @@
 import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app import App, JobConfig, MaterialTrack, MultiTrackJobConfig, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
+from scripts.colmap_backend import read_colmap_points3d, write_colmap_points3d
 
 
 class FakeProcess:
@@ -73,6 +75,7 @@ class AppPipelineTests(unittest.TestCase):
             app.material_tracks = [MaterialTrack(track_type="panorama_video", label="pano", paths=[pano])]
             app.output_var = FakeVar(str(output))
             app.backend_var = FakeVar("colmap")
+            app.colmap_density_var = FakeVar("high-density")
             app.run_lichtfield_var = FakeVar(True)
 
             job = App._build_job_from_controls(
@@ -88,6 +91,7 @@ class AppPipelineTests(unittest.TestCase):
 
             self.assertEqual(job.backend, "colmap")
             self.assertEqual(job.colmap_exe, "colmap.exe")
+            self.assertEqual(job.colmap_density_preset, "high-density")
             self.assertTrue(job.run_lichtfield)
             self.assertEqual(job.lichtfield_exe, "lichtfield-studio.exe")
             self.assertEqual(job.lichtfield_point_count, 120000)
@@ -166,6 +170,7 @@ class AppPipelineTests(unittest.TestCase):
                 metashape_exe="metashape.exe",
                 backend="colmap",
                 manifest_path=manifest_path,
+                colmap_density_preset="high-density",
             )
 
             fake_plan = Mock()
@@ -175,11 +180,14 @@ class AppPipelineTests(unittest.TestCase):
             with patch("app.subprocess.Popen") as popen, \
                 patch("app.build_colmap_plan", return_value=fake_plan) as build_colmap_plan, \
                 patch("app.run_colmap_plan") as run_colmap_plan, \
+                patch("app.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
                 patch("app.write_run_summary"):
                 run_multi_track_pipeline(job, progress, Mock(), log)
 
             popen.assert_not_called()
             build_colmap_plan.assert_called_once()
+            self.assertEqual(build_colmap_plan.call_args.kwargs["config"].max_num_features, 8192)
+            self.assertTrue(build_colmap_plan.call_args.kwargs["config"].guided_matching)
             run_colmap_plan.assert_called_once()
             progress.assert_any_call(35)
             progress.assert_any_call(100)
@@ -227,14 +235,16 @@ class AppPipelineTests(unittest.TestCase):
                 lichtfield_bilateral_grid=16,
             )
 
-            sparse_model = output / "colmap" / "sparse" / "0"
+            sparse_model = output / "sparse" / "0"
             image_dir = output / "colmap" / "colmap_images"
+            final_image_dir = output / "images"
             fake_plan = Mock()
             fake_plan.output_dir = output / "colmap"
             fake_plan.sparse_dir = output / "colmap" / "sparse"
             fake_plan.image_dir = image_dir
             with patch("app.build_colmap_plan", return_value=fake_plan), \
-                patch("app.run_colmap_plan", return_value={"sparse_model_path": str(sparse_model)}), \
+                patch("app.run_colmap_plan", return_value={"sparse_model_path": str(output / "colmap" / "sparse" / "0")}), \
+                patch("app.publish_colmap_output", return_value={"image_dir": str(final_image_dir), "sparse_model_path": str(sparse_model)}), \
                 patch("app.run_lichtfield_command") as run_lichtfield_command, \
                 patch("app.write_run_summary"):
                 run_multi_track_pipeline(job, Mock(), Mock(), Mock())
@@ -242,10 +252,87 @@ class AppPipelineTests(unittest.TestCase):
             config = run_lichtfield_command.call_args.args[0]
             self.assertEqual(config.executable, "lichtfield-studio.exe")
             self.assertEqual(config.input_colmap, sparse_model)
-            self.assertEqual(config.image_dir, image_dir)
+            self.assertEqual(config.image_dir, final_image_dir)
             self.assertEqual(config.output_dir, output / "lichtfield")
             self.assertEqual(config.point_count, 120000)
             self.assertEqual(config.bilateral_grid, 16)
+
+    def test_colmap_backend_can_run_lfs_densification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            left = output / "left.jpg"
+            right = output / "right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                """{
+                  "schema_version": 1,
+                  "workflow": "xpano_multi_track",
+                  "tracks": [
+                    {
+                      "track_id": "track_001",
+                      "track_type": "panorama_video",
+                      "metashape_mode": "dual_fisheye_station",
+                      "export_mode": "cubemap",
+                      "frames": [
+                        {"left": "%s", "right": "%s"}
+                      ]
+                    }
+                  ]
+                }""" % (left.as_posix(), right.as_posix()),
+                encoding="utf-8",
+            )
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                seconds_per_frame=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+                backend="colmap",
+                manifest_path=manifest_path,
+                run_lfs_densify=True,
+                lfs_densify_python="python.exe",
+                lfs_densify_plugin=Path("plugin"),
+                lfs_densify_roma="fast",
+                lfs_densify_max_points=50000,
+            )
+
+            fake_plan = Mock()
+            fake_plan.output_dir = output / "colmap"
+            fake_plan.sparse_dir = output / "colmap" / "sparse"
+            fake_plan.image_dir = output / "colmap" / "colmap_images"
+            sparse_zero = output / "sparse" / "0"
+
+            def fake_densify(config, **kwargs):
+                sparse_zero.mkdir(parents=True, exist_ok=True)
+                write_colmap_points3d(sparse_zero / "points3D.bin", [])
+                (sparse_zero / config.out_name).write_bytes(
+                    b"ply\nformat binary_little_endian 1.0\nelement vertex 1\n"
+                    b"property float x\nproperty float y\nproperty float z\n"
+                    b"property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+                    + struct.pack("<fffBBB", 1.0, 2.0, 3.0, 4, 5, 6)
+                )
+
+            with patch("app.build_colmap_plan", return_value=fake_plan), \
+                patch("app.run_colmap_plan", return_value={"sparse_model_path": str(output / "colmap" / "sparse" / "0")}), \
+                patch("app.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
+                patch("app.run_densify_command", side_effect=fake_densify) as run_densify_command, \
+                patch("app.write_run_summary"):
+                run_multi_track_pipeline(job, Mock(), Mock(), Mock())
+
+            config = run_densify_command.call_args.args[0]
+            self.assertEqual(config.scene_root, output)
+            self.assertEqual(config.images_subdir, "images")
+            self.assertEqual(config.out_name, "points3D_dense.ply")
+            self.assertEqual(config.plugin_dir, Path("plugin"))
+            self.assertEqual(config.python_exe, "python.exe")
+            self.assertEqual(config.roma_setting, "fast")
+            self.assertEqual(config.max_points, 50000)
+            self.assertEqual(read_colmap_points3d(sparse_zero), [{"id": 1, "xyz": (1.0, 2.0, 3.0), "rgb": (4, 5, 6), "error": 1.0, "track": []}])
 
     def test_overwrite_keeps_current_manifest_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,9 +377,9 @@ class AppPipelineTests(unittest.TestCase):
                 }""",
                 encoding="utf-8",
             )
-            image_dir = output / "colmap" / "colmap_images"
-            sparse_dir = output / "colmap" / "sparse" / "0"
-            image_dir.mkdir(parents=True)
+            image_dir = output / "images"
+            sparse_dir = output / "sparse" / "0"
+            image_dir.mkdir()
             sparse_dir.mkdir(parents=True)
             (image_dir / "000001_left.jpg").write_bytes(b"left")
             for name in ["cameras.bin", "images.bin", "points3D.bin"]:

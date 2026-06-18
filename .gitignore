@@ -7,6 +7,7 @@ __pycache__/
 
 # Local virtual environments
 .venv/
+.venv-densify/
 venv/
 env/
 
@@ -14,17 +15,22 @@ env/
 .learnings/
 
 # xPano generated outputs
+build/
+dist/
 work/
 frames/
 sparse/
+_run*/
 *_output/
 *_outputs/
 _acceptance*/
+_compare*/
 _tracks*/
 _tmp*/
 xpano_alignment_summary.txt
 xpano_run_summary.json
 xpano_gui_error.log
+*.log
 *.psx
 *.psx.files/
 *.psz
@@ -40,6 +46,8 @@ download/
 !tools/colmap/
 tools/colmap/*
 !tools/colmap/README.md
+tools/lichtfeld-densification-plugin/
+tools/torch-cache/
 
 # Large raw media and reconstruction artifacts
 *.osv

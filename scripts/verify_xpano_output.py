@@ -1,8 +1,12 @@
 import argparse
 import json
 import struct
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.colmap_backend import find_sparse_model_path
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
 
 
@@ -89,29 +93,28 @@ def verify_colmap_backend_output(
     output_dir = Path(output_dir)
     colmap_dir = output_dir / "colmap"
     database_path = colmap_dir / "database.db"
-    image_dir = colmap_dir / "colmap_images"
-    sparse_dir = colmap_dir / "sparse"
-    sparse_zero = sparse_dir / "0"
+    image_dir = output_dir / "images"
+    sparse_dir = output_dir / "sparse"
+    sparse_model_path = sparse_dir / "0"
 
-    if not database_path.exists():
-        raise RuntimeError(f"Missing COLMAP database: {database_path}")
     if not image_dir.exists():
         raise RuntimeError(f"Missing COLMAP image directory: {image_dir}")
-    if not sparse_zero.exists():
-        raise RuntimeError(f"Missing COLMAP sparse/0 directory: {sparse_zero}")
+    if not sparse_model_path.exists():
+        sparse_model_path = find_sparse_model_path(sparse_dir)
 
-    image_files = [path for path in image_dir.iterdir() if path.is_file()]
+    image_files = [path for path in image_dir.rglob("*") if path.is_file()]
     sparse_models = [path for path in sparse_dir.iterdir() if path.is_dir()] if sparse_dir.exists() else []
     result = {
         "backend": COLMAP_BACKEND,
         "output_dir": str(output_dir),
-        "database_path": str(database_path),
+        "database_path": str(database_path) if database_path.exists() else "",
         "image_dir": str(image_dir),
         "colmap_input_images": len(image_files),
         "sparse_models": [path.name for path in sparse_models],
-        "colmap_cameras": read_colmap_count(sparse_zero / "cameras.bin"),
-        "colmap_images": read_colmap_count(sparse_zero / "images.bin"),
-        "colmap_points": read_colmap_count(sparse_zero / "points3D.bin"),
+        "sparse_model_path": str(sparse_model_path),
+        "colmap_cameras": read_colmap_count(sparse_model_path / "cameras.bin"),
+        "colmap_images": read_colmap_count(sparse_model_path / "images.bin"),
+        "colmap_points": read_colmap_count(sparse_model_path / "points3D.bin"),
     }
 
     failures = []

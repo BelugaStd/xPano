@@ -14,6 +14,8 @@ from scripts.dependency_checks import (
     resolve_executable,
 )
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, SUPPORTED_BACKENDS, normalize_backend
+from scripts.colmap_backend import COLMAP_DENSITY_PRESETS
+from scripts.lichtfeld_densify import locate_densify_python
 from scripts.xpano_tracks import load_manifest, validate_manifest
 
 
@@ -45,11 +47,21 @@ def validate_run_args(seconds_per_frame, max_frames):
         raise ValueError("--max-frames must be greater than or equal to 0")
 
 
+def configure_console_output():
+    for stream in [sys.stdout, sys.stderr]:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main():
+    configure_console_output()
     parser = argparse.ArgumentParser(description="Run xPano multi-material-track workflow")
     parser.add_argument("--output")
     parser.add_argument("--metashape", default=locate_metashape())
     parser.add_argument("--colmap", default=locate_colmap())
+    parser.add_argument("--colmap-density-preset", default="stable", choices=COLMAP_DENSITY_PRESETS)
+    parser.add_argument("--colmap-use-gpu", action="store_true", help="Enable COLMAP CUDA/GPU feature extraction and matching.")
     parser.add_argument("--backend", default=METASHAPE_BACKEND, choices=sorted(SUPPORTED_BACKENDS))
     parser.add_argument("--check-env", action="store_true", help="Print dependency diagnostics and exit.")
     parser.add_argument("--strict", action="store_true", help="With --check-env, fail if required dependencies are missing.")
@@ -57,6 +69,12 @@ def main():
     parser.add_argument("--lichtfield", default=locate_lichtfield())
     parser.add_argument("--lichtfield-point-count", type=int, default=0)
     parser.add_argument("--lichtfield-bilateral-grid", type=int, default=0)
+    parser.add_argument("--run-lfs-densify", action="store_true")
+    parser.add_argument("--lfs-densify-python", default=locate_densify_python())
+    parser.add_argument("--lfs-densify-plugin")
+    parser.add_argument("--lfs-densify-roma", default="fast", choices=["precise", "high", "base", "fast", "turbo"])
+    parser.add_argument("--lfs-densify-num-refs", type=float, default=8.0)
+    parser.add_argument("--lfs-densify-max-points", type=int, default=0)
     parser.add_argument("--seconds-per-frame", type=float, default=1.0)
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--manifest")
@@ -75,6 +93,9 @@ def main():
             colmap_exe=args.colmap,
             lichtfield_exe=args.lichtfield,
             run_lichtfield=run_lichtfield,
+            run_lfs_densify=args.run_lfs_densify,
+            lfs_densify_python=args.lfs_densify_python,
+            lfs_densify_plugin=args.lfs_densify_plugin,
         )
         print(format_dependency_report(checks), flush=True)
         if args.strict:
@@ -87,6 +108,10 @@ def main():
         raise ValueError("--lichtfield-point-count must be greater than or equal to 0")
     if args.lichtfield_bilateral_grid < 0:
         raise ValueError("--lichtfield-bilateral-grid must be greater than or equal to 0")
+    if args.lfs_densify_max_points < 0:
+        raise ValueError("--lfs-densify-max-points must be greater than or equal to 0")
+    if args.lfs_densify_num_refs <= 0:
+        raise ValueError("--lfs-densify-num-refs must be greater than 0")
 
     if args.manifest:
         manifest_path = Path(args.manifest).resolve()
@@ -100,6 +125,7 @@ def main():
         metashape_exe = resolve_executable(args.metashape, "metashape.exe")
     colmap_exe = resolve_executable(args.colmap, "colmap") if backend == COLMAP_BACKEND else args.colmap
     lichtfield_exe = resolve_executable(args.lichtfield, "lichtfield-studio") if run_lichtfield else args.lichtfield
+    lfs_densify_plugin = Path(args.lfs_densify_plugin).resolve() if args.lfs_densify_plugin else None
 
     if manifest_path:
         job = MultiTrackJobConfig(
@@ -114,10 +140,18 @@ def main():
             manifest_path=manifest_path,
             backend=backend,
             colmap_exe=colmap_exe,
+            colmap_density_preset=args.colmap_density_preset,
+            colmap_use_gpu=args.colmap_use_gpu,
             run_lichtfield=run_lichtfield,
             lichtfield_exe=lichtfield_exe,
             lichtfield_point_count=args.lichtfield_point_count,
             lichtfield_bilateral_grid=args.lichtfield_bilateral_grid,
+            run_lfs_densify=args.run_lfs_densify,
+            lfs_densify_python=args.lfs_densify_python,
+            lfs_densify_plugin=lfs_densify_plugin,
+            lfs_densify_roma=args.lfs_densify_roma,
+            lfs_densify_num_refs=args.lfs_densify_num_refs,
+            lfs_densify_max_points=args.lfs_densify_max_points,
         )
     else:
         tracks = build_material_tracks(args.pano, parse_track_args(args.standard_track), parse_track_args(args.aerial_track))
@@ -130,10 +164,18 @@ def main():
             overwrite_generated=not args.keep_generated,
             backend=backend,
             colmap_exe=colmap_exe,
+            colmap_density_preset=args.colmap_density_preset,
+            colmap_use_gpu=args.colmap_use_gpu,
             run_lichtfield=run_lichtfield,
             lichtfield_exe=lichtfield_exe,
             lichtfield_point_count=args.lichtfield_point_count,
             lichtfield_bilateral_grid=args.lichtfield_bilateral_grid,
+            run_lfs_densify=args.run_lfs_densify,
+            lfs_densify_python=args.lfs_densify_python,
+            lfs_densify_plugin=lfs_densify_plugin,
+            lfs_densify_roma=args.lfs_densify_roma,
+            lfs_densify_num_refs=args.lfs_densify_num_refs,
+            lfs_densify_max_points=args.lfs_densify_max_points,
         )
 
     def progress(value):

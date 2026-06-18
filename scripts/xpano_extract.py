@@ -7,6 +7,8 @@ from pathlib import Path
 
 import piexif
 
+from scripts.runtime_paths import locate_ffmpeg, locate_ffprobe
+
 
 SUPPORTED_EXTENSIONS = {".insv", ".osv", ".mp4"}
 
@@ -36,7 +38,7 @@ def _probe_duration_seconds(input_path: Path, log_cb=None):
     try:
         result = subprocess.run(
             [
-                "ffprobe",
+                locate_ffprobe(),
                 "-v",
                 "error",
                 "-show_entries",
@@ -192,7 +194,7 @@ def _extract_one(args):
     base_name = task["clean_name"]
     if task["type"] == "insta_split":
         cmd = [
-            "ffmpeg", "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
+            locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
             "-i", str(left), "-i", str(right),
             "-map", "0:0", "-vf", f"fps={fps}",
         ]
@@ -209,7 +211,7 @@ def _extract_one(args):
         ])
     else:
         cmd = [
-            "ffmpeg", "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
+            locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
             "-i", str(left),
             "-map", "0:0", "-vf", f"fps={fps}",
         ]
