@@ -35,6 +35,21 @@ class RunXpanoTracksJobTests(unittest.TestCase):
         self.assertIn("COLMAP", output)
         self.assertIn("LICHT Field Studio", output)
 
+    def test_check_env_strict_fails_for_missing_dependencies(self):
+        argv = [
+            "run_xpano_tracks_job.py",
+            "--check-env",
+            "--strict",
+            "--backend",
+            "colmap",
+        ]
+
+        with patch.object(sys, "argv", argv), \
+            patch("scripts.dependency_checks.shutil.which", return_value=None), \
+            patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "MISSING"):
+                main()
+
     def test_main_delegates_material_tracks_to_app_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
