@@ -16,6 +16,25 @@ class RunXpanoTracksJobTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--seconds-per-frame"):
             validate_run_args(seconds_per_frame=0, max_frames=0)
 
+    def test_check_env_does_not_require_output_or_run_pipeline(self):
+        argv = [
+            "run_xpano_tracks_job.py",
+            "--check-env",
+            "--backend",
+            "colmap",
+            "--run-lichtfield",
+        ]
+
+        with patch.object(sys, "argv", argv), \
+            patch("scripts.run_xpano_tracks_job.run_multi_track_pipeline") as runner, \
+            patch("builtins.print") as print_fn:
+            main()
+
+        runner.assert_not_called()
+        output = print_fn.call_args.args[0]
+        self.assertIn("COLMAP", output)
+        self.assertIn("LICHT Field Studio", output)
+
     def test_main_delegates_material_tracks_to_app_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
