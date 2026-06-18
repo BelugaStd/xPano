@@ -61,6 +61,70 @@ class ColmapBackendPlanTests(unittest.TestCase):
             image_manifest = json.loads(plan.image_manifest_path.read_text(encoding="utf-8"))
             self.assertEqual([item["side"] for item in image_manifest], ["left", "right"])
 
+    def test_colmap_plan_rebuild_clears_stale_generated_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            left = root / "frame_left.jpg"
+            right = root / "frame_right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            output = root / "out"
+            stale_image_dir = output / "colmap_images"
+            stale_sparse_dir = output / "sparse" / "0"
+            stale_image_dir.mkdir(parents=True)
+            stale_sparse_dir.mkdir(parents=True)
+            (stale_image_dir / "999999_left.jpg").write_bytes(b"stale")
+            (output / "database.db").write_bytes(b"stale-db")
+            (stale_sparse_dir / "cameras.bin").write_bytes(b"stale")
+
+            manifest = {
+                "schema_version": 1,
+                "workflow": "xpano_multi_track",
+                "tracks": [
+                    {
+                        "track_id": "track_001_osmo",
+                        "track_type": "panorama_video",
+                        "metashape_mode": "dual_fisheye_station",
+                        "export_mode": "cubemap",
+                        "frames": [{"left": str(left), "right": str(right)}],
+                    }
+                ],
+            }
+
+            plan = build_colmap_plan(manifest, output_dir=output, config=ColmapBackendConfig())
+
+            self.assertFalse((plan.image_dir / "999999_left.jpg").exists())
+            self.assertFalse((plan.sparse_dir / "0" / "cameras.bin").exists())
+            self.assertFalse(plan.database_path.exists())
+            self.assertEqual(sorted(path.name for path in plan.image_dir.glob("*.jpg")), ["000001_left.jpg", "000001_right.jpg"])
+
+    def test_colmap_plan_validates_inputs_before_clearing_old_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "out"
+            stale_image_dir = output / "colmap_images"
+            stale_image_dir.mkdir(parents=True)
+            stale_image = stale_image_dir / "999999_left.jpg"
+            stale_image.write_bytes(b"stale")
+            manifest = {
+                "schema_version": 1,
+                "workflow": "xpano_multi_track",
+                "tracks": [
+                    {
+                        "track_id": "track_001_osmo",
+                        "track_type": "panorama_video",
+                        "metashape_mode": "dual_fisheye_station",
+                        "export_mode": "cubemap",
+                        "frames": [{"left": str(root / "missing_left.jpg"), "right": str(root / "missing_right.jpg")}],
+                    }
+                ],
+            }
+
+            with self.assertRaises(FileNotFoundError):
+                build_colmap_plan(manifest, output_dir=output, config=ColmapBackendConfig())
+
+            self.assertTrue(stale_image.exists())
+
     def test_rejects_manifest_without_panorama_frames(self):
         manifest = {"schema_version": 1, "workflow": "xpano_multi_track", "tracks": []}
 
@@ -108,7 +172,7 @@ class ColmapBackendPlanTests(unittest.TestCase):
             )
 
             self.assertEqual(calls, plan.commands)
-            self.assertEqual(progress, [45, 60, 75])
+            self.assertEqual(progress, [53, 71, 90])
             self.assertTrue(any("feature_extractor" in line for line in logs))
 
     def test_fails_when_colmap_command_returns_nonzero(self):

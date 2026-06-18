@@ -262,6 +262,8 @@ class AppPipelineTests(unittest.TestCase):
             )
             (output / "images").mkdir()
             (output / "sparse").mkdir()
+            (output / "colmap").mkdir()
+            (output / "lichtfield").mkdir()
 
             clear_log = []
 
@@ -272,6 +274,8 @@ class AppPipelineTests(unittest.TestCase):
             self.assertTrue(manifest_path.exists())
             self.assertFalse((output / "images").exists())
             self.assertFalse((output / "sparse").exists())
+            self.assertFalse((output / "colmap").exists())
+            self.assertFalse((output / "lichtfield").exists())
 
     def test_colmap_summary_uses_colmap_native_output(self):
         with tempfile.TemporaryDirectory() as tmp:

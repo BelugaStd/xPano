@@ -154,7 +154,13 @@ def ensure_dir(path: Path):
 
 
 def generated_output_paths(output_dir: Path):
-    return [output_dir / "work", output_dir / "images", output_dir / "sparse"]
+    return [
+        output_dir / "work",
+        output_dir / "images",
+        output_dir / "sparse",
+        output_dir / "colmap",
+        output_dir / "lichtfield",
+    ]
 
 
 def _path_is_within(path: Path, parent: Path):
@@ -292,6 +298,7 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
         result = run_colmap_plan(plan, progress_cb=lambda value: progress_cb(min(95, value)), log_cb=log_cb)
         if job.run_lichtfield:
             log_cb("开始 LICHT Field Studio 后处理")
+            progress_cb(95)
             sparse_model_path = Path(result.get("sparse_model_path") or find_sparse_model_path(plan.sparse_dir))
             run_lichtfield_command(
                 LichtfieldStudioConfig(
@@ -302,7 +309,7 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
                     point_count=job.lichtfield_point_count,
                     bilateral_grid=job.lichtfield_bilateral_grid,
                 ),
-                progress_cb=lambda value: progress_cb(min(99, value)),
+                progress_cb=lambda value: progress_cb(95 + int(4 * value / 100)),
                 log_cb=log_cb,
             )
         write_run_summary(job)
@@ -456,7 +463,7 @@ class App:
         controls = ttk.Frame(body)
         controls.grid(row=1, column=1, sticky="nsew")
         controls.columnconfigure(0, weight=1)
-        controls.rowconfigure(5, weight=1)
+        controls.rowconfigure(6, weight=1)
 
         output_box = ttk.LabelFrame(controls, text="输出")
         output_box.grid(row=0, column=0, sticky="ew")
@@ -470,8 +477,17 @@ class App:
         for idx, (label, value) in enumerate([("Metashape", METASHAPE_BACKEND), ("COLMAP", COLMAP_BACKEND)]):
             ttk.Radiobutton(backend_box, text=label, value=value, variable=self.backend_var, command=self._sync_backend_mode).grid(row=0, column=idx, padx=10, pady=10, sticky="w")
 
+        frame_box = ttk.LabelFrame(controls, text="抽帧设置")
+        frame_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        frame_box.columnconfigure(1, weight=1)
+        ttk.Label(frame_box, text="秒/帧").grid(row=0, column=0, sticky="w", padx=10, pady=10)
+        ttk.Entry(frame_box, textvariable=self.spf_var, width=12).grid(row=0, column=1, sticky="w", padx=6, pady=10)
+        ttk.Label(frame_box, text="帧数上限").grid(row=0, column=2, sticky="w", padx=(12, 6), pady=10)
+        ttk.Entry(frame_box, textvariable=self.frames_var, width=12).grid(row=0, column=3, sticky="w", padx=(0, 6), pady=10)
+        ttk.Label(frame_box, text="留空=全部").grid(row=0, column=4, sticky="w", padx=(0, 10), pady=10)
+
         self.advanced_button = ttk.Button(controls, text="▸ 高级参数", command=self.toggle_advanced)
-        self.advanced_button.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.advanced_button.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         self.advanced_frame = ttk.LabelFrame(controls, text="高级参数")
         self.advanced_frame.columnconfigure(1, weight=1)
         ttk.Label(self.advanced_frame, text="Metashape").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
@@ -483,15 +499,8 @@ class App:
         ttk.Label(self.advanced_frame, text="LICHT").grid(row=2, column=0, sticky="w", padx=10, pady=4)
         ttk.Entry(self.advanced_frame, textvariable=self.lichtfield_var).grid(row=2, column=1, sticky="ew", padx=6, pady=4)
         ttk.Button(self.advanced_frame, text="… 定位", command=self.pick_lichtfield).grid(row=2, column=2, padx=(0, 10), pady=4)
-        ttk.Label(self.advanced_frame, text="秒/帧").grid(row=3, column=0, sticky="w", padx=10, pady=4)
-        ttk.Entry(self.advanced_frame, textvariable=self.spf_var, width=12).grid(row=3, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(self.advanced_frame, text="帧数上限").grid(row=4, column=0, sticky="w", padx=10, pady=(4, 10))
-        frame_limit = ttk.Frame(self.advanced_frame)
-        frame_limit.grid(row=4, column=1, sticky="w", padx=6, pady=(4, 10))
-        ttk.Entry(frame_limit, textvariable=self.frames_var, width=12).pack(side="left")
-        ttk.Label(frame_limit, text="留空=全部").pack(side="left", padx=(6, 0))
         self.licht_check = ttk.Checkbutton(self.advanced_frame, text="运行 LICHT Field Studio 后处理", variable=self.run_lichtfield_var, command=self._sync_backend_mode)
-        self.licht_check.grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4))
+        self.licht_check.grid(row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 4))
         self.licht_frame = ttk.Frame(self.advanced_frame)
         self.licht_frame.columnconfigure(1, weight=1)
         ttk.Label(self.licht_frame, text="点数").grid(row=0, column=0, sticky="w", padx=10, pady=4)
@@ -500,7 +509,7 @@ class App:
         ttk.Entry(self.licht_frame, textvariable=self.licht_grid_var, width=12).grid(row=1, column=1, sticky="w", padx=6, pady=(4, 10))
 
         progress_box = ttk.LabelFrame(controls, text="进度")
-        progress_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        progress_box.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         progress_box.columnconfigure(1, weight=1)
         ttk.Label(progress_box, textvariable=self.status_var).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
         self.pb = ttk.Progressbar(progress_box, orient="horizontal", mode="determinate", maximum=100)
@@ -513,7 +522,7 @@ class App:
             self.stage_bars[key] = bar
 
         action_bar = ttk.Frame(controls)
-        action_bar.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        action_bar.grid(row=7, column=0, sticky="ew", pady=(10, 0))
         self.start_button = ttk.Button(action_bar, text="▶ 开始处理", command=self.start)
         self.start_button.pack(side="right")
         ttk.Button(action_bar, text="↗ 打开输出", command=self.open_output).pack(side="right", padx=(0, 8))
@@ -522,7 +531,7 @@ class App:
         self._sync_backend_mode()
 
         log_box = ttk.LabelFrame(controls, text="运行日志")
-        log_box.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
+        log_box.grid(row=6, column=0, sticky="nsew", pady=(10, 0))
         log_box.rowconfigure(0, weight=1)
         log_box.columnconfigure(0, weight=1)
         self.log = tk.Text(log_box, height=12, wrap="word")
@@ -560,7 +569,7 @@ class App:
         if hasattr(self, "licht_check"):
             self.licht_check.configure(state="normal" if is_colmap else "disabled")
         if is_colmap and self.run_lichtfield_var.get():
-            self.licht_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+            self.licht_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 4))
         else:
             self.licht_frame.grid_remove()
 
@@ -570,7 +579,7 @@ class App:
             self.advanced_button.configure(text="▸ 高级参数")
             self.advanced_visible.set(False)
         else:
-            self.advanced_frame.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+            self.advanced_frame.grid(row=4, column=0, sticky="ew", pady=(6, 0))
             self.advanced_button.configure(text="▾ 高级参数")
             self.advanced_visible.set(True)
 
@@ -624,8 +633,11 @@ class App:
             messagebox.showinfo("输出文件夹", "请先选择输出文件夹")
             return
         output = Path(self.output_var.get())
-        output.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(output))
+        try:
+            output.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(output))
+        except Exception as exc:
+            messagebox.showerror("打开输出失败", str(exc))
 
     def check_environment(self):
         checks = check_pipeline_dependencies(
@@ -636,6 +648,9 @@ class App:
             run_lichtfield=self.run_lichtfield_var.get(),
         )
         report = format_dependency_report(checks)
+        if hasattr(self, "log"):
+            self.log.insert("end", "环境检查:\n" + report + "\n")
+            self.log.see("end")
         if all(check.ok or not check.required for check in checks):
             messagebox.showinfo("环境检查", report)
         else:
@@ -737,9 +752,12 @@ class App:
 
         self.running = True
         self.start_button.configure(state="disabled")
+        self.start_button.configure(text="处理中...")
         self.pb["value"] = 0
         for bar in getattr(self, "stage_bars", {}).values():
             bar["value"] = 0
+        self.log.delete("1.0", "end")
+        self.log.insert("end", "开始处理\n")
         self.status_var.set("运行中")
         threading.Thread(target=self._run_job, args=(job,), daemon=True).start()
 
@@ -748,6 +766,7 @@ class App:
             run_multi_track_pipeline(job, self._set_progress, self._show_preview, self._log)
             self.msg_queue.put(("done", "完成"))
         except Exception as exc:
+            self._log(traceback.format_exc())
             self.msg_queue.put(("error", str(exc)))
 
     def _set_progress(self, value):
@@ -756,6 +775,10 @@ class App:
     def _update_stage_progress(self, value):
         if not hasattr(self, "stage_bars"):
             return
+        if value >= 100:
+            for bar in self.stage_bars.values():
+                bar["value"] = 100
+            return
         stages = {
             "extract": max(0, min(100, int((value - 5) * 100 / 30))),
             "align": max(0, min(100, int((value - 35) * 100 / 60))),
@@ -763,6 +786,16 @@ class App:
         }
         for key, stage_value in stages.items():
             self.stage_bars[key]["value"] = stage_value
+
+    def _progress_status_text(self, value):
+        value = int(value)
+        if value < 35:
+            stage = "抽帧/生成清单"
+        elif value < 95:
+            stage = "重建/对齐"
+        else:
+            stage = "导出/收尾"
+        return f"{stage} · {value}%"
 
     def _show_preview(self, left_path, right_path):
         self.msg_queue.put(("preview", left_path, right_path))
@@ -778,7 +811,7 @@ class App:
                 if kind == "progress":
                     self.pb["value"] = item[1]
                     self._update_stage_progress(item[1])
-                    self.status_var.set(f"进度 {item[1]}%")
+                    self.status_var.set(self._progress_status_text(item[1]))
                 elif kind == "log":
                     self.log.insert("end", item[1] + "\n")
                     self.log.see("end")
@@ -786,12 +819,15 @@ class App:
                     self._update_preview(item[1], item[2])
                 elif kind == "done":
                     self.running = False
+                    self.start_button.configure(text="▶ 开始处理")
                     self._sync_start_button_state()
                     self.status_var.set(item[1])
                     self.pb["value"] = 100
+                    self._update_stage_progress(100)
                     messagebox.showinfo("完成", "处理完成")
                 elif kind == "error":
                     self.running = False
+                    self.start_button.configure(text="▶ 开始处理")
                     self._sync_start_button_state()
                     self.status_var.set("失败")
                     messagebox.showerror("错误", item[1])
@@ -805,10 +841,14 @@ class App:
             img.thumbnail(target)
             return ImageTk.PhotoImage(img)
 
-        self.left_preview = load(left_path, (460, 260))
-        self.right_preview = load(right_path, (460, 260))
-        self.left_label.configure(image=self.left_preview, text="")
-        self.right_label.configure(image=self.right_preview, text="")
+        try:
+            self.left_preview = load(left_path, (460, 260))
+            self.right_preview = load(right_path, (460, 260))
+            self.left_label.configure(image=self.left_preview, text="")
+            self.right_label.configure(image=self.right_preview, text="")
+        except Exception as exc:
+            self.log.insert("end", f"预览更新失败: {exc}\n")
+            self.log.see("end")
 
 
 def main():

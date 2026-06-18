@@ -44,26 +44,54 @@ def build_lichtfield_command(config):
     return command
 
 
+def _popen_creationflags():
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_command_streaming(command, cwd, log_cb):
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_popen_creationflags(),
+    )
+    output_lines = []
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip()
+        if line:
+            output_lines.append(line)
+            log_cb(line)
+    rc = proc.wait()
+    return subprocess.CompletedProcess(command, rc, stdout="\n".join(output_lines), stderr="")
+
+
 def run_lichtfield_command(config, progress_cb=None, log_cb=None, runner=None):
     progress_cb = progress_cb or (lambda value: None)
     log_cb = log_cb or (lambda text: None)
-    runner = runner or subprocess.run
 
     command = build_lichtfield_command(config)
     log_cb(f"LICHT Field Studio: {' '.join(str(part) for part in command)}")
     progress_cb(80)
-    result = runner(
-        command,
-        cwd=str(config.output_dir.parent),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    for stream in [getattr(result, "stdout", ""), getattr(result, "stderr", "")]:
-        for line in (stream or "").splitlines():
-            if line:
-                log_cb(line)
+    config.output_dir.parent.mkdir(parents=True, exist_ok=True)
+    if runner is None:
+        result = _run_command_streaming(command, config.output_dir.parent, log_cb)
+    else:
+        result = runner(
+            command,
+            cwd=str(config.output_dir.parent),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for stream in [getattr(result, "stdout", ""), getattr(result, "stderr", "")]:
+            for line in (stream or "").splitlines():
+                if line:
+                    log_cb(line)
     if getattr(result, "returncode", 0) != 0:
         raise RuntimeError(f"LICHT Field Studio failed with return code {result.returncode}")
     progress_cb(100)

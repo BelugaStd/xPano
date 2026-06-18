@@ -45,15 +45,25 @@ def build_colmap_plan(manifest, output_dir, config=None):
     if not frames:
         raise ValueError("COLMAP plan requires panorama frames in the manifest")
 
-    image_dir.mkdir(parents=True, exist_ok=True)
-    sparse_dir.mkdir(parents=True, exist_ok=True)
-
-    image_entries = []
+    frame_sources = []
     for index, frame in enumerate(frames, 1):
         left = Path(frame["left"])
         right = Path(frame["right"])
         if not left.exists() or not right.exists():
             raise FileNotFoundError(f"Missing panorama frame images for COLMAP plan: {frame}")
+        frame_sources.append((index, frame, left, right))
+
+    if image_dir.exists():
+        shutil.rmtree(image_dir)
+    if sparse_dir.exists():
+        shutil.rmtree(sparse_dir)
+    if database_path.exists():
+        database_path.unlink()
+    image_dir.mkdir(parents=True, exist_ok=True)
+    sparse_dir.mkdir(parents=True, exist_ok=True)
+
+    image_entries = []
+    for index, frame, left, right in frame_sources:
         for side, source in [("left", left), ("right", right)]:
             target_name = f"{index:06d}_{side}{config.image_extension}"
             target = image_dir / target_name
@@ -124,6 +134,31 @@ def _command_name(command):
     return "COLMAP"
 
 
+def _popen_creationflags():
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_command_streaming(command, cwd, log_cb):
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_popen_creationflags(),
+    )
+    output_lines = []
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip()
+        if line:
+            output_lines.append(line)
+            log_cb(line)
+    rc = proc.wait()
+    return subprocess.CompletedProcess(command, rc, stdout="\n".join(output_lines), stderr="")
+
+
 def _has_sparse_model(sparse_dir):
     sparse_dir = Path(sparse_dir)
     candidates = [sparse_dir, sparse_dir / "0"]
@@ -144,7 +179,6 @@ def find_sparse_model_path(sparse_dir):
 def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
     progress_cb = progress_cb or (lambda value: None)
     log_cb = log_cb or (lambda text: None)
-    runner = runner or subprocess.run
 
     total = len(plan.commands)
     if total == 0:
@@ -153,21 +187,24 @@ def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
     for index, command in enumerate(plan.commands, 1):
         name = _command_name(command)
         log_cb(f"COLMAP {name}: {' '.join(str(part) for part in command)}")
-        result = runner(
-            command,
-            cwd=str(plan.output_dir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        for stream in [getattr(result, "stdout", ""), getattr(result, "stderr", "")]:
-            for line in (stream or "").splitlines():
-                if line:
-                    log_cb(line)
+        if runner is None:
+            result = _run_command_streaming(command, plan.output_dir, log_cb)
+        else:
+            result = runner(
+                command,
+                cwd=str(plan.output_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            for stream in [getattr(result, "stdout", ""), getattr(result, "stderr", "")]:
+                for line in (stream or "").splitlines():
+                    if line:
+                        log_cb(line)
         if getattr(result, "returncode", 0) != 0:
             raise RuntimeError(f"COLMAP {name} failed with return code {result.returncode}")
-        progress_cb(45 + int(30 * (index - 1) / max(total - 1, 1)))
+        progress_cb(35 + int(55 * index / total))
 
     if not Path(plan.database_path).exists():
         raise RuntimeError(f"COLMAP database output is missing: {plan.database_path}")
