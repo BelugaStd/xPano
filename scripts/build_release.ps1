@@ -1,5 +1,6 @@
 param(
     [string]$ReleaseName = "xPano-release",
+    [string]$Version = "0.1.1-portable",
     [switch]$SkipPyInstaller,
     [switch]$SkipDensifyVenv
 )
@@ -130,7 +131,7 @@ pause
 '@ | Set-Content -LiteralPath (Join-Path $ReleaseDir "RUN_XPANO_DEBUG.bat") -Encoding ASCII
 
 @"
-# xPano Portable Release
+# xPano Portable Release $Version
 
 Run `RUN_XPANO.bat` to start the GUI.
 

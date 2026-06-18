@@ -32,7 +32,8 @@ from scripts.verify_xpano_output import verify_output
 from scripts.xpano_tracks import build_manifest, load_manifest, validate_manifest
 
 
-APP_TITLE = "xPano 多相机重建"
+APP_VERSION = "0.1.1-portable"
+APP_TITLE = f"xPano 多相机重建 {APP_VERSION}"
 TRACK_TYPE_LABELS = {
     "panorama_video": "全景视频",
     "standard_photos": "普通照片",
