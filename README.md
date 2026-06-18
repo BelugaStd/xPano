@@ -193,6 +193,8 @@ scripts/
 docs/
   VERIFIED_WORKFLOW.md         已验收的全景工作流
   MULTI_TRACK_BACKEND.md       多轨道后端设计和测试记录
+  COLMAP_LICHT_PLAN.md         COLMAP / LICHT Field Studio 支持计划和状态
+  COLMAP_LICHT_USAGE.md        COLMAP / LICHT Field Studio 使用说明
 tests/                         轻量单元测试
 ```
 
