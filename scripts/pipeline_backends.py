@@ -6,10 +6,6 @@ COLMAP_BACKEND = "colmap"
 SUPPORTED_BACKENDS = {METASHAPE_BACKEND, COLMAP_BACKEND}
 
 
-class BackendUnavailableError(RuntimeError):
-    pass
-
-
 @dataclass(frozen=True)
 class BackendStatus:
     name: str
@@ -41,9 +37,4 @@ def normalize_backend(value):
 
 def require_implemented_backend(backend):
     backend = normalize_backend(backend)
-    if backend == COLMAP_BACKEND:
-        raise BackendUnavailableError(
-            "COLMAP backend is planned but not implemented yet. "
-            "Use --backend metashape for the verified workflow."
-        )
     return backend

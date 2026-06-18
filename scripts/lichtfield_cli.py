@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+import subprocess
 
 
 @dataclass(frozen=True)
@@ -40,4 +41,30 @@ def build_lichtfield_command(config):
     _append_int_arg(command, "--point-count", config.point_count)
     _append_int_arg(command, "--bilateral-grid", config.bilateral_grid)
     command.extend(str(item) for item in config.extra_args)
+    return command
+
+
+def run_lichtfield_command(config, progress_cb=None, log_cb=None, runner=None):
+    progress_cb = progress_cb or (lambda value: None)
+    log_cb = log_cb or (lambda text: None)
+    runner = runner or subprocess.run
+
+    command = build_lichtfield_command(config)
+    log_cb(f"LICHT Field Studio: {' '.join(str(part) for part in command)}")
+    progress_cb(80)
+    result = runner(
+        command,
+        cwd=str(config.output_dir.parent),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for stream in [getattr(result, "stdout", ""), getattr(result, "stderr", "")]:
+        for line in (stream or "").splitlines():
+            if line:
+                log_cb(line)
+    if getattr(result, "returncode", 0) != 0:
+        raise RuntimeError(f"LICHT Field Studio failed with return code {result.returncode}")
+    progress_cb(100)
     return command

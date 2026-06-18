@@ -15,7 +15,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from scripts.pipeline_backends import METASHAPE_BACKEND, require_implemented_backend
+from scripts.colmap_backend import build_colmap_plan, run_colmap_plan
+from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
 from scripts.verify_xpano_output import verify_output
 from scripts.xpano_tracks import build_manifest, load_manifest, validate_manifest
 
@@ -128,14 +129,43 @@ def generated_output_paths(output_dir: Path):
     return [output_dir / "work", output_dir / "images", output_dir / "sparse"]
 
 
-def clear_generated_outputs(output_dir: Path, log_cb):
+def _path_is_within(path: Path, parent: Path):
+    path = Path(path).resolve()
+    parent = Path(parent).resolve()
+    try:
+        return path == parent or path.is_relative_to(parent)
+    except AttributeError:
+        return str(path).startswith(str(parent))
+
+
+def _remove_path_preserving(path: Path, preserve_paths):
+    path = Path(path)
+    if not path.exists():
+        return
+    preserve_paths = [Path(item).resolve() for item in (preserve_paths or [])]
+    if any(path.resolve() == preserve for preserve in preserve_paths):
+        return
+    if path.is_dir():
+        keep_children = [preserve for preserve in preserve_paths if _path_is_within(preserve, path)]
+        if not keep_children:
+            shutil.rmtree(path)
+            return
+        for child in list(path.iterdir()):
+            if any(_path_is_within(preserve, child) for preserve in keep_children):
+                _remove_path_preserving(child, preserve_paths)
+            elif child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    else:
+        path.unlink()
+
+
+def clear_generated_outputs(output_dir: Path, log_cb, preserve_paths=None):
     for path in generated_output_paths(output_dir):
         if path.exists():
             log_cb(f"清理旧输出: {path}")
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
+            _remove_path_preserving(path, preserve_paths)
 
 
 def write_run_summary(job: JobConfig):
@@ -186,9 +216,10 @@ def write_run_summary(job: JobConfig):
 
 
 def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, log_cb):
-    require_implemented_backend(job.backend)
+    backend = normalize_backend(job.backend)
     if job.overwrite_generated:
-        clear_generated_outputs(job.output_dir, log_cb)
+        preserve_paths = [job.manifest_path] if job.manifest_path else None
+        clear_generated_outputs(job.output_dir, log_cb, preserve_paths=preserve_paths)
     work_dir = ensure_dir(job.output_dir / "work")
     project_path = work_dir / "xpano.psx"
 
@@ -209,6 +240,16 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
             log_cb=log_cb,
         )
         job.manifest_path = manifest_path
+
+    if backend == COLMAP_BACKEND:
+        log_cb("开始 COLMAP 自动处理")
+        progress_cb(35)
+        plan = build_colmap_plan(load_manifest(manifest_path), output_dir=job.output_dir / "colmap")
+        run_colmap_plan(plan, progress_cb=lambda value: progress_cb(min(95, value)), log_cb=log_cb)
+        write_run_summary(job)
+        progress_cb(100)
+        log_cb("完成")
+        return
 
     log_cb("开始 Metashape 自动处理")
     script = Path(__file__).parent / "scripts" / "metashape_pipeline.py"

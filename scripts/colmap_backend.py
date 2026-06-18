@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -113,3 +114,58 @@ def build_colmap_plan(manifest, output_dir, config=None):
         image_manifest_path=image_manifest_path,
         manifest_path=manifest_path,
     )
+
+
+def _command_name(command):
+    if len(command) >= 2:
+        return command[1]
+    if command:
+        return Path(command[0]).name
+    return "COLMAP"
+
+
+def _has_sparse_model(sparse_dir):
+    sparse_dir = Path(sparse_dir)
+    candidates = [sparse_dir, sparse_dir / "0"]
+    required = ["cameras.bin", "images.bin", "points3D.bin"]
+    return any(all((candidate / name).exists() for name in required) for candidate in candidates)
+
+
+def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
+    progress_cb = progress_cb or (lambda value: None)
+    log_cb = log_cb or (lambda text: None)
+    runner = runner or subprocess.run
+
+    total = len(plan.commands)
+    if total == 0:
+        raise ValueError("COLMAP plan has no commands to run")
+
+    for index, command in enumerate(plan.commands, 1):
+        name = _command_name(command)
+        log_cb(f"COLMAP {name}: {' '.join(str(part) for part in command)}")
+        result = runner(
+            command,
+            cwd=str(plan.output_dir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        for stream in [getattr(result, "stdout", ""), getattr(result, "stderr", "")]:
+            for line in (stream or "").splitlines():
+                if line:
+                    log_cb(line)
+        if getattr(result, "returncode", 0) != 0:
+            raise RuntimeError(f"COLMAP {name} failed with return code {result.returncode}")
+        progress_cb(45 + int(30 * (index - 1) / max(total - 1, 1)))
+
+    if not Path(plan.database_path).exists():
+        raise RuntimeError(f"COLMAP database output is missing: {plan.database_path}")
+    if not _has_sparse_model(plan.sparse_dir):
+        raise RuntimeError(f"COLMAP sparse model output is missing: {plan.sparse_dir}")
+
+    return {
+        "database_path": str(plan.database_path),
+        "image_dir": str(plan.image_dir),
+        "sparse_dir": str(plan.sparse_dir),
+    }

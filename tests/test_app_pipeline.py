@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from app import JobConfig, MaterialTrack, MultiTrackJobConfig, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline
-from scripts.pipeline_backends import BackendUnavailableError
 
 
 class FakeProcess:
@@ -89,24 +88,87 @@ class AppPipelineTests(unittest.TestCase):
             self.assertIn(str(manifest_path), command)
             self.assertNotIn("--input-root", command)
 
-    def test_rejects_unimplemented_colmap_backend_before_running_metashape(self):
+    def test_colmap_backend_builds_and_runs_colmap_plan_without_metashape(self):
         with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            left = output / "left.jpg"
+            right = output / "right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_text = """{
+                  "schema_version": 1,
+                  "workflow": "xpano_multi_track",
+                  "tracks": [
+                    {
+                      "track_id": "track_001",
+                      "track_type": "panorama_video",
+                      "metashape_mode": "dual_fisheye_station",
+                      "export_mode": "cubemap",
+                      "frames": [
+                        {
+                          "left": "%s",
+                          "right": "%s"
+                        }
+                      ]
+                    }
+                  ]
+                }""" % (left.as_posix(), right.as_posix())
+            manifest_path.write_text(manifest_text, encoding="utf-8")
             job = MultiTrackJobConfig(
                 panorama_videos=[],
                 standard_photo_tracks=[],
                 aerial_photo_tracks=[],
-                output_dir=Path(tmp),
+                output_dir=output,
                 seconds_per_frame=1.0,
                 max_frames=0,
                 metashape_exe="metashape.exe",
                 backend="colmap",
+                manifest_path=manifest_path,
             )
 
-            with patch("app.subprocess.Popen") as popen:
-                with self.assertRaisesRegex(BackendUnavailableError, "COLMAP backend"):
-                    run_multi_track_pipeline(job, Mock(), Mock(), Mock())
+            fake_plan = Mock()
+            fake_plan.output_dir = output / "colmap"
+            progress = Mock()
+            log = Mock()
+            with patch("app.subprocess.Popen") as popen, \
+                patch("app.build_colmap_plan", return_value=fake_plan) as build_colmap_plan, \
+                patch("app.run_colmap_plan") as run_colmap_plan, \
+                patch("app.write_run_summary"):
+                run_multi_track_pipeline(job, progress, Mock(), log)
 
             popen.assert_not_called()
+            build_colmap_plan.assert_called_once()
+            run_colmap_plan.assert_called_once()
+            progress.assert_any_call(35)
+            progress.assert_any_call(100)
+
+    def test_overwrite_keeps_current_manifest_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                """{
+                  "schema_version": 1,
+                  "workflow": "xpano_multi_track",
+                  "tracks": []
+                }""",
+                encoding="utf-8",
+            )
+            (output / "images").mkdir()
+            (output / "sparse").mkdir()
+
+            clear_log = []
+
+            from app import clear_generated_outputs
+
+            clear_generated_outputs(output, clear_log.append, preserve_paths=[manifest_path])
+
+            self.assertTrue(manifest_path.exists())
+            self.assertFalse((output / "images").exists())
+            self.assertFalse((output / "sparse").exists())
 
     def test_multi_track_pipeline_passes_all_track_types_to_manifest_backend(self):
         with tempfile.TemporaryDirectory() as tmp:

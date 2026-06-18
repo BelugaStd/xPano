@@ -1,7 +1,6 @@
 import unittest
 
 from scripts.pipeline_backends import (
-    BackendUnavailableError,
     COLMAP_BACKEND,
     METASHAPE_BACKEND,
     normalize_backend,
@@ -21,9 +20,8 @@ class PipelineBackendTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported backend"):
             normalize_backend("unknown")
 
-    def test_colmap_backend_is_declared_but_not_implemented_yet(self):
-        with self.assertRaisesRegex(BackendUnavailableError, "not implemented"):
-            require_implemented_backend(COLMAP_BACKEND)
+    def test_colmap_backend_is_implemented(self):
+        self.assertEqual(require_implemented_backend(COLMAP_BACKEND), COLMAP_BACKEND)
 
 
 if __name__ == "__main__":
