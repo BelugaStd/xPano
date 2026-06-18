@@ -1,11 +1,11 @@
 import argparse
-import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import MaterialTrack, MultiTrackJobConfig, locate_metashape, material_tracks_to_job_config, run_multi_track_pipeline
+from scripts.dependency_checks import resolve_executable
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, SUPPORTED_BACKENDS, normalize_backend
 from scripts.xpano_tracks import load_manifest, validate_manifest
 
@@ -36,16 +36,6 @@ def validate_run_args(seconds_per_frame, max_frames):
         raise ValueError("--seconds-per-frame must be greater than 0")
     if max_frames < 0:
         raise ValueError("--max-frames must be greater than or equal to 0")
-
-
-def resolve_executable(executable, default_name):
-    executable = executable.strip() or default_name
-    if Path(executable).is_absolute() or any(sep in executable for sep in ["\\", "/"]):
-        if not Path(executable).exists():
-            raise FileNotFoundError(executable)
-    elif not shutil.which(executable):
-        raise RuntimeError(f"{executable} was not found in PATH")
-    return executable
 
 
 def main():

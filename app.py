@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from scripts.colmap_backend import ColmapBackendConfig, build_colmap_plan, find_sparse_model_path, run_colmap_plan
+from scripts.dependency_checks import check_pipeline_dependencies, format_dependency_report, resolve_executable
 from scripts.lichtfield_cli import LichtfieldStudioConfig, run_lichtfield_command
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
 from scripts.verify_xpano_output import verify_output
@@ -139,16 +140,6 @@ def locate_metashape():
     if candidates:
         return candidates[0]
     return "metashape.exe"
-
-
-def resolve_executable(executable, default_name):
-    executable = (executable or "").strip() or default_name
-    if Path(executable).is_absolute() or any(sep in executable for sep in ["\\", "/"]):
-        if not Path(executable).exists():
-            raise FileNotFoundError(executable)
-    elif not shutil.which(executable):
-        raise RuntimeError(f"{executable} was not found in PATH")
-    return executable
 
 
 def ensure_dir(path: Path):
@@ -520,6 +511,7 @@ class App:
         self.start_button = ttk.Button(action_bar, text="▶ 开始处理", command=self.start)
         self.start_button.pack(side="right")
         ttk.Button(action_bar, text="↗ 打开输出", command=self.open_output).pack(side="right", padx=(0, 8))
+        ttk.Button(action_bar, text="检查环境", command=self.check_environment).pack(side="left")
         self._sync_start_button_state()
         self._sync_backend_mode()
 
@@ -628,6 +620,20 @@ class App:
         output = Path(self.output_var.get())
         output.mkdir(parents=True, exist_ok=True)
         os.startfile(str(output))
+
+    def check_environment(self):
+        checks = check_pipeline_dependencies(
+            backend=self.backend_var.get(),
+            metashape_exe=self.metashape_var.get(),
+            colmap_exe=self.colmap_var.get(),
+            lichtfield_exe=self.lichtfield_var.get(),
+            run_lichtfield=self.run_lichtfield_var.get(),
+        )
+        report = format_dependency_report(checks)
+        if all(check.ok or not check.required for check in checks):
+            messagebox.showinfo("环境检查", report)
+        else:
+            messagebox.showwarning("环境检查", report)
 
     def _build_job_from_controls(
         self,
