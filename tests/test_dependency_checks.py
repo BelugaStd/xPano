@@ -7,6 +7,8 @@ from scripts.dependency_checks import (
     check_executable,
     check_pipeline_dependencies,
     format_dependency_report,
+    locate_colmap,
+    locate_lichtfield,
     require_dependency_checks,
     resolve_executable,
 )
@@ -19,6 +21,18 @@ class DependencyChecksTests(unittest.TestCase):
             exe.write_bytes(b"")
 
             self.assertEqual(resolve_executable(str(exe), "tool.exe"), str(exe))
+
+    def test_locates_colmap_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "colmap.exe"
+            exe.write_bytes(b"")
+
+            with patch.dict("scripts.dependency_checks.os.environ", {"XPANO_COLMAP": str(exe)}, clear=False):
+                self.assertEqual(locate_colmap(), str(exe))
+
+    def test_locates_lichtfield_from_path(self):
+        with patch("scripts.dependency_checks.shutil.which", return_value=r"C:\Tools\lichtfield-studio.exe"):
+            self.assertEqual(locate_lichtfield(), r"C:\Tools\lichtfield-studio.exe")
 
     def test_reports_missing_required_executable(self):
         with patch("scripts.dependency_checks.shutil.which", return_value=None):

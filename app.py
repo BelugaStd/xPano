@@ -16,7 +16,13 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
 from scripts.colmap_backend import ColmapBackendConfig, build_colmap_plan, find_sparse_model_path, run_colmap_plan
-from scripts.dependency_checks import check_pipeline_dependencies, format_dependency_report, resolve_executable
+from scripts.dependency_checks import (
+    check_pipeline_dependencies,
+    format_dependency_report,
+    locate_colmap,
+    locate_lichtfield,
+    resolve_executable,
+)
 from scripts.lichtfield_cli import LichtfieldStudioConfig, run_lichtfield_command
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
 from scripts.verify_xpano_output import verify_output
@@ -382,8 +388,8 @@ class App:
         self.spf_var = tk.StringVar(value="1.0")
         self.frames_var = tk.StringVar(value="")
         self.metashape_var = tk.StringVar(value=locate_metashape())
-        self.colmap_var = tk.StringVar(value="colmap")
-        self.lichtfield_var = tk.StringVar(value="lichtfield-studio")
+        self.colmap_var = tk.StringVar(value=locate_colmap())
+        self.lichtfield_var = tk.StringVar(value=locate_lichtfield())
         self.backend_var = tk.StringVar(value=METASHAPE_BACKEND)
         self.run_lichtfield_var = tk.BooleanVar(value=False)
         self.licht_point_count_var = tk.StringVar(value="0")
