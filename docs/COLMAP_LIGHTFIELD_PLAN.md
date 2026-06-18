@@ -1,7 +1,7 @@
-﻿# xPano COLMAP / Lightfield Studio Plan
+﻿# xPano COLMAP / LICHT Field Studio Plan
 
 ## Goal
-Extend the current verified Metashape workflow into a backend-pluggable reconstruction pipeline so the same GUI can later drive COLMAP and Lightfield Studio CLI.
+Extend the current verified Metashape workflow into a backend-pluggable reconstruction pipeline so the same GUI can later drive COLMAP and LICHT Field Studio CLI.
 
 ## Principles
 - Keep the verified Metashape path as the stable default.
@@ -14,7 +14,7 @@ Extend the current verified Metashape workflow into a backend-pluggable reconstr
 2. Add a backend interface and route the GUI/CLI through it.
 3. Implement a COLMAP backend that mirrors the same material-track workflow.
 4. Add export/interop adapters so COLMAP can emit the same downstream artifacts.
-5. Add Lightfield Studio CLI integration as a post-COLMAP algorithm stage.
+5. Add LICHT Field Studio CLI integration as a post-COLMAP algorithm stage.
 6. Parameterize tunable steps such as point count, bilateral grid, and similar algorithm knobs.
 7. Expand verification with regression tests for each backend and stage.
 
@@ -22,4 +22,5 @@ Extend the current verified Metashape workflow into a backend-pluggable reconstr
 - Metashape workflow exists and is verified.
 - GUI exists and drives the shared manifest pipeline.
 - COLMAP backend is not yet implemented.
-- Lightfield Studio CLI integration is not yet implemented.
+- LICHT Field Studio CLI integration is not yet implemented.
+
