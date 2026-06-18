@@ -47,6 +47,43 @@ class VerifyXpanoOutputTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "frame_images"):
                 verify_output(root, expect_frame_images=1)
 
+    def test_accepts_native_colmap_backend_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            colmap = root / "colmap"
+            image_dir = colmap / "colmap_images"
+            image_dir.mkdir(parents=True)
+            (colmap / "database.db").write_bytes(b"db")
+            (image_dir / "000001_left.jpg").write_bytes(b"left")
+            (image_dir / "000001_right.jpg").write_bytes(b"right")
+            write_count_header(colmap / "sparse" / "0" / "cameras.bin", 2)
+            write_count_header(colmap / "sparse" / "0" / "images.bin", 2)
+            write_count_header(colmap / "sparse" / "0" / "points3D.bin", 10)
+
+            result = verify_output(
+                root,
+                backend="colmap",
+                expect_colmap_images=2,
+                expect_colmap_cameras=2,
+                expect_colmap_points=10,
+                expect_single_sparse=True,
+            )
+
+            self.assertEqual(result["backend"], "colmap")
+            self.assertEqual(result["colmap_input_images"], 2)
+            self.assertEqual(result["colmap_points"], 10)
+
+    def test_rejects_native_colmap_missing_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "colmap" / "colmap_images").mkdir(parents=True)
+            write_count_header(root / "colmap" / "sparse" / "0" / "cameras.bin", 1)
+            write_count_header(root / "colmap" / "sparse" / "0" / "images.bin", 1)
+            write_count_header(root / "colmap" / "sparse" / "0" / "points3D.bin", 0)
+
+            with self.assertRaisesRegex(RuntimeError, "database"):
+                verify_output(root, backend="colmap")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,6 +66,15 @@ output_colmap/
   xpano_run_summary.json
 ```
 
+Verify the native COLMAP backend output:
+
+```powershell
+python scripts\verify_xpano_output.py `
+  --backend colmap `
+  --output "D:\path\to\output_colmap" `
+  --expect-single-sparse
+```
+
 ## CLI: COLMAP + LICHT Field Studio
 
 ```powershell
