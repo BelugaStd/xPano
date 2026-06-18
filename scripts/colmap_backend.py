@@ -131,6 +131,16 @@ def _has_sparse_model(sparse_dir):
     return any(all((candidate / name).exists() for name in required) for candidate in candidates)
 
 
+def find_sparse_model_path(sparse_dir):
+    sparse_dir = Path(sparse_dir)
+    candidates = [sparse_dir / "0", sparse_dir]
+    required = ["cameras.bin", "images.bin", "points3D.bin"]
+    for candidate in candidates:
+        if all((candidate / name).exists() for name in required):
+            return candidate
+    raise RuntimeError(f"COLMAP sparse model output is missing: {sparse_dir}")
+
+
 def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
     progress_cb = progress_cb or (lambda value: None)
     log_cb = log_cb or (lambda text: None)
@@ -161,11 +171,11 @@ def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
 
     if not Path(plan.database_path).exists():
         raise RuntimeError(f"COLMAP database output is missing: {plan.database_path}")
-    if not _has_sparse_model(plan.sparse_dir):
-        raise RuntimeError(f"COLMAP sparse model output is missing: {plan.sparse_dir}")
+    sparse_model_path = find_sparse_model_path(plan.sparse_dir)
 
     return {
         "database_path": str(plan.database_path),
         "image_dir": str(plan.image_dir),
         "sparse_dir": str(plan.sparse_dir),
+        "sparse_model_path": str(sparse_model_path),
     }

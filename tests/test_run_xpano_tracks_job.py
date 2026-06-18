@@ -76,9 +76,11 @@ class RunXpanoTracksJobTests(unittest.TestCase):
                 "--output",
                 str(output),
                 "--metashape",
-                sys.executable,
+                "missing-metashape.exe",
                 "--backend",
                 "colmap",
+                "--colmap",
+                sys.executable,
                 "--seconds-per-frame",
                 "1.0",
                 "--max-frames",
@@ -92,6 +94,69 @@ class RunXpanoTracksJobTests(unittest.TestCase):
 
             job = runner.call_args.args[0]
             self.assertEqual(job.backend, "colmap")
+            self.assertEqual(job.colmap_exe, sys.executable)
+
+    def test_main_accepts_lichtfield_parameters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pano = root / "a.osv"
+            output = root / "out"
+            pano.write_bytes(b"video")
+
+            argv = [
+                "run_xpano_tracks_job.py",
+                "--output",
+                str(output),
+                "--backend",
+                "colmap",
+                "--colmap",
+                sys.executable,
+                "--run-lichtfield",
+                "--lichtfield",
+                sys.executable,
+                "--lichtfield-point-count",
+                "120000",
+                "--lichtfield-bilateral-grid",
+                "16",
+                "--pano",
+                str(pano),
+            ]
+
+            with patch.object(sys, "argv", argv), patch("scripts.run_xpano_tracks_job.run_multi_track_pipeline") as runner:
+                main()
+
+            job = runner.call_args.args[0]
+            self.assertTrue(job.run_lichtfield)
+            self.assertEqual(job.lichtfield_exe, sys.executable)
+            self.assertEqual(job.lichtfield_point_count, 120000)
+            self.assertEqual(job.lichtfield_bilateral_grid, 16)
+
+    def test_metashape_backend_ignores_lichtfield_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pano = root / "a.osv"
+            output = root / "out"
+            pano.write_bytes(b"video")
+
+            argv = [
+                "run_xpano_tracks_job.py",
+                "--output",
+                str(output),
+                "--metashape",
+                sys.executable,
+                "--run-lichtfield",
+                "--lichtfield",
+                "missing-lichtfield.exe",
+                "--pano",
+                str(pano),
+            ]
+
+            with patch.object(sys, "argv", argv), patch("scripts.run_xpano_tracks_job.run_multi_track_pipeline") as runner:
+                main()
+
+            job = runner.call_args.args[0]
+            self.assertEqual(job.backend, "metashape")
+            self.assertFalse(job.run_lichtfield)
 
 
 if __name__ == "__main__":

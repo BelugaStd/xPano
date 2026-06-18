@@ -15,13 +15,19 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from scripts.colmap_backend import build_colmap_plan, run_colmap_plan
+from scripts.colmap_backend import ColmapBackendConfig, build_colmap_plan, find_sparse_model_path, run_colmap_plan
+from scripts.lichtfield_cli import LichtfieldStudioConfig, run_lichtfield_command
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
 from scripts.verify_xpano_output import verify_output
 from scripts.xpano_tracks import build_manifest, load_manifest, validate_manifest
 
 
-APP_TITLE = "xPano 多相机轨重建"
+APP_TITLE = "xPano 多相机重建"
+TRACK_TYPE_LABELS = {
+    "panorama_video": "全景视频",
+    "standard_photos": "普通照片",
+    "aerial_photos": "航拍照片",
+}
 
 
 @dataclass
@@ -53,6 +59,11 @@ class MultiTrackJobConfig:
     overwrite_generated: bool = True
     backend: str = METASHAPE_BACKEND
     manifest_path: Path = None
+    colmap_exe: str = "colmap"
+    run_lichtfield: bool = False
+    lichtfield_exe: str = "lichtfield-studio"
+    lichtfield_point_count: int = 0
+    lichtfield_bilateral_grid: int = 0
 
 
 def material_tracks_to_job_config(
@@ -63,6 +74,11 @@ def material_tracks_to_job_config(
     metashape_exe,
     overwrite_generated=True,
     backend=METASHAPE_BACKEND,
+    colmap_exe="colmap",
+    run_lichtfield=False,
+    lichtfield_exe="lichtfield-studio",
+    lichtfield_point_count=0,
+    lichtfield_bilateral_grid=0,
 ):
     panorama_videos = []
     standard_photo_tracks = []
@@ -91,6 +107,11 @@ def material_tracks_to_job_config(
         metashape_exe=metashape_exe,
         overwrite_generated=overwrite_generated,
         backend=backend,
+        colmap_exe=colmap_exe,
+        run_lichtfield=run_lichtfield,
+        lichtfield_exe=lichtfield_exe,
+        lichtfield_point_count=lichtfield_point_count,
+        lichtfield_bilateral_grid=lichtfield_bilateral_grid,
     )
 
 
@@ -118,6 +139,16 @@ def locate_metashape():
     if candidates:
         return candidates[0]
     return "metashape.exe"
+
+
+def resolve_executable(executable, default_name):
+    executable = (executable or "").strip() or default_name
+    if Path(executable).is_absolute() or any(sep in executable for sep in ["\\", "/"]):
+        if not Path(executable).exists():
+            raise FileNotFoundError(executable)
+    elif not shutil.which(executable):
+        raise RuntimeError(f"{executable} was not found in PATH")
+    return executable
 
 
 def ensure_dir(path: Path):
@@ -169,13 +200,23 @@ def clear_generated_outputs(output_dir: Path, log_cb, preserve_paths=None):
 
 
 def write_run_summary(job: JobConfig):
-    image_dir = job.output_dir / "images"
-    sparse_dir = job.output_dir / "sparse" / "0"
+    backend = normalize_backend(getattr(job, "backend", METASHAPE_BACKEND))
+    if backend == COLMAP_BACKEND:
+        image_dir = job.output_dir / "colmap" / "colmap_images"
+        sparse_dir = find_sparse_model_path(job.output_dir / "colmap" / "sparse")
+        export_verification = {
+            "backend": backend,
+            "image_dir": str(image_dir),
+            "sparse_model_path": str(sparse_dir),
+        }
+    else:
+        image_dir = job.output_dir / "images"
+        sparse_dir = job.output_dir / "sparse" / "0"
+        export_verification = verify_output(job.output_dir, expect_single_sparse=True)
     frames_dir = job.output_dir / "work" / "frames"
     manifest_path = getattr(job, "manifest_path", None) or job.output_dir / "work" / "xpano_manifest.json"
     manifest_path = Path(manifest_path)
     manifest = load_manifest(manifest_path) if manifest_path.exists() else {"tracks": []}
-    export_verification = verify_output(job.output_dir, expect_single_sparse=True)
     input_videos = [str(path) for path in getattr(job, "panorama_videos", [])]
     if not input_videos and hasattr(job, "input_video"):
         input_videos = [str(job.input_video)]
@@ -184,6 +225,7 @@ def write_run_summary(job: JobConfig):
         "input_video": input_videos[0] if len(input_videos) == 1 else "",
         "input_videos": input_videos,
         "output_dir": str(job.output_dir),
+        "backend": backend,
         "seconds_per_frame": job.seconds_per_frame,
         "max_frames": job.max_frames,
         "track_count": len(manifest.get("tracks", [])),
@@ -201,7 +243,8 @@ def write_run_summary(job: JobConfig):
         "manifest": str(manifest_path),
         "export_verification": export_verification,
         "frames_jpg": len(list(frames_dir.rglob("*.jpg"))) if frames_dir.exists() else 0,
-        "cubemap_images": len(list(image_dir.glob("*.jpg"))) if image_dir.exists() else 0,
+        "cubemap_images": len(list(image_dir.glob("*.jpg"))) if image_dir.exists() and backend == METASHAPE_BACKEND else 0,
+        "colmap_input_images": len(list(image_dir.glob("*.jpg"))) if image_dir.exists() and backend == COLMAP_BACKEND else 0,
         "colmap_bins": {
             name: (sparse_dir / name).stat().st_size if (sparse_dir / name).exists() else 0
             for name in ["cameras.bin", "images.bin", "points3D.bin"]
@@ -244,8 +287,27 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
     if backend == COLMAP_BACKEND:
         log_cb("开始 COLMAP 自动处理")
         progress_cb(35)
-        plan = build_colmap_plan(load_manifest(manifest_path), output_dir=job.output_dir / "colmap")
-        run_colmap_plan(plan, progress_cb=lambda value: progress_cb(min(95, value)), log_cb=log_cb)
+        plan = build_colmap_plan(
+            load_manifest(manifest_path),
+            output_dir=job.output_dir / "colmap",
+            config=ColmapBackendConfig(colmap_exe=job.colmap_exe),
+        )
+        result = run_colmap_plan(plan, progress_cb=lambda value: progress_cb(min(95, value)), log_cb=log_cb)
+        if job.run_lichtfield:
+            log_cb("开始 LICHT Field Studio 后处理")
+            sparse_model_path = Path(result.get("sparse_model_path") or find_sparse_model_path(plan.sparse_dir))
+            run_lichtfield_command(
+                LichtfieldStudioConfig(
+                    executable=job.lichtfield_exe,
+                    input_colmap=sparse_model_path,
+                    image_dir=plan.image_dir,
+                    output_dir=job.output_dir / "lichtfield",
+                    point_count=job.lichtfield_point_count,
+                    bilateral_grid=job.lichtfield_bilateral_grid,
+                ),
+                progress_cb=lambda value: progress_cb(min(99, value)),
+                log_cb=log_cb,
+            )
         write_run_summary(job)
         progress_cb(100)
         log_cb("完成")
@@ -318,6 +380,7 @@ class App:
         self.root = root
         self.root.title(APP_TITLE)
         self.root.geometry("1100x760")
+        self.root.minsize(980, 680)
 
         self.msg_queue = queue.Queue()
         self.left_preview = None
@@ -328,12 +391,19 @@ class App:
         self.spf_var = tk.StringVar(value="1.0")
         self.frames_var = tk.StringVar(value="")
         self.metashape_var = tk.StringVar(value=locate_metashape())
+        self.colmap_var = tk.StringVar(value="colmap")
+        self.lichtfield_var = tk.StringVar(value="lichtfield-studio")
+        self.backend_var = tk.StringVar(value=METASHAPE_BACKEND)
+        self.run_lichtfield_var = tk.BooleanVar(value=False)
+        self.licht_point_count_var = tk.StringVar(value="0")
+        self.licht_grid_var = tk.StringVar(value="0")
         self.status_var = tk.StringVar(value="待机")
-        self.track_count_var = tk.StringVar(value="0 tracks")
+        self.track_count_var = tk.StringVar(value="0 个素材轨")
         self.advanced_visible = tk.BooleanVar(value=False)
         self.running = False
 
         self._build_ui()
+        self.output_var.trace_add("write", lambda *_: self._sync_start_button_state())
         self.root.after(100, self._poll_queue)
 
     def _build_ui(self):
@@ -343,7 +413,7 @@ class App:
         header = ttk.Frame(self.root, padding=(16, 12, 16, 8))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="xPano 多相机轨重建", font=("Segoe UI", 15, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text=APP_TITLE, font=("Segoe UI", 15, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(header, textvariable=self.track_count_var).grid(row=0, column=1, sticky="e")
 
         body = ttk.Frame(self.root, padding=(16, 0, 16, 12))
@@ -389,7 +459,7 @@ class App:
         controls = ttk.Frame(body)
         controls.grid(row=1, column=1, sticky="nsew")
         controls.columnconfigure(0, weight=1)
-        controls.rowconfigure(4, weight=1)
+        controls.rowconfigure(5, weight=1)
 
         output_box = ttk.LabelFrame(controls, text="输出")
         output_box.grid(row=0, column=0, sticky="ew")
@@ -397,43 +467,64 @@ class App:
         ttk.Entry(output_box, textvariable=self.output_var).grid(row=0, column=0, sticky="ew", padx=(10, 6), pady=10)
         ttk.Button(output_box, text="… 选择", command=self.pick_output).grid(row=0, column=1, padx=(0, 10), pady=10)
 
+        backend_box = ttk.LabelFrame(controls, text="后端")
+        backend_box.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        backend_box.columnconfigure(1, weight=1)
+        for idx, (label, value) in enumerate([("Metashape", METASHAPE_BACKEND), ("COLMAP", COLMAP_BACKEND)]):
+            ttk.Radiobutton(backend_box, text=label, value=value, variable=self.backend_var, command=self._sync_backend_mode).grid(row=0, column=idx, padx=10, pady=10, sticky="w")
+
         self.advanced_button = ttk.Button(controls, text="▸ 高级参数", command=self.toggle_advanced)
-        self.advanced_button.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.advanced_button.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.advanced_frame = ttk.LabelFrame(controls, text="高级参数")
         self.advanced_frame.columnconfigure(1, weight=1)
         ttk.Label(self.advanced_frame, text="Metashape").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
         ttk.Entry(self.advanced_frame, textvariable=self.metashape_var).grid(row=0, column=1, sticky="ew", padx=6, pady=(10, 4))
         ttk.Button(self.advanced_frame, text="… 定位", command=self.pick_metashape).grid(row=0, column=2, padx=(0, 10), pady=(10, 4))
-        ttk.Label(self.advanced_frame, text="秒/帧").grid(row=1, column=0, sticky="w", padx=10, pady=4)
-        ttk.Entry(self.advanced_frame, textvariable=self.spf_var, width=12).grid(row=1, column=1, sticky="w", padx=6, pady=4)
-        ttk.Label(self.advanced_frame, text="帧数上限").grid(row=2, column=0, sticky="w", padx=10, pady=(4, 10))
+        ttk.Label(self.advanced_frame, text="COLMAP").grid(row=1, column=0, sticky="w", padx=10, pady=4)
+        ttk.Entry(self.advanced_frame, textvariable=self.colmap_var).grid(row=1, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Button(self.advanced_frame, text="… 定位", command=self.pick_colmap).grid(row=1, column=2, padx=(0, 10), pady=4)
+        ttk.Label(self.advanced_frame, text="LICHT").grid(row=2, column=0, sticky="w", padx=10, pady=4)
+        ttk.Entry(self.advanced_frame, textvariable=self.lichtfield_var).grid(row=2, column=1, sticky="ew", padx=6, pady=4)
+        ttk.Button(self.advanced_frame, text="… 定位", command=self.pick_lichtfield).grid(row=2, column=2, padx=(0, 10), pady=4)
+        ttk.Label(self.advanced_frame, text="秒/帧").grid(row=3, column=0, sticky="w", padx=10, pady=4)
+        ttk.Entry(self.advanced_frame, textvariable=self.spf_var, width=12).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(self.advanced_frame, text="帧数上限").grid(row=4, column=0, sticky="w", padx=10, pady=(4, 10))
         frame_limit = ttk.Frame(self.advanced_frame)
-        frame_limit.grid(row=2, column=1, sticky="w", padx=6, pady=(4, 10))
+        frame_limit.grid(row=4, column=1, sticky="w", padx=6, pady=(4, 10))
         ttk.Entry(frame_limit, textvariable=self.frames_var, width=12).pack(side="left")
         ttk.Label(frame_limit, text="留空=全部").pack(side="left", padx=(6, 0))
+        self.licht_check = ttk.Checkbutton(self.advanced_frame, text="运行 LICHT Field Studio 后处理", variable=self.run_lichtfield_var, command=self._sync_backend_mode)
+        self.licht_check.grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4))
+        self.licht_frame = ttk.Frame(self.advanced_frame)
+        self.licht_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.licht_frame, text="点数").grid(row=0, column=0, sticky="w", padx=10, pady=4)
+        ttk.Entry(self.licht_frame, textvariable=self.licht_point_count_var, width=12).grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(self.licht_frame, text="双边网格").grid(row=1, column=0, sticky="w", padx=10, pady=(4, 10))
+        ttk.Entry(self.licht_frame, textvariable=self.licht_grid_var, width=12).grid(row=1, column=1, sticky="w", padx=6, pady=(4, 10))
 
         progress_box = ttk.LabelFrame(controls, text="进度")
-        progress_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        progress_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         progress_box.columnconfigure(1, weight=1)
         ttk.Label(progress_box, textvariable=self.status_var).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
         self.pb = ttk.Progressbar(progress_box, orient="horizontal", mode="determinate", maximum=100)
         self.pb.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
         self.stage_bars = {}
-        for row, (key, label) in enumerate([("extract", "抽帧"), ("align", "对齐"), ("export", "导出")], start=2):
+        for row, (key, label) in enumerate([("extract", "抽帧"), ("align", "重建"), ("export", "后处理")], start=2):
             ttk.Label(progress_box, text=label).grid(row=row, column=0, sticky="w", padx=10, pady=3)
             bar = ttk.Progressbar(progress_box, orient="horizontal", mode="determinate", maximum=100)
             bar.grid(row=row, column=1, sticky="ew", padx=(0, 10), pady=3)
             self.stage_bars[key] = bar
 
         action_bar = ttk.Frame(controls)
-        action_bar.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        action_bar.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         self.start_button = ttk.Button(action_bar, text="▶ 开始处理", command=self.start)
         self.start_button.pack(side="right")
         ttk.Button(action_bar, text="↗ 打开输出", command=self.open_output).pack(side="right", padx=(0, 8))
         self._sync_start_button_state()
+        self._sync_backend_mode()
 
         log_box = ttk.LabelFrame(controls, text="运行日志")
-        log_box.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        log_box.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
         log_box.rowconfigure(0, weight=1)
         log_box.columnconfigure(0, weight=1)
         self.log = tk.Text(log_box, height=12, wrap="word")
@@ -451,17 +542,29 @@ class App:
             self.tracks_tree.delete(item)
         for index, track in enumerate(self.material_tracks):
             display_paths = "; ".join(str(path) for path in track.paths)
-            self.tracks_tree.insert("", "end", iid=str(index), values=(track.track_type, track.label, display_paths))
-        self.track_count_var.set(f"{len(self.material_tracks)} tracks")
+            track_type = TRACK_TYPE_LABELS.get(track.track_type, track.track_type)
+            self.tracks_tree.insert("", "end", iid=str(index), values=(track_type, track.label, display_paths))
+        self.track_count_var.set(f"{len(self.material_tracks)} 个素材轨")
         self._sync_start_button_state()
 
     def _sync_start_button_state(self):
         if not hasattr(self, "start_button"):
             return
-        if self.running or not self.material_tracks:
+        if self.running or not self.material_tracks or not self.output_var.get().strip():
             self.start_button.configure(state="disabled")
         else:
             self.start_button.configure(state="normal")
+
+    def _sync_backend_mode(self):
+        if not hasattr(self, "licht_frame"):
+            return
+        is_colmap = self.backend_var.get() == COLMAP_BACKEND
+        if hasattr(self, "licht_check"):
+            self.licht_check.configure(state="normal" if is_colmap else "disabled")
+        if is_colmap and self.run_lichtfield_var.get():
+            self.licht_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        else:
+            self.licht_frame.grid_remove()
 
     def toggle_advanced(self):
         if self.advanced_visible.get():
@@ -469,7 +572,7 @@ class App:
             self.advanced_button.configure(text="▸ 高级参数")
             self.advanced_visible.set(False)
         else:
-            self.advanced_frame.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+            self.advanced_frame.grid(row=3, column=0, sticky="ew", pady=(6, 0))
             self.advanced_button.configure(text="▾ 高级参数")
             self.advanced_visible.set(True)
 
@@ -508,6 +611,16 @@ class App:
         if p:
             self.metashape_var.set(p)
 
+    def pick_colmap(self):
+        p = filedialog.askopenfilename(filetypes=[("COLMAP", "colmap.exe"), ("Executable", "*.exe")])
+        if p:
+            self.colmap_var.set(p)
+
+    def pick_lichtfield(self):
+        p = filedialog.askopenfilename(filetypes=[("LICHT Field Studio", "*.exe"), ("Executable", "*.exe")])
+        if p:
+            self.lichtfield_var.set(p)
+
     def open_output(self):
         if not self.output_var.get():
             messagebox.showinfo("输出文件夹", "请先选择输出文件夹")
@@ -537,19 +650,34 @@ class App:
         except Exception:
             messagebox.showerror("参数错误", "帧数上限必须留空，或填写大于等于 0 的整数")
             return
+        try:
+            licht_point_count = int(self.licht_point_count_var.get().strip() or "0")
+            licht_grid = int(self.licht_grid_var.get().strip() or "0")
+            if licht_point_count < 0 or licht_grid < 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("参数错误", "LICHT 点数和双边网格必须是大于等于 0 的整数")
+            return
 
         output_dir = Path(self.output_var.get())
+        backend = normalize_backend(self.backend_var.get())
         metashape_exe = self.metashape_var.get().strip() or "metashape.exe"
+        colmap_exe = self.colmap_var.get().strip() or "colmap"
+        lichtfield_exe = self.lichtfield_var.get().strip() or "lichtfield-studio"
         for track in self.material_tracks:
             for path in track.paths:
                 if not Path(path).exists():
                     messagebox.showerror("输入不存在", str(path))
                     return
-        if metashape_exe.lower() == "metashape.exe" and not shutil.which("metashape.exe"):
-            messagebox.showerror("Metashape 不可用", "没有在 PATH 中找到 metashape.exe，请点击“定位”选择 Metashape。")
-            return
-        if metashape_exe.lower() != "metashape.exe" and not Path(metashape_exe).exists():
-            messagebox.showerror("Metashape 不存在", metashape_exe)
+        try:
+            if backend == METASHAPE_BACKEND:
+                metashape_exe = resolve_executable(metashape_exe, "metashape.exe")
+            if backend == COLMAP_BACKEND:
+                colmap_exe = resolve_executable(colmap_exe, "colmap")
+            if backend == COLMAP_BACKEND and self.run_lichtfield_var.get():
+                lichtfield_exe = resolve_executable(lichtfield_exe, "lichtfield-studio")
+        except Exception as exc:
+            messagebox.showerror("程序不可用", str(exc))
             return
         if not shutil.which("ffmpeg"):
             messagebox.showerror("ffmpeg 不可用", "没有在 PATH 中找到 ffmpeg，请先安装 ffmpeg 并加入 PATH。")
@@ -566,6 +694,12 @@ class App:
             seconds_per_frame=spf,
             max_frames=max_frames,
             metashape_exe=metashape_exe,
+            backend=backend,
+            colmap_exe=colmap_exe,
+            run_lichtfield=backend == COLMAP_BACKEND and self.run_lichtfield_var.get(),
+            lichtfield_exe=lichtfield_exe,
+            lichtfield_point_count=licht_point_count,
+            lichtfield_bilateral_grid=licht_grid,
         )
 
         self.running = True

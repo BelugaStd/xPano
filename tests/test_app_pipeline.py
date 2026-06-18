@@ -1,9 +1,10 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app import JobConfig, MaterialTrack, MultiTrackJobConfig, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline
+from app import JobConfig, MaterialTrack, MultiTrackJobConfig, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
 
 
 class FakeProcess:
@@ -144,6 +145,69 @@ class AppPipelineTests(unittest.TestCase):
             progress.assert_any_call(35)
             progress.assert_any_call(100)
 
+    def test_colmap_backend_can_run_lichtfield_postprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            left = output / "left.jpg"
+            right = output / "right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                """{
+                  "schema_version": 1,
+                  "workflow": "xpano_multi_track",
+                  "tracks": [
+                    {
+                      "track_id": "track_001",
+                      "track_type": "panorama_video",
+                      "metashape_mode": "dual_fisheye_station",
+                      "export_mode": "cubemap",
+                      "frames": [
+                        {"left": "%s", "right": "%s"}
+                      ]
+                    }
+                  ]
+                }""" % (left.as_posix(), right.as_posix()),
+                encoding="utf-8",
+            )
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                seconds_per_frame=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+                backend="colmap",
+                manifest_path=manifest_path,
+                run_lichtfield=True,
+                lichtfield_exe="lichtfield-studio.exe",
+                lichtfield_point_count=120000,
+                lichtfield_bilateral_grid=16,
+            )
+
+            sparse_model = output / "colmap" / "sparse" / "0"
+            image_dir = output / "colmap" / "colmap_images"
+            fake_plan = Mock()
+            fake_plan.output_dir = output / "colmap"
+            fake_plan.sparse_dir = output / "colmap" / "sparse"
+            fake_plan.image_dir = image_dir
+            with patch("app.build_colmap_plan", return_value=fake_plan), \
+                patch("app.run_colmap_plan", return_value={"sparse_model_path": str(sparse_model)}), \
+                patch("app.run_lichtfield_command") as run_lichtfield_command, \
+                patch("app.write_run_summary"):
+                run_multi_track_pipeline(job, Mock(), Mock(), Mock())
+
+            config = run_lichtfield_command.call_args.args[0]
+            self.assertEqual(config.executable, "lichtfield-studio.exe")
+            self.assertEqual(config.input_colmap, sparse_model)
+            self.assertEqual(config.image_dir, image_dir)
+            self.assertEqual(config.output_dir, output / "lichtfield")
+            self.assertEqual(config.point_count, 120000)
+            self.assertEqual(config.bilateral_grid, 16)
+
     def test_overwrite_keeps_current_manifest_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)
@@ -169,6 +233,45 @@ class AppPipelineTests(unittest.TestCase):
             self.assertTrue(manifest_path.exists())
             self.assertFalse((output / "images").exists())
             self.assertFalse((output / "sparse").exists())
+
+    def test_colmap_summary_uses_colmap_native_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                """{
+                  "schema_version": 1,
+                  "workflow": "xpano_multi_track",
+                  "tracks": []
+                }""",
+                encoding="utf-8",
+            )
+            image_dir = output / "colmap" / "colmap_images"
+            sparse_dir = output / "colmap" / "sparse" / "0"
+            image_dir.mkdir(parents=True)
+            sparse_dir.mkdir(parents=True)
+            (image_dir / "000001_left.jpg").write_bytes(b"left")
+            for name in ["cameras.bin", "images.bin", "points3D.bin"]:
+                (sparse_dir / name).write_bytes(b"bin")
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                seconds_per_frame=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+                backend="colmap",
+                manifest_path=manifest_path,
+            )
+
+            write_run_summary(job)
+
+            summary = json.loads((output / "xpano_run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["backend"], "colmap")
+            self.assertEqual(summary["colmap_input_images"], 1)
+            self.assertEqual(summary["export_verification"]["sparse_model_path"], str(sparse_dir))
 
     def test_multi_track_pipeline_passes_all_track_types_to_manifest_backend(self):
         with tempfile.TemporaryDirectory() as tmp:
