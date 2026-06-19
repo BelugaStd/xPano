@@ -1,6 +1,7 @@
 param(
     [string]$ReleaseName = "xPano-release",
-    [int]$PartSizeMB = 1900
+    [int]$PartSizeMB = 1900,
+    [switch]$NoSplit
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,47 +74,60 @@ if ($sevenZip) {
     Compress-Archive -Path (Join-Path $ReleaseDir "*") -DestinationPath $ZipPath -Force
 }
 
-Write-Host "[3/4] Splitting zip archive..."
-$partSize = [int64]$PartSizeMB * 1MB
-$buffer = New-Object byte[] (4MB)
-$inputStream = [System.IO.File]::OpenRead($ZipPath)
-try {
-    $partIndex = 1
-    while ($inputStream.Position -lt $inputStream.Length) {
-        $partPath = Join-Path $DistRoot ("{0}.zip.part{1:D2}" -f $ReleaseName, $partIndex)
-        Assert-InDist $partPath
-        $outputStream = [System.IO.File]::Create($partPath)
-        try {
-            $written = [int64]0
-            while ($written -lt $partSize -and $inputStream.Position -lt $inputStream.Length) {
-                $remaining = [Math]::Min($buffer.Length, $partSize - $written)
-                $read = $inputStream.Read($buffer, 0, [int]$remaining)
-                if ($read -le 0) {
-                    break
+if ($NoSplit) {
+    Write-Host "[3/4] Skipping split archive creation."
+} else {
+    Write-Host "[3/4] Splitting zip archive..."
+    $partSize = [int64]$PartSizeMB * 1MB
+    $buffer = New-Object byte[] (4MB)
+    $inputStream = [System.IO.File]::OpenRead($ZipPath)
+    try {
+        $partIndex = 1
+        while ($inputStream.Position -lt $inputStream.Length) {
+            $partPath = Join-Path $DistRoot ("{0}.zip.part{1:D2}" -f $ReleaseName, $partIndex)
+            Assert-InDist $partPath
+            $outputStream = [System.IO.File]::Create($partPath)
+            try {
+                $written = [int64]0
+                while ($written -lt $partSize -and $inputStream.Position -lt $inputStream.Length) {
+                    $remaining = [Math]::Min($buffer.Length, $partSize - $written)
+                    $read = $inputStream.Read($buffer, 0, [int]$remaining)
+                    if ($read -le 0) {
+                        break
+                    }
+                    $outputStream.Write($buffer, 0, $read)
+                    $written += $read
                 }
-                $outputStream.Write($buffer, 0, $read)
-                $written += $read
+            } finally {
+                $outputStream.Dispose()
             }
-        } finally {
-            $outputStream.Dispose()
+            $partIndex += 1
         }
-        $partIndex += 1
+    } finally {
+        $inputStream.Dispose()
     }
-} finally {
-    $inputStream.Dispose()
 }
 
 Write-Host "[4/4] Writing checksums and recombine instructions..."
-$assets = @($ZipPath) + (Get-ChildItem -LiteralPath $DistRoot -File -Filter "$ReleaseName.zip.part*" | Sort-Object Name | ForEach-Object { $_.FullName })
+$partFiles = Get-ChildItem -LiteralPath $DistRoot -File -Filter "$ReleaseName.zip.part*" | Sort-Object Name
+$assets = @($ZipPath) + ($partFiles | ForEach-Object { $_.FullName })
 $checksumLines = foreach ($asset in $assets) {
     $hash = Get-FileHash -LiteralPath $asset -Algorithm SHA256
     "$($hash.Hash.ToLowerInvariant())  $(Split-Path -Leaf $asset)"
 }
 $checksumLines | Set-Content -LiteralPath $ChecksumsPath -Encoding ASCII
 
-$partFiles = Get-ChildItem -LiteralPath $DistRoot -File -Filter "$ReleaseName.zip.part*" | Sort-Object Name
-$copyCommand = "copy /b " + (($partFiles | ForEach-Object { $_.Name }) -join "+") + " $ReleaseName.zip"
-$powershellCommand = "Get-Content " + (($partFiles | ForEach-Object { $_.Name }) -join ",") + " -Encoding Byte -ReadCount 0 | Set-Content $ReleaseName.zip -Encoding Byte"
+if ($NoSplit) {
+    @"
+Single-file release zip:
+
+  $ReleaseName.zip
+
+Verify SHA256 against $ReleaseName.SHA256SUMS.txt.
+"@ | Set-Content -LiteralPath $RecombinePath -Encoding ASCII
+} else {
+    $copyCommand = "copy /b " + (($partFiles | ForEach-Object { $_.Name }) -join "+") + " $ReleaseName.zip"
+    $powershellCommand = "Get-Content " + (($partFiles | ForEach-Object { $_.Name }) -join ",") + " -Encoding Byte -ReadCount 0 | Set-Content $ReleaseName.zip -Encoding Byte"
 
 @"
 To recombine the split release zip on Windows:
@@ -126,6 +140,7 @@ PowerShell alternative:
 
   $powershellCommand
 "@ | Set-Content -LiteralPath $RecombinePath -Encoding ASCII
+}
 
 Write-Host "Packaged release:"
 Write-Host $ZipPath
