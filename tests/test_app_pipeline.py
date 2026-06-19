@@ -3,9 +3,10 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app import App, JobConfig, MaterialTrack, MultiTrackJobConfig, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
+from app import App, JobConfig, MaterialTrack, MultiTrackJobConfig, collect_runtime_import_versions, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
 from scripts.colmap_backend import read_colmap_points3d, write_colmap_points3d
 
 
@@ -26,6 +27,26 @@ class FakeVar:
 
 
 class AppPipelineTests(unittest.TestCase):
+    def test_runtime_import_report_marks_missing_dependency_as_failure(self):
+        def fake_import_module(name):
+            if name == "cv2":
+                raise ImportError("missing cv2")
+            return SimpleNamespace(__version__="1.0", __file__=f"{name}.py")
+
+        report = collect_runtime_import_versions(import_module=fake_import_module)
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(report["modules"]["numpy"]["ok"])
+        self.assertFalse(report["modules"]["cv2"]["ok"])
+        self.assertIn("missing cv2", report["modules"]["cv2"]["error"])
+
+    def test_mousewheel_units_supports_windows_and_button_events(self):
+        self.assertEqual(App._mousewheel_units(SimpleNamespace(delta=120)), -1)
+        self.assertEqual(App._mousewheel_units(SimpleNamespace(delta=-120)), 1)
+        self.assertEqual(App._mousewheel_units(SimpleNamespace(num=4, delta=0)), -1)
+        self.assertEqual(App._mousewheel_units(SimpleNamespace(num=5, delta=0)), 1)
+        self.assertEqual(App._mousewheel_units(SimpleNamespace(delta=0)), 0)
+
     def test_material_tracks_build_multi_track_job_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

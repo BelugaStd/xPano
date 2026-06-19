@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import json
 import os
 import re
@@ -39,6 +40,39 @@ TRACK_TYPE_LABELS = {
     "standard_photos": "普通照片",
     "aerial_photos": "航拍照片",
 }
+RUNTIME_IMPORTS = ("numpy", "cv2", "PIL", "piexif")
+
+
+def collect_runtime_import_versions(import_module=importlib.import_module):
+    result = {
+        "ok": True,
+        "python": sys.version,
+        "executable": sys.executable,
+        "modules": {},
+    }
+    for module_name in RUNTIME_IMPORTS:
+        try:
+            module = import_module(module_name)
+            result["modules"][module_name] = {
+                "ok": True,
+                "version": getattr(module, "__version__", "n/a"),
+                "file": getattr(module, "__file__", "n/a"),
+            }
+        except Exception as exc:
+            result["ok"] = False
+            result["modules"][module_name] = {
+                "ok": False,
+                "error": repr(exc),
+            }
+    return result
+
+
+def write_runtime_import_report(output_path):
+    report = collect_runtime_import_versions()
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
 
 
 @dataclass
@@ -546,8 +580,23 @@ class App:
         self.right_label = ttk.Label(preview_box, text="右鱼眼预览", anchor="center")
         self.right_label.grid(row=1, column=0, sticky="nsew", padx=10, pady=(5, 10))
 
-        controls = ttk.Frame(body)
-        controls.grid(row=1, column=1, sticky="nsew")
+        controls_shell = ttk.Frame(body)
+        controls_shell.grid(row=1, column=1, sticky="nsew")
+        controls_shell.rowconfigure(0, weight=1)
+        controls_shell.columnconfigure(0, weight=1)
+
+        self.controls_canvas = tk.Canvas(controls_shell, borderwidth=0, highlightthickness=0)
+        controls_scrollbar = ttk.Scrollbar(controls_shell, orient="vertical", command=self.controls_canvas.yview)
+        self.controls_canvas.configure(yscrollcommand=controls_scrollbar.set)
+        self.controls_canvas.grid(row=0, column=0, sticky="nsew")
+        controls_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        controls = ttk.Frame(self.controls_canvas)
+        self.controls_window = self.controls_canvas.create_window((0, 0), window=controls, anchor="nw")
+        controls.bind("<Configure>", self._on_controls_frame_configure)
+        self.controls_canvas.bind("<Configure>", self._on_controls_canvas_configure)
+        self.controls_canvas.bind("<Enter>", self._bind_controls_mousewheel)
+        self.controls_canvas.bind("<Leave>", self._unbind_controls_mousewheel)
         controls.columnconfigure(0, weight=1)
         controls.rowconfigure(6, weight=1)
 
@@ -646,7 +695,44 @@ class App:
         log_box.rowconfigure(0, weight=1)
         log_box.columnconfigure(0, weight=1)
         self.log = tk.Text(log_box, height=12, wrap="word")
-        self.log.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        log_scrollbar = ttk.Scrollbar(log_box, orient="vertical", command=self.log.yview)
+        self.log.configure(yscrollcommand=log_scrollbar.set)
+        self.log.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=10)
+        log_scrollbar.grid(row=0, column=1, sticky="ns", padx=(4, 10), pady=10)
+
+    def _on_controls_frame_configure(self, _event):
+        self.controls_canvas.configure(scrollregion=self.controls_canvas.bbox("all"))
+
+    def _on_controls_canvas_configure(self, event):
+        self.controls_canvas.itemconfigure(self.controls_window, width=event.width)
+
+    @staticmethod
+    def _mousewheel_units(event):
+        if getattr(event, "num", None) == 4:
+            return -1
+        if getattr(event, "num", None) == 5:
+            return 1
+        delta = getattr(event, "delta", 0)
+        if delta:
+            return -int(delta / 120)
+        return 0
+
+    def _on_controls_mousewheel(self, event):
+        if getattr(event, "widget", None) is self.log:
+            return
+        units = self._mousewheel_units(event)
+        if units:
+            self.controls_canvas.yview_scroll(units, "units")
+
+    def _bind_controls_mousewheel(self, _event):
+        self.root.bind_all("<MouseWheel>", self._on_controls_mousewheel)
+        self.root.bind_all("<Button-4>", self._on_controls_mousewheel)
+        self.root.bind_all("<Button-5>", self._on_controls_mousewheel)
+
+    def _unbind_controls_mousewheel(self, _event):
+        self.root.unbind_all("<MouseWheel>")
+        self.root.unbind_all("<Button-4>")
+        self.root.unbind_all("<Button-5>")
 
     def _add_material_track(self, track_type, label, paths):
         paths = [Path(path) for path in paths]
@@ -998,15 +1084,23 @@ class App:
             self.log.see("end")
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--self-test-imports")
+    args, _unknown = parser.parse_known_args(argv)
+    if args.self_test_imports:
+        report = write_runtime_import_report(args.self_test_imports)
+        return 0 if report["ok"] else 1
+
     root = tk.Tk()
     App(root)
     root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except Exception:
         log_path = Path(__file__).with_name("xpano_gui_error.log")
         log_path.write_text(traceback.format_exc(), encoding="utf-8")

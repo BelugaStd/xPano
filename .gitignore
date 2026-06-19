@@ -8,6 +8,7 @@ __pycache__/
 # Local virtual environments
 .venv/
 .venv-densify/
+.venv-release/
 venv/
 env/
 
