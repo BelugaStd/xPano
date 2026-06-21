@@ -1,0 +1,16 @@
+{
+  "skill": "ui-image-design-director",
+  "run_id": "xpano-workbench-redesign-20260621-230627",
+  "created_at": "2026-06-21T15:06:27.288Z",
+  "prompts": {
+    "desktop": "prompts/desktop.md",
+    "mobile_portrait": "prompts/mobile-portrait.md",
+    "mobile_landscape": "prompts/mobile-landscape.md"
+  },
+  "images": {
+    "desktop": null,
+    "mobile_portrait": null,
+    "mobile_landscape": null
+  },
+  "handoff": "handoff-brief.md"
+}
