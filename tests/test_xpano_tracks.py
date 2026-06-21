@@ -1,11 +1,12 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import piexif
 from PIL import Image
 
-from scripts.xpano_tracks import build_photo_track
+from scripts.xpano_tracks import build_ordinary_video_track, build_photo_track
 from scripts.xpano_tracks import validate_manifest
 
 
@@ -31,6 +32,31 @@ def write_jpeg(path, size, make, model, lens, focal_num):
 
 
 class PhotoTrackTests(unittest.TestCase):
+    def test_builds_ordinary_video_track_as_frame_photo_track(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"video")
+            frame = root / "frame.jpg"
+            Image.new("RGB", (100, 80), (32, 64, 96)).save(frame, "JPEG")
+
+            with patch("scripts.xpano_tracks.extract_single_video_frames", return_value=[frame]) as extract:
+                track = build_ordinary_video_track(
+                    1,
+                    video,
+                    root / "work",
+                    seconds_per_frame=2.0,
+                    max_frames=5,
+                )
+
+            extract.assert_called_once()
+            self.assertEqual(track["track_type"], "ordinary_video")
+            self.assertEqual(track["seconds_per_frame"], 2.0)
+            self.assertEqual(track["max_frames"], 5)
+            self.assertEqual(track["metashape_mode"], "pinhole_video_frames")
+            self.assertEqual(track["photos"], [str(frame.resolve())])
+            validate_manifest({"schema_version": 1, "workflow": "xpano_multi_track", "tracks": [track]})
+
     def test_splits_same_size_photos_by_exif_camera_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

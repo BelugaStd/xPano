@@ -51,16 +51,19 @@ class AppPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pano = root / "a.osv"
+            ordinary = root / "clip.mp4"
             phone = root / "phone"
             drone = root / "drone"
             output = root / "out"
             pano.write_bytes(b"video")
+            ordinary.write_bytes(b"video")
             phone.mkdir()
             drone.mkdir()
 
             job = material_tracks_to_job_config(
                 tracks=[
                     MaterialTrack(track_type="panorama_video", label="insta", paths=[pano]),
+                    MaterialTrack(track_type="ordinary_video", label="clip", paths=[ordinary]),
                     MaterialTrack(track_type="standard_photos", label="phone", paths=[phone]),
                     MaterialTrack(track_type="aerial_photos", label="mavic", paths=[drone]),
                 ],
@@ -71,6 +74,7 @@ class AppPipelineTests(unittest.TestCase):
             )
 
             self.assertEqual(job.panorama_videos, [pano.resolve()])
+            self.assertEqual(job.ordinary_video_tracks, [ordinary.resolve()])
             self.assertEqual(job.standard_photo_tracks, [("phone", [phone.resolve()])])
             self.assertEqual(job.aerial_photo_tracks, [("mavic", [drone.resolve()])])
             self.assertEqual(job.output_dir, output.resolve())

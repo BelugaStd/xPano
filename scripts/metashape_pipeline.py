@@ -166,7 +166,7 @@ def import_manifest_tracks(chunk, manifest):
         track_type = track.get("track_type")
         if track_type == "panorama_video":
             station_groups.extend(import_panorama_track(chunk, track))
-        elif track_type in {"standard_photos", "aerial_photos"}:
+        elif track_type in {"ordinary_video", "standard_photos", "aerial_photos"}:
             import_photo_track(chunk, track)
         else:
             raise RuntimeError(f"Unsupported track_type: {track_type}")

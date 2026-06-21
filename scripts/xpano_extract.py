@@ -289,3 +289,46 @@ def extract_frames(input_path, out_root, fps, max_frames=0, preview_cb=None, pro
     if progress_cb:
         progress_cb(1, 1)
     return extracted
+
+
+def extract_single_video_frames(input_path, out_root, fps, max_frames=0, preview_cb=None, progress_cb=None, log_cb=None, model_prefix=None):
+    input_path = Path(input_path)
+    out_root = Path(out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+    base_name = model_prefix or input_path.stem
+    cmd = [
+        locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
+        "-i", str(input_path),
+        "-map", "0:v:0", "-vf", f"fps={fps}",
+    ]
+    _append_frame_limit(cmd, max_frames)
+    cmd.extend(["-q:v", "2", str(out_root / f"{base_name}_%05d.jpg")])
+    if progress_cb:
+        progress_cb(0, max_frames if max_frames and max_frames > 0 else 1)
+    _run_ffmpeg(
+        cmd,
+        input_path,
+        fps,
+        max_frames,
+        progress_cb=progress_cb,
+        log_cb=log_cb,
+        out_root=out_root,
+        base_name=None,
+    )
+
+    frame_files = sorted(out_root.glob(f"{base_name}_*.jpg"))
+    if max_frames and max_frames > 0:
+        frame_files = frame_files[:max_frames]
+    extracted = []
+    for idx, source in enumerate(frame_files, 1):
+        frame_dir = out_root / f"{base_name}_frame_{idx:05d}"
+        frame_dir.mkdir(exist_ok=True)
+        dst = frame_dir / f"{base_name}_frame_{idx:05d}.jpg"
+        shutil.move(str(source), str(dst))
+        _apply_exif(dst, f"{base_name}_frame", "xPano")
+        extracted.append(dst)
+        if preview_cb:
+            preview_cb(str(dst), str(dst))
+        if progress_cb:
+            progress_cb(idx, len(frame_files))
+    return extracted

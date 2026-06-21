@@ -9,7 +9,7 @@ import sys
 import threading
 import queue
 import traceback
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -37,6 +37,7 @@ APP_VERSION = "0.1.1-portable"
 APP_TITLE = f"xPano 多相机重建 {APP_VERSION}"
 TRACK_TYPE_LABELS = {
     "panorama_video": "全景视频",
+    "ordinary_video": "普通视频",
     "standard_photos": "普通照片",
     "aerial_photos": "航拍照片",
 }
@@ -117,6 +118,7 @@ class MultiTrackJobConfig:
     lfs_densify_roma: str = "fast"
     lfs_densify_num_refs: float = 8.0
     lfs_densify_max_points: int = 0
+    ordinary_video_tracks: list = field(default_factory=list)
 
 
 def material_tracks_to_job_config(
@@ -142,6 +144,7 @@ def material_tracks_to_job_config(
     lfs_densify_max_points=0,
 ):
     panorama_videos = []
+    ordinary_video_tracks = []
     standard_photo_tracks = []
     aerial_photo_tracks = []
 
@@ -151,6 +154,8 @@ def material_tracks_to_job_config(
             raise ValueError(f"Material track {track.label or track.track_type} must contain at least one path")
         if track.track_type == "panorama_video":
             panorama_videos.extend(paths)
+        elif track.track_type == "ordinary_video":
+            ordinary_video_tracks.extend(paths)
         elif track.track_type == "standard_photos":
             standard_photo_tracks.append((track.label, paths))
         elif track.track_type == "aerial_photos":
@@ -160,6 +165,7 @@ def material_tracks_to_job_config(
 
     return MultiTrackJobConfig(
         panorama_videos=panorama_videos,
+        ordinary_video_tracks=ordinary_video_tracks,
         standard_photo_tracks=standard_photo_tracks,
         aerial_photo_tracks=aerial_photo_tracks,
         output_dir=Path(output_dir).resolve(),
@@ -376,6 +382,7 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
         _, manifest_path = build_manifest(
             output_dir=job.output_dir,
             panorama_videos=job.panorama_videos,
+            ordinary_videos=getattr(job, "ordinary_video_tracks", []),
             standard_photo_tracks=job.standard_photo_tracks,
             aerial_photo_tracks=job.aerial_photo_tracks,
             seconds_per_frame=job.seconds_per_frame,
@@ -479,6 +486,7 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
 def run_metashape_pipeline(job: JobConfig, progress_cb, preview_cb, log_cb):
     multi_job = MultiTrackJobConfig(
         panorama_videos=[job.input_video],
+        ordinary_video_tracks=[],
         standard_photo_tracks=[],
         aerial_photo_tracks=[],
         output_dir=job.output_dir,

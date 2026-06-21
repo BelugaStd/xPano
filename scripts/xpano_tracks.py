@@ -6,12 +6,13 @@ from pathlib import Path
 import piexif
 from PIL import Image
 
-from scripts.xpano_extract import extract_frames
+from scripts.xpano_extract import extract_frames, extract_single_video_frames
 
 
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png"}
 PANO_EXTENSIONS = {".osv", ".insv", ".mp4"}
-TRACK_TYPES = {"panorama_video", "standard_photos", "aerial_photos"}
+ORDINARY_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
+TRACK_TYPES = {"panorama_video", "ordinary_video", "standard_photos", "aerial_photos"}
 
 
 def safe_id(text):
@@ -163,6 +164,51 @@ def build_panorama_track(index, video_path, work_dir, seconds_per_frame, max_fra
     }
 
 
+def build_ordinary_video_track(index, video_path, work_dir, seconds_per_frame, max_frames, preview_cb=None, progress_cb=None, log_cb=None):
+    video = Path(video_path).resolve()
+    if video.suffix.lower() not in ORDINARY_VIDEO_EXTENSIONS:
+        raise ValueError(f"Unsupported ordinary video: {video}")
+    if not video.exists():
+        raise FileNotFoundError(video)
+
+    label = video.stem
+    track_id = make_track_id(index, label)
+    track_root = Path(work_dir) / "frames" / track_id
+    extracted = extract_single_video_frames(
+        input_path=video,
+        out_root=track_root,
+        fps=1.0 / seconds_per_frame,
+        max_frames=max_frames,
+        preview_cb=preview_cb,
+        progress_cb=progress_cb,
+        log_cb=log_cb,
+        model_prefix=track_id,
+    )
+    photos = [str(Path(path).resolve()) for path in extracted]
+    sensor_label = f"{track_id}_frame"
+    return {
+        "track_id": track_id,
+        "track_type": "ordinary_video",
+        "device_label": label,
+        "source_paths": [str(video)],
+        "seconds_per_frame": seconds_per_frame,
+        "max_frames": max_frames,
+        "metashape_mode": "pinhole_video_frames",
+        "export_mode": "undistorted_frame",
+        "group_label": f"{track_id}_frames",
+        "sensor_label": sensor_label,
+        "photo_sensors": [
+            {
+                "sensor_id": sensor_label,
+                "sensor_label": sensor_label,
+                "camera_identity": {},
+                "photos": photos,
+            }
+        ],
+        "photos": photos,
+    }
+
+
 def build_photo_track(index, label, paths, track_type):
     if track_type not in {"standard_photos", "aerial_photos"}:
         raise ValueError(f"Unsupported photo track type: {track_type}")
@@ -235,6 +281,25 @@ def validate_manifest(manifest, check_files=True):
                 if check_files:
                     _require(Path(left).exists(), f"Missing left image for {track_id} frame {frame_index}: {left}")
                     _require(Path(right).exists(), f"Missing right image for {track_id} frame {frame_index}: {right}")
+        elif track_type == "ordinary_video":
+            photos = track.get("photos")
+            photo_sensors = track.get("photo_sensors")
+            _require(isinstance(photos, list) and photos, f"Ordinary video track {track_id} must contain extracted frames")
+            _require(isinstance(photo_sensors, list) and photo_sensors, f"Ordinary video track {track_id} must contain photo_sensors")
+            _require(track.get("metashape_mode") == "pinhole_video_frames", f"Ordinary video track {track_id} has wrong metashape_mode")
+            _require(track.get("export_mode") == "undistorted_frame", f"Ordinary video track {track_id} has wrong export_mode")
+            if check_files:
+                for photo in photos:
+                    _require(Path(photo).exists(), f"Missing frame for {track_id}: {photo}")
+            covered = []
+            for sensor in photo_sensors:
+                sensor_photos = sensor.get("photos")
+                _require(isinstance(sensor_photos, list) and sensor_photos, f"Ordinary video track {track_id} sensor must contain photos")
+                covered.extend(sensor_photos)
+            _require(
+                _norm_paths(covered) == _norm_paths(photos),
+                f"Ordinary video track {track_id} photo_sensors must cover exactly the track photos",
+            )
         else:
             photos = track.get("photos")
             photo_sensors = track.get("photo_sensors")
@@ -262,7 +327,7 @@ def validate_manifest(manifest, check_files=True):
     return manifest
 
 
-def build_manifest(output_dir, panorama_videos=None, standard_photo_tracks=None, aerial_photo_tracks=None,
+def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, standard_photo_tracks=None, aerial_photo_tracks=None,
                    seconds_per_frame=1.0, max_frames=0, preview_cb=None, progress_cb=None, log_cb=None):
     output_dir = Path(output_dir)
     work_dir = output_dir / "work"
@@ -272,6 +337,21 @@ def build_manifest(output_dir, panorama_videos=None, standard_photo_tracks=None,
     for video in panorama_videos or []:
         tracks.append(
             build_panorama_track(
+                index=index,
+                video_path=video,
+                work_dir=work_dir,
+                seconds_per_frame=seconds_per_frame,
+                max_frames=max_frames,
+                preview_cb=preview_cb,
+                progress_cb=progress_cb,
+                log_cb=log_cb,
+            )
+        )
+        index += 1
+
+    for video in ordinary_videos or []:
+        tracks.append(
+            build_ordinary_video_track(
                 index=index,
                 video_path=video,
                 work_dir=work_dir,

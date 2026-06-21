@@ -75,10 +75,10 @@ function Install-ReleasePythonEnvironment {
         "--retries", "2",
         "-r", $ReleaseRequirements
     )
-    & $ReleasePython @InstallArgs
+    & $ReleasePython @InstallArgs -i "https://pypi.tuna.tsinghua.edu.cn/simple"
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "Default PyPI install failed; retrying with Tsinghua PyPI mirror..."
-        & $ReleasePython @InstallArgs -i "https://pypi.tuna.tsinghua.edu.cn/simple"
+        Write-Host "Tsinghua PyPI mirror install failed; retrying with default PyPI..."
+        & $ReleasePython @InstallArgs
     }
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install release requirements with exit code $LASTEXITCODE"
