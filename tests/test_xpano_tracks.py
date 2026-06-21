@@ -6,7 +6,7 @@ from unittest.mock import patch
 import piexif
 from PIL import Image
 
-from scripts.xpano_tracks import build_ordinary_video_track, build_photo_track
+from scripts.xpano_tracks import build_manifest, build_ordinary_video_track, build_photo_track
 from scripts.xpano_tracks import validate_manifest
 
 
@@ -56,6 +56,53 @@ class PhotoTrackTests(unittest.TestCase):
             self.assertEqual(track["metashape_mode"], "pinhole_video_frames")
             self.assertEqual(track["photos"], [str(frame.resolve())])
             validate_manifest({"schema_version": 1, "workflow": "xpano_multi_track", "tracks": [track]})
+
+    def test_manifest_applies_video_track_specific_extraction_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pano = root / "camera.osv"
+            ordinary = root / "clip.mp4"
+            pano.write_bytes(b"pano")
+            ordinary.write_bytes(b"video")
+            calls = []
+
+            def fake_pano(**kwargs):
+                calls.append(("pano", kwargs["seconds_per_frame"], kwargs["max_frames"]))
+                return {
+                    "track_id": "pano",
+                    "track_type": "panorama_video",
+                    "metashape_mode": "dual_fisheye_station",
+                    "export_mode": "cubemap",
+                    "frames": [{"left": str(pano), "right": str(pano)}],
+                }
+
+            def fake_ordinary(**kwargs):
+                calls.append(("ordinary", kwargs["seconds_per_frame"], kwargs["max_frames"]))
+                return {
+                    "track_id": "ordinary",
+                    "track_type": "ordinary_video",
+                    "metashape_mode": "pinhole_video_frames",
+                    "export_mode": "undistorted_frame",
+                    "photos": [str(ordinary)],
+                    "photo_sensors": [{"sensor_label": "ordinary_frame", "photos": [str(ordinary)]}],
+                }
+
+            settings = {
+                str(pano.resolve()): {"seconds_per_frame": 1.0, "max_frames": 10},
+                str(ordinary.resolve()): {"seconds_per_frame": 2.0, "max_frames": 20},
+            }
+            with patch("scripts.xpano_tracks.build_panorama_track", side_effect=fake_pano), \
+                patch("scripts.xpano_tracks.build_ordinary_video_track", side_effect=fake_ordinary):
+                build_manifest(
+                    root / "out",
+                    panorama_videos=[pano],
+                    ordinary_videos=[ordinary],
+                    seconds_per_frame=9.0,
+                    max_frames=99,
+                    track_extraction_settings=settings,
+                )
+
+            self.assertEqual(calls, [("pano", 1.0, 10), ("ordinary", 2.0, 20)])
 
     def test_splits_same_size_photos_by_exif_camera_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

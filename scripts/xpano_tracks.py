@@ -327,21 +327,33 @@ def validate_manifest(manifest, check_files=True):
     return manifest
 
 
+def _track_extraction_for(path, track_extraction_settings, seconds_per_frame, max_frames):
+    settings = track_extraction_settings or {}
+    key = str(Path(path).resolve())
+    value = settings.get(key) or settings.get(str(path)) or {}
+    return (
+        float(value.get("seconds_per_frame", seconds_per_frame)),
+        int(value.get("max_frames", max_frames)),
+    )
+
+
 def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, standard_photo_tracks=None, aerial_photo_tracks=None,
-                   seconds_per_frame=1.0, max_frames=0, preview_cb=None, progress_cb=None, log_cb=None):
+                   seconds_per_frame=1.0, max_frames=0, track_extraction_settings=None,
+                   preview_cb=None, progress_cb=None, log_cb=None):
     output_dir = Path(output_dir)
     work_dir = output_dir / "work"
     tracks = []
     index = 1
 
     for video in panorama_videos or []:
+        track_spf, track_max_frames = _track_extraction_for(video, track_extraction_settings, seconds_per_frame, max_frames)
         tracks.append(
             build_panorama_track(
                 index=index,
                 video_path=video,
                 work_dir=work_dir,
-                seconds_per_frame=seconds_per_frame,
-                max_frames=max_frames,
+                seconds_per_frame=track_spf,
+                max_frames=track_max_frames,
                 preview_cb=preview_cb,
                 progress_cb=progress_cb,
                 log_cb=log_cb,
@@ -350,13 +362,14 @@ def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, stand
         index += 1
 
     for video in ordinary_videos or []:
+        track_spf, track_max_frames = _track_extraction_for(video, track_extraction_settings, seconds_per_frame, max_frames)
         tracks.append(
             build_ordinary_video_track(
                 index=index,
                 video_path=video,
                 work_dir=work_dir,
-                seconds_per_frame=seconds_per_frame,
-                max_frames=max_frames,
+                seconds_per_frame=track_spf,
+                max_frames=track_max_frames,
                 preview_cb=preview_cb,
                 progress_cb=progress_cb,
                 log_cb=log_cb,

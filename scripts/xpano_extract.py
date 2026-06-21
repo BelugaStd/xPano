@@ -83,7 +83,20 @@ def _count_generated_pairs(out_root: Path, base_name: str):
     return min(left_count, right_count)
 
 
-def _run_ffmpeg(cmd, input_path: Path, fps, max_frames, progress_cb=None, log_cb=None, out_root=None, base_name=None):
+def _emit_generated_pair_previews(out_root: Path, base_name: str, last_previewed: int, preview_cb):
+    if not out_root or not base_name or preview_cb is None:
+        return last_previewed
+    count = _count_generated_pairs(out_root, base_name)
+    for frame_idx in range(last_previewed + 1, count + 1):
+        left = out_root / f"{base_name}_L_{frame_idx:05d}.jpg"
+        right = out_root / f"{base_name}_R_{frame_idx:05d}.jpg"
+        if left.exists() and right.exists():
+            _frame_preview(left, right, preview_cb)
+            last_previewed = frame_idx
+    return last_previewed
+
+
+def _run_ffmpeg(cmd, input_path: Path, fps, max_frames, progress_cb=None, log_cb=None, out_root=None, base_name=None, preview_cb=None):
     expected_frames = _expected_frame_count(input_path, fps, max_frames, log_cb=log_cb)
     if log_cb:
         if expected_frames:
@@ -161,10 +174,12 @@ def _run_ffmpeg(cmd, input_path: Path, fps, max_frames, progress_cb=None, log_cb
     reader.start()
 
     out_root = Path(out_root) if out_root else None
+    last_previewed = 0
     while proc.poll() is None:
         generated = _count_generated_pairs(out_root, base_name)
         if generated:
             emit_progress(set_last_frame(generated))
+            last_previewed = _emit_generated_pair_previews(out_root, base_name, last_previewed, preview_cb)
 
         now = time.monotonic()
         current_frame = get_last_frame()
@@ -182,6 +197,7 @@ def _run_ffmpeg(cmd, input_path: Path, fps, max_frames, progress_cb=None, log_cb
     generated = _count_generated_pairs(out_root, base_name)
     if generated:
         emit_progress(set_last_frame(generated))
+        _emit_generated_pair_previews(out_root, base_name, last_previewed, preview_cb)
     if rc != 0:
         tail = "\n".join(output_lines[-20:])
         raise subprocess.CalledProcessError(rc, cmd, output=tail)
@@ -235,6 +251,7 @@ def _extract_one(args):
         log_cb=log_cb,
         out_root=out_root,
         base_name=base_name,
+        preview_cb=preview_cb,
     )
 
     left_files = sorted(out_root.glob(f"{base_name}_L_*.jpg"))

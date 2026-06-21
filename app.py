@@ -119,6 +119,7 @@ class MultiTrackJobConfig:
     lfs_densify_num_refs: float = 8.0
     lfs_densify_max_points: int = 0
     ordinary_video_tracks: list = field(default_factory=list)
+    track_extraction_settings: dict = field(default_factory=dict)
 
 
 def material_tracks_to_job_config(
@@ -387,6 +388,7 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
             aerial_photo_tracks=job.aerial_photo_tracks,
             seconds_per_frame=job.seconds_per_frame,
             max_frames=job.max_frames,
+            track_extraction_settings=getattr(job, "track_extraction_settings", {}),
             preview_cb=preview_cb,
             progress_cb=lambda cur, total: progress_cb(5 + int(25 * cur / max(total, 1))),
             log_cb=log_cb,

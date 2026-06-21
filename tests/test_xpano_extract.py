@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.xpano_extract import _run_ffmpeg
+from scripts.xpano_extract import _emit_generated_pair_previews, _run_ffmpeg
 
 
 class FakeProgressProcess:
@@ -40,6 +40,18 @@ class FakeRunningProcess:
 
 
 class XpanoExtractProgressTests(unittest.TestCase):
+    def test_emits_preview_for_newly_generated_frame_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "clip_L_00001.jpg").write_bytes(b"left")
+            (root / "clip_R_00001.jpg").write_bytes(b"right")
+            previews = []
+
+            last = _emit_generated_pair_previews(root, "clip", 0, lambda left, right: previews.append((left, right)))
+
+            self.assertEqual(last, 1)
+            self.assertEqual(previews, [(str(root / "clip_L_00001.jpg"), str(root / "clip_R_00001.jpg"))])
+
     def test_streams_ffmpeg_progress_and_logs(self):
         progress_events = []
         log_events = []
@@ -87,6 +99,7 @@ class XpanoExtractProgressTests(unittest.TestCase):
             out_root = Path(tmp)
             process = FakeRunningProcess(out_root, "camera")
             progress_events = []
+            preview_events = []
 
             with patch("scripts.xpano_extract.subprocess.Popen", return_value=process):
                 _run_ffmpeg(
@@ -97,9 +110,14 @@ class XpanoExtractProgressTests(unittest.TestCase):
                     out_root=out_root,
                     base_name="camera",
                     progress_cb=lambda cur, total: progress_events.append((cur, total)),
+                    preview_cb=lambda left, right: preview_events.append((left, right)),
                 )
 
         self.assertIn((1, 5), progress_events)
+        self.assertEqual(
+            preview_events,
+            [(str(out_root / "camera_L_00001.jpg"), str(out_root / "camera_R_00001.jpg"))],
+        )
 
 
 if __name__ == "__main__":

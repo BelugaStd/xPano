@@ -1,4 +1,6 @@
 import sys
+import threading
+from dataclasses import replace
 from pathlib import Path
 
 from xpano_workbench import __version__
@@ -11,11 +13,12 @@ from xpano_workbench.models import (
     WorkbenchTrack,
     create_track,
 )
+from xpano_workbench.runner import WorkbenchEventSink, WorkbenchRunConfig, run_workbench_pipeline
 
 
 try:
-    from PySide6.QtCore import Qt, QTimer
-    from PySide6.QtGui import QAction
+    from PySide6.QtCore import QObject, Qt, QTimer, Signal
+    from PySide6.QtGui import QAction, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -25,14 +28,18 @@ try:
         QFormLayout,
         QHBoxLayout,
         QLabel,
+        QLineEdit,
         QListWidget,
         QListWidgetItem,
         QMainWindow,
+        QMessageBox,
+        QProgressBar,
         QPushButton,
         QSizePolicy,
         QSplitter,
         QStackedWidget,
         QStatusBar,
+        QTextEdit,
         QToolBar,
         QVBoxLayout,
         QWidget,
@@ -127,6 +134,22 @@ class InspectorPanel(QWidget):
         self.metashape_enabled.setChecked(track.enabled_for_metashape)
         self.colmap_enabled.setChecked(track.enabled_for_colmap)
 
+    def edited_track(self):
+        if not self._track:
+            return None
+        extraction = ExtractionSettings(
+            seconds_per_frame=self.spf.value(),
+            max_frames=self.max_frames.value(),
+            start_time_seconds=self.start_time.value(),
+            end_time_seconds=self.end_time.value(),
+        ).validate()
+        return replace(
+            self._track,
+            extraction=extraction,
+            enabled_for_metashape=self.metashape_enabled.isChecked(),
+            enabled_for_colmap=self.colmap_enabled.isChecked(),
+        ).validate()
+
 
 class PreviewStage(QWidget):
     def __init__(self):
@@ -159,6 +182,16 @@ class PreviewStage(QWidget):
         self.viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.viewer, 3)
 
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        layout.addWidget(self.progress)
+
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setObjectName("WorkbenchLog")
+        self.log.setMaximumHeight(160)
+        layout.addWidget(self.log)
+
     def _preview_card(self, text):
         card = QLabel(text)
         card.setAlignment(Qt.AlignCenter)
@@ -166,16 +199,70 @@ class PreviewStage(QWidget):
         card.setMinimumHeight(180)
         return card
 
+    def set_progress(self, value):
+        self.progress.setValue(max(0, min(100, int(value))))
+
+    def append_log(self, text):
+        self.log.append(str(text))
+
+    def set_preview(self, left_path, right_path):
+        self._set_preview_image(self.left_preview, left_path, "Left fisheye")
+        self._set_preview_image(self.right_preview, right_path, "Right fisheye")
+
+    def _set_preview_image(self, label, path, fallback):
+        path = Path(path) if path else None
+        if not path or not path.exists():
+            label.setPixmap(QPixmap())
+            label.setText(fallback)
+            return
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            label.setText(fallback)
+            return
+        label.setText("")
+        label.setPixmap(pixmap.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+
+class WorkbenchSignals(QObject):
+    progress = Signal(int)
+    log = Signal(str)
+    preview = Signal(str, str)
+    done = Signal(object)
+    error = Signal(str)
+
+
+class QtEventSink(WorkbenchEventSink):
+    def __init__(self, signals):
+        self.signals = signals
+
+    def progress(self, value):
+        self.signals.progress.emit(int(value))
+
+    def log(self, text):
+        self.signals.log.emit(str(text))
+
+    def preview(self, left_path, right_path):
+        self.signals.preview.emit(str(left_path), str(right_path))
+
+    def done(self, result=None):
+        self.signals.done.emit(result)
+
+    def error(self, exc):
+        self.signals.error.emit(str(exc))
+
 
 class WorkbenchWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.tracks: list[WorkbenchTrack] = []
+        self.running = False
+        self.signals = WorkbenchSignals()
         self.setWindowTitle(f"xPano Workbench {__version__}")
         self.resize(1320, 820)
         self.setMinimumSize(1040, 680)
         self._build_actions()
         self._build_layout()
+        self._connect_signals()
         self._apply_style()
 
     def _build_actions(self):
@@ -189,9 +276,11 @@ class WorkbenchWindow(QMainWindow):
 
         self.environment_action = QAction(style.standardIcon(QStyle.SP_ComputerIcon), "Environment", self)
         self.run_action = QAction(style.standardIcon(QStyle.SP_MediaPlay), "Run", self)
+        self.run_action.triggered.connect(self.start_run)
         self.pause_action = QAction(style.standardIcon(QStyle.SP_MediaPause), "Pause", self)
         self.stop_action = QAction(style.standardIcon(QStyle.SP_MediaStop), "Stop", self)
         self.output_action = QAction(style.standardIcon(QStyle.SP_DirLinkIcon), "Open output", self)
+        self.output_action.triggered.connect(self.pick_output_dir)
 
         toolbar = QToolBar("Command Bar")
         toolbar.setObjectName("CommandBar")
@@ -248,11 +337,29 @@ class WorkbenchWindow(QMainWindow):
 
         self.inspector = InspectorPanel()
         controls_layout.addWidget(self.inspector, 3)
+
+        run_card = QFrame()
+        run_card.setObjectName("PanelCard")
+        run_layout = QFormLayout(run_card)
+        run_layout.setContentsMargins(14, 14, 14, 14)
+        self.output_dir = QLineEdit()
+        output_button = QPushButton("Choose")
+        output_button.clicked.connect(self.pick_output_dir)
+        output_row = QHBoxLayout()
+        output_row.addWidget(self.output_dir)
+        output_row.addWidget(output_button)
+        run_layout.addRow("Output", output_row)
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItems(["metashape", "colmap"])
+        run_layout.addRow("Backend", self.backend_combo)
+        controls_layout.addWidget(run_card)
+
         left_workspace.addWidget(controls)
         left_workspace.setSizes([116, 360])
 
+        self.stage = PreviewStage()
         self.stage_stack = QStackedWidget()
-        self.stage_stack.addWidget(PreviewStage())
+        self.stage_stack.addWidget(self.stage)
 
         root_splitter.addWidget(left_workspace)
         root_splitter.addWidget(self.stage_stack)
@@ -260,6 +367,13 @@ class WorkbenchWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready")
+
+    def _connect_signals(self):
+        self.signals.progress.connect(self.stage.set_progress)
+        self.signals.log.connect(self.stage.append_log)
+        self.signals.preview.connect(self.stage.set_preview)
+        self.signals.done.connect(self._on_run_done)
+        self.signals.error.connect(self._on_run_error)
 
     def _next_index(self):
         return len(self.tracks) + 1
@@ -270,6 +384,66 @@ class WorkbenchWindow(QMainWindow):
         self.track_list.addItem(item)
         self.track_list.setCurrentItem(item)
         self.statusBar().showMessage(f"Added {track.display_type}: {track.label}", 5000)
+
+    def pick_output_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "Select output folder")
+        if path:
+            self.output_dir.setText(path)
+
+    def _sync_selected_track_from_inspector(self):
+        edited = self.inspector.edited_track()
+        if not edited:
+            return
+        for index, track in enumerate(self.tracks):
+            if track.track_id == edited.track_id:
+                self.tracks[index] = edited
+                item = self.track_list.currentItem()
+                if item and item.track_id == edited.track_id:
+                    item.setText(f"{edited.label}\n{edited.display_type}")
+                return
+
+    def start_run(self):
+        if self.running:
+            return
+        self._sync_selected_track_from_inspector()
+        if not self.tracks:
+            QMessageBox.warning(self, "Missing tracks", "Add at least one media track before running.")
+            return
+        if not self.output_dir.text().strip():
+            QMessageBox.warning(self, "Missing output", "Choose an output folder before running.")
+            return
+        config = WorkbenchRunConfig(
+            tracks=tuple(self.tracks),
+            output_dir=Path(self.output_dir.text().strip()),
+            backend=self.backend_combo.currentText(),
+        )
+        self.running = True
+        self.run_action.setEnabled(False)
+        self.stage.set_progress(0)
+        self.stage.append_log("Run started")
+        sink = QtEventSink(self.signals)
+
+        def run_target():
+            try:
+                run_workbench_pipeline(config, sink)
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=run_target, daemon=True)
+        thread.start()
+
+    def _on_run_done(self, _result):
+        self.running = False
+        self.run_action.setEnabled(True)
+        self.statusBar().showMessage("Run complete", 5000)
+        self.stage.append_log("Run complete")
+
+    def _on_run_error(self, message):
+        self.running = False
+        self.run_action.setEnabled(True)
+        self.statusBar().showMessage("Run failed", 5000)
+        self.stage.append_log(f"ERROR: {message}")
+        QMessageBox.critical(self, "Run failed", message)
 
     def add_panorama_track(self):
         paths, _ = QFileDialog.getOpenFileNames(
