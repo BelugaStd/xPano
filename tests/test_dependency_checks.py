@@ -34,12 +34,12 @@ class DependencyChecksTests(unittest.TestCase):
             with patch.dict("scripts.dependency_checks.os.environ", {"XPANO_COLMAP": str(exe)}, clear=False):
                 self.assertEqual(locate_colmap(), str(exe))
 
-    def test_locates_bundled_colmap_before_path(self):
+    def test_locates_bundled_colmap_exe_before_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bundled = root / "tools" / "colmap" / "COLMAP.bat"
+            bundled = root / "tools" / "colmap" / "bin" / "colmap.exe"
             bundled.parent.mkdir(parents=True)
-            bundled.write_text("@echo off\n", encoding="utf-8")
+            bundled.write_bytes(b"")
 
             with patch("scripts.dependency_checks.shutil.which", return_value=r"C:\Tools\colmap.exe"):
                 self.assertEqual(locate_colmap(project_root=root), str(bundled))
@@ -48,6 +48,16 @@ class DependencyChecksTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bundled = root / "tools" / "colmap" / "colmap-x64-windows-nocuda" / "bin" / "colmap.exe"
+            bundled.parent.mkdir(parents=True)
+            bundled.write_bytes(b"")
+
+            with patch("scripts.dependency_checks.shutil.which", return_value=None):
+                self.assertEqual(locate_colmap(project_root=root), str(bundled))
+
+    def test_locates_pyinstaller_internal_bundled_colmap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundled = root / "_internal" / "tools" / "colmap" / "bin" / "colmap.exe"
             bundled.parent.mkdir(parents=True)
             bundled.write_bytes(b"")
 
@@ -81,9 +91,9 @@ class DependencyChecksTests(unittest.TestCase):
     def test_resolve_colmap_command_can_use_bundled_copy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bundled = root / "tools" / "colmap" / "COLMAP.bat"
+            bundled = root / "tools" / "colmap" / "bin" / "colmap.exe"
             bundled.parent.mkdir(parents=True)
-            bundled.write_text("@echo off\n", encoding="utf-8")
+            bundled.write_bytes(b"")
 
             with patch("scripts.dependency_checks._project_root", return_value=root), \
                 patch("scripts.dependency_checks.shutil.which", return_value=None):

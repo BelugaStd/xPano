@@ -75,15 +75,17 @@ def build_pipeline_job(config: WorkbenchRunConfig):
             track_extraction_settings[str(path)] = {
                 "seconds_per_frame": track.extraction.seconds_per_frame,
                 "max_frames": track.extraction.max_frames,
+                "start_time_seconds": track.extraction.start_time_seconds,
+                "end_time_seconds": track.extraction.end_time_seconds,
             }
         if track.track_type == PANORAMA_VIDEO:
             panorama_videos.extend(paths)
         elif track.track_type == ORDINARY_VIDEO:
             ordinary_videos.extend(paths)
         elif track.track_type == STANDARD_PHOTOS:
-            standard_photo_tracks.append((track.label, paths))
+            standard_photo_tracks.append((track.label, paths, track.photo_limit))
         elif track.track_type == AERIAL_PHOTOS:
-            aerial_photo_tracks.append((track.label, paths))
+            aerial_photo_tracks.append((track.label, paths, track.photo_limit))
         else:
             raise ValueError(f"Unsupported workbench track type: {track.track_type}")
 

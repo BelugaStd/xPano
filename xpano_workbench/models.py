@@ -47,6 +47,8 @@ class WorkbenchTrack:
     label: str
     paths: tuple
     extraction: ExtractionSettings = field(default_factory=ExtractionSettings)
+    photo_limit: int = 0
+    media_duration_seconds: float = None
     enabled_for_metashape: bool = True
     enabled_for_colmap: bool = True
 
@@ -56,6 +58,12 @@ class WorkbenchTrack:
         if not self.paths:
             raise ValueError(f"Track {self.label or self.track_id} must contain at least one path")
         self.extraction.validate()
+        if self.photo_limit < 0:
+            raise ValueError("photo_limit cannot be negative")
+        if self.photo_limit and self.track_type not in PHOTO_TRACK_TYPES:
+            raise ValueError("photo_limit is only supported for photo tracks")
+        if self.media_duration_seconds is not None and self.media_duration_seconds <= 0:
+            raise ValueError("media_duration_seconds must be greater than 0")
         return self
 
     @property
@@ -69,6 +77,9 @@ class WorkbenchTrack:
     def with_extraction(self, **changes):
         return replace(self, extraction=replace(self.extraction, **changes)).validate()
 
+    def with_photo_limit(self, photo_limit):
+        return replace(self, photo_limit=int(photo_limit or 0)).validate()
+
 
 def make_track_id(index, label):
     safe = "".join(ch if ch.isalnum() else "_" for ch in label.strip()).strip("_").lower()
@@ -77,7 +88,7 @@ def make_track_id(index, label):
     return f"track_{index:03d}_{safe or 'track'}"
 
 
-def create_track(index, track_type, label, paths, extraction=None):
+def create_track(index, track_type, label, paths, extraction=None, photo_limit=0, media_duration_seconds=None):
     normalized_paths = tuple(str(Path(path)) for path in paths)
     track = WorkbenchTrack(
         track_id=make_track_id(index, label),
@@ -85,5 +96,7 @@ def create_track(index, track_type, label, paths, extraction=None):
         label=label,
         paths=normalized_paths,
         extraction=extraction or ExtractionSettings(),
+        photo_limit=int(photo_limit or 0),
+        media_duration_seconds=media_duration_seconds,
     )
     return track.validate()

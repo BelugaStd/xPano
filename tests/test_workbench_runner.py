@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from xpano_workbench.models import ORDINARY_VIDEO, PANORAMA_VIDEO, ExtractionSettings, create_track
+from xpano_workbench.models import ORDINARY_VIDEO, PANORAMA_VIDEO, STANDARD_PHOTOS, ExtractionSettings, create_track
 from xpano_workbench.runner import WorkbenchRunConfig, build_pipeline_job, run_workbench_pipeline
 
 
@@ -55,14 +55,39 @@ class WorkbenchRunnerTests(unittest.TestCase):
             pano.write_bytes(b"pano")
             ordinary.write_bytes(b"video")
             tracks = (
-                create_track(1, PANORAMA_VIDEO, "camera", [pano], extraction=ExtractionSettings(seconds_per_frame=1.0)),
-                create_track(2, ORDINARY_VIDEO, "clip", [ordinary], extraction=ExtractionSettings(seconds_per_frame=2.0)),
+                create_track(
+                    1,
+                    PANORAMA_VIDEO,
+                    "camera",
+                    [pano],
+                    extraction=ExtractionSettings(seconds_per_frame=1.0, start_time_seconds=3.0),
+                ),
+                create_track(
+                    2,
+                    ORDINARY_VIDEO,
+                    "clip",
+                    [ordinary],
+                    extraction=ExtractionSettings(seconds_per_frame=2.0, end_time_seconds=8.0),
+                ),
             )
 
             job = build_pipeline_job(WorkbenchRunConfig(tracks=tracks, output_dir=root / "out"))
 
             self.assertEqual(job.track_extraction_settings[str(pano.resolve())]["seconds_per_frame"], 1.0)
+            self.assertEqual(job.track_extraction_settings[str(pano.resolve())]["start_time_seconds"], 3.0)
             self.assertEqual(job.track_extraction_settings[str(ordinary.resolve())]["seconds_per_frame"], 2.0)
+            self.assertEqual(job.track_extraction_settings[str(ordinary.resolve())]["end_time_seconds"], 8.0)
+
+    def test_preserves_photo_limit_for_photo_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            photos = root / "photos"
+            photos.mkdir()
+            track = create_track(1, STANDARD_PHOTOS, "photos", [photos], photo_limit=59)
+
+            job = build_pipeline_job(WorkbenchRunConfig(tracks=(track,), output_dir=root / "out"))
+
+            self.assertEqual(job.standard_photo_tracks, [("photos", [photos.resolve()], 59)])
 
     def test_runner_forwards_progress_log_preview_and_done_events(self):
         with tempfile.TemporaryDirectory() as tmp:

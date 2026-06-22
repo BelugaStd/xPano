@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.colmap_backend import (
     ColmapBackendConfig,
@@ -13,6 +14,7 @@ from scripts.colmap_backend import (
     find_sparse_model_path,
     publish_colmap_output,
     read_colmap_points3d,
+    _run_command_streaming,
     run_colmap_plan,
     write_colmap_cameras,
     write_colmap_images,
@@ -58,18 +60,20 @@ class ColmapBackendPlanTests(unittest.TestCase):
                     }
                 ],
             }
+            fake_colmap = root / "colmap.exe"
+            fake_colmap.write_bytes(b"")
 
             plan = build_colmap_plan(
                 manifest,
                 output_dir=root / "out",
-                config=ColmapBackendConfig(colmap_exe="colmap.exe"),
+                config=ColmapBackendConfig(colmap_exe=str(fake_colmap)),
             )
 
             self.assertIsInstance(plan, ColmapCommandPlan)
             self.assertEqual(plan.database_path.name, "database.db")
             self.assertEqual(plan.image_dir.name, "colmap_images")
             self.assertEqual(plan.sparse_dir.name, "sparse")
-            self.assertEqual([cmd[0] for cmd in plan.commands], ["colmap.exe", "colmap.exe", "colmap.exe"])
+            self.assertEqual([cmd[0] for cmd in plan.commands], [str(fake_colmap), str(fake_colmap), str(fake_colmap)])
             self.assertEqual([cmd[1] for cmd in plan.commands], ["feature_extractor", "sequential_matcher", "mapper"])
             self.assertIn("--ImageReader.camera_model", plan.commands[0])
             self.assertIn("OPENCV_FISHEYE", plan.commands[0])
@@ -87,6 +91,10 @@ class ColmapBackendPlanTests(unittest.TestCase):
             self.assertIn("--FeatureMatching.use_gpu", plan.commands[1])
             self.assertIn("--FeatureMatching.guided_matching", plan.commands[1])
             self.assertIn("--SequentialMatching.overlap", plan.commands[1])
+            self.assertIn("--Mapper.snapshot_path", plan.commands[2])
+            self.assertIn(str((root / "out" / "snapshots")), plan.commands[2])
+            self.assertIn("--Mapper.snapshot_frames_freq", plan.commands[2])
+            self.assertIn("5", plan.commands[2])
             self.assertTrue((plan.image_dir / "left" / "000001.jpg").exists())
             self.assertTrue((plan.image_dir / "right" / "000001.jpg").exists())
             image_manifest = json.loads(plan.image_manifest_path.read_text(encoding="utf-8"))
@@ -243,6 +251,39 @@ class ColmapBackendPlanTests(unittest.TestCase):
             self.assertEqual(progress, [53, 71, 90])
             self.assertTrue(any("feature_extractor" in line for line in logs))
 
+    def test_colmap_subprocess_uses_bundled_qt_plugin_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "tools" / "colmap" / "bin" / "colmap.exe"
+            platform = root / "tools" / "colmap" / "plugins" / "platforms"
+            exe.parent.mkdir(parents=True)
+            platform.mkdir(parents=True)
+            exe.write_bytes(b"")
+            captured = {}
+
+            class FakeStdout:
+                def __iter__(self):
+                    return iter(())
+
+            class FakeProcess:
+                stdout = FakeStdout()
+
+                def wait(self):
+                    return 0
+
+            def fake_popen(command, **kwargs):
+                captured["command"] = command
+                captured["env"] = kwargs["env"]
+                return FakeProcess()
+
+            with patch("scripts.colmap_backend.subprocess.Popen", side_effect=fake_popen):
+                _run_command_streaming([str(exe), "feature_extractor"], root, lambda _text: None)
+
+            self.assertEqual(captured["command"][0], str(exe))
+            self.assertEqual(captured["env"]["QT_PLUGIN_PATH"], str(root / "tools" / "colmap" / "plugins"))
+            self.assertEqual(captured["env"]["QT_QPA_PLATFORM_PLUGIN_PATH"], str(platform))
+            self.assertTrue(captured["env"]["PATH"].split(";")[0].endswith(r"tools\colmap\bin"))
+
     def test_selects_sparse_model_with_most_registered_images(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -332,6 +373,50 @@ class ColmapBackendPlanTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "feature_extractor"):
                 run_colmap_plan(plan, runner=fake_runner)
+
+    def test_retries_feature_extraction_on_cpu_when_cuda_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = ColmapCommandPlan(
+                output_dir=root,
+                database_path=root / "database.db",
+                image_dir=root / "colmap_images",
+                sparse_dir=root / "sparse",
+                commands=[
+                    [
+                        "colmap",
+                        "feature_extractor",
+                        "--database_path",
+                        str(root / "database.db"),
+                        "--FeatureExtraction.use_gpu",
+                        "1",
+                    ],
+                    ["colmap", "mapper"],
+                ],
+            )
+            plan.image_dir.mkdir()
+            plan.sparse_dir.mkdir()
+            calls = []
+            logs = []
+
+            def fake_runner(command, **kwargs):
+                calls.append(command)
+                if len(calls) == 1:
+                    return type("Result", (), {"returncode": 1, "stdout": "COLMAP without CUDA", "stderr": ""})()
+                if command[1] == "feature_extractor":
+                    plan.database_path.write_bytes(b"db")
+                if command[1] == "mapper":
+                    sparse_zero = plan.sparse_dir / "0"
+                    sparse_zero.mkdir()
+                    (sparse_zero / "cameras.bin").write_bytes(b"cameras")
+                    (sparse_zero / "images.bin").write_bytes(b"images")
+                    (sparse_zero / "points3D.bin").write_bytes(b"points")
+                return type("Result", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+            run_colmap_plan(plan, log_cb=logs.append, runner=fake_runner)
+
+            self.assertEqual(calls[1][calls[1].index("--FeatureExtraction.use_gpu") + 1], "0")
+            self.assertTrue(any("retrying with CPU" in line for line in logs))
 
     def test_fails_when_colmap_sparse_output_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

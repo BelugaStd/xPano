@@ -29,6 +29,10 @@ def _bundled_colmap_candidates(project_root=None):
     internal = internal_root()
     if getattr(sys, "frozen", False) and internal not in roots:
         roots.append(internal)
+    for root in list(roots):
+        bundled_internal = root / "_internal"
+        if bundled_internal not in roots:
+            roots.append(bundled_internal)
     base_dirs = []
     for root in roots:
         base_dirs.extend([
@@ -39,20 +43,20 @@ def _bundled_colmap_candidates(project_root=None):
     for base in base_dirs:
         candidates.extend(
             [
+                base / "bin" / "colmap.exe",
+                base / "colmap.exe",
                 base / "COLMAP.bat",
                 base / "colmap.bat",
-                base / "colmap.exe",
-                base / "bin" / "colmap.exe",
             ]
         )
         if base.exists():
             for child in sorted(path for path in base.iterdir() if path.is_dir()):
                 candidates.extend(
                     [
+                        child / "bin" / "colmap.exe",
+                        child / "colmap.exe",
                         child / "COLMAP.bat",
                         child / "colmap.bat",
-                        child / "colmap.exe",
-                        child / "bin" / "colmap.exe",
                     ]
                 )
     return candidates

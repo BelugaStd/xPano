@@ -7,9 +7,10 @@ import piexif
 from PIL import Image
 
 from scripts.xpano_extract import extract_frames, extract_single_video_frames
+from xpano_workbench.media_import import sample_evenly
 
 
-PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png"}
+PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp"}
 PANO_EXTENSIONS = {".osv", ".insv", ".mp4"}
 ORDINARY_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
 TRACK_TYPES = {"panorama_video", "ordinary_video", "standard_photos", "aerial_photos"}
@@ -118,7 +119,18 @@ def build_photo_sensor_groups(base_label, photos):
     return list(groups.values())
 
 
-def build_panorama_track(index, video_path, work_dir, seconds_per_frame, max_frames, preview_cb=None, progress_cb=None, log_cb=None):
+def build_panorama_track(
+    index,
+    video_path,
+    work_dir,
+    seconds_per_frame,
+    max_frames,
+    start_time_seconds=0.0,
+    end_time_seconds=0.0,
+    preview_cb=None,
+    progress_cb=None,
+    log_cb=None,
+):
     video = Path(video_path).resolve()
     if video.suffix.lower() not in PANO_EXTENSIONS:
         raise ValueError(f"Unsupported panorama video: {video}")
@@ -133,6 +145,8 @@ def build_panorama_track(index, video_path, work_dir, seconds_per_frame, max_fra
         out_root=track_root,
         fps=1.0 / seconds_per_frame,
         max_frames=max_frames,
+        start_time_seconds=start_time_seconds,
+        end_time_seconds=end_time_seconds,
         preview_cb=preview_cb,
         progress_cb=progress_cb,
         log_cb=log_cb,
@@ -156,6 +170,8 @@ def build_panorama_track(index, video_path, work_dir, seconds_per_frame, max_fra
         "source_paths": [str(video)],
         "seconds_per_frame": seconds_per_frame,
         "max_frames": max_frames,
+        "start_time_seconds": start_time_seconds,
+        "end_time_seconds": end_time_seconds,
         "metashape_mode": "dual_fisheye_station",
         "export_mode": "cubemap",
         "left_sensor_label": f"{track_id}_left",
@@ -164,7 +180,18 @@ def build_panorama_track(index, video_path, work_dir, seconds_per_frame, max_fra
     }
 
 
-def build_ordinary_video_track(index, video_path, work_dir, seconds_per_frame, max_frames, preview_cb=None, progress_cb=None, log_cb=None):
+def build_ordinary_video_track(
+    index,
+    video_path,
+    work_dir,
+    seconds_per_frame,
+    max_frames,
+    start_time_seconds=0.0,
+    end_time_seconds=0.0,
+    preview_cb=None,
+    progress_cb=None,
+    log_cb=None,
+):
     video = Path(video_path).resolve()
     if video.suffix.lower() not in ORDINARY_VIDEO_EXTENSIONS:
         raise ValueError(f"Unsupported ordinary video: {video}")
@@ -179,6 +206,8 @@ def build_ordinary_video_track(index, video_path, work_dir, seconds_per_frame, m
         out_root=track_root,
         fps=1.0 / seconds_per_frame,
         max_frames=max_frames,
+        start_time_seconds=start_time_seconds,
+        end_time_seconds=end_time_seconds,
         preview_cb=preview_cb,
         progress_cb=progress_cb,
         log_cb=log_cb,
@@ -193,6 +222,8 @@ def build_ordinary_video_track(index, video_path, work_dir, seconds_per_frame, m
         "source_paths": [str(video)],
         "seconds_per_frame": seconds_per_frame,
         "max_frames": max_frames,
+        "start_time_seconds": start_time_seconds,
+        "end_time_seconds": end_time_seconds,
         "metashape_mode": "pinhole_video_frames",
         "export_mode": "undistorted_frame",
         "group_label": f"{track_id}_frames",
@@ -209,13 +240,14 @@ def build_ordinary_video_track(index, video_path, work_dir, seconds_per_frame, m
     }
 
 
-def build_photo_track(index, label, paths, track_type):
+def build_photo_track(index, label, paths, track_type, max_photos=0):
     if track_type not in {"standard_photos", "aerial_photos"}:
         raise ValueError(f"Unsupported photo track type: {track_type}")
     track_id = make_track_id(index, label)
-    photos = iter_photo_paths(paths)
-    if not photos:
+    all_photos = iter_photo_paths(paths)
+    if not all_photos:
         raise ValueError(f"No photos found for track {label}")
+    photos = sample_evenly(all_photos, max_photos)
     sensor_label = f"{track_id}_frame"
     photo_sensors = build_photo_sensor_groups(sensor_label, photos)
     return {
@@ -229,7 +261,18 @@ def build_photo_track(index, label, paths, track_type):
         "sensor_label": sensor_label,
         "photo_sensors": photo_sensors,
         "photos": [str(p) for p in photos],
+        "photo_count_total": len(all_photos),
+        "photo_count_selected": len(photos),
     }
+
+
+def _photo_track_parts(track):
+    if len(track) == 2:
+        label, paths = track
+        return label, paths, 0
+    if len(track) == 3:
+        return track
+    raise ValueError("Photo track entries must be (label, paths) or (label, paths, max_photos)")
 
 
 def write_manifest(manifest, path):
@@ -334,6 +377,8 @@ def _track_extraction_for(path, track_extraction_settings, seconds_per_frame, ma
     return (
         float(value.get("seconds_per_frame", seconds_per_frame)),
         int(value.get("max_frames", max_frames)),
+        float(value.get("start_time_seconds", 0.0)),
+        float(value.get("end_time_seconds", 0.0)),
     )
 
 
@@ -346,7 +391,12 @@ def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, stand
     index = 1
 
     for video in panorama_videos or []:
-        track_spf, track_max_frames = _track_extraction_for(video, track_extraction_settings, seconds_per_frame, max_frames)
+        track_spf, track_max_frames, track_start, track_end = _track_extraction_for(
+            video,
+            track_extraction_settings,
+            seconds_per_frame,
+            max_frames,
+        )
         tracks.append(
             build_panorama_track(
                 index=index,
@@ -354,6 +404,8 @@ def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, stand
                 work_dir=work_dir,
                 seconds_per_frame=track_spf,
                 max_frames=track_max_frames,
+                start_time_seconds=track_start,
+                end_time_seconds=track_end,
                 preview_cb=preview_cb,
                 progress_cb=progress_cb,
                 log_cb=log_cb,
@@ -362,7 +414,12 @@ def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, stand
         index += 1
 
     for video in ordinary_videos or []:
-        track_spf, track_max_frames = _track_extraction_for(video, track_extraction_settings, seconds_per_frame, max_frames)
+        track_spf, track_max_frames, track_start, track_end = _track_extraction_for(
+            video,
+            track_extraction_settings,
+            seconds_per_frame,
+            max_frames,
+        )
         tracks.append(
             build_ordinary_video_track(
                 index=index,
@@ -370,6 +427,8 @@ def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, stand
                 work_dir=work_dir,
                 seconds_per_frame=track_spf,
                 max_frames=track_max_frames,
+                start_time_seconds=track_start,
+                end_time_seconds=track_end,
                 preview_cb=preview_cb,
                 progress_cb=progress_cb,
                 log_cb=log_cb,
@@ -377,12 +436,14 @@ def build_manifest(output_dir, panorama_videos=None, ordinary_videos=None, stand
         )
         index += 1
 
-    for label, paths in standard_photo_tracks or []:
-        tracks.append(build_photo_track(index, label, paths, "standard_photos"))
+    for item in standard_photo_tracks or []:
+        label, paths, max_photos = _photo_track_parts(item)
+        tracks.append(build_photo_track(index, label, paths, "standard_photos", max_photos=max_photos))
         index += 1
 
-    for label, paths in aerial_photo_tracks or []:
-        tracks.append(build_photo_track(index, label, paths, "aerial_photos"))
+    for item in aerial_photo_tracks or []:
+        label, paths, max_photos = _photo_track_parts(item)
+        tracks.append(build_photo_track(index, label, paths, "aerial_photos", max_photos=max_photos))
         index += 1
 
     if not tracks:

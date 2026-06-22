@@ -41,7 +41,7 @@ TRACK_TYPE_LABELS = {
     "standard_photos": "普通照片",
     "aerial_photos": "航拍照片",
 }
-RUNTIME_IMPORTS = ("numpy", "cv2", "PIL", "piexif")
+RUNTIME_IMPORTS = ("numpy", "cv2", "PIL", "piexif", "viser")
 
 
 def collect_runtime_import_versions(import_module=importlib.import_module):
@@ -398,6 +398,7 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
     if backend == COLMAP_BACKEND:
         log_cb("开始 COLMAP 自动处理")
         progress_cb(35)
+        job.colmap_exe = resolve_executable(job.colmap_exe, "colmap")
         colmap_config = colmap_config_for_density_preset(job.colmap_density_preset, colmap_exe=job.colmap_exe)
         if job.colmap_use_gpu:
             colmap_config = replace(colmap_config, use_gpu=True)

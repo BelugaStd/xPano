@@ -34,6 +34,17 @@ def _append_frame_limit(cmd, max_frames):
         cmd.extend(["-frames:v", str(max_frames)])
 
 
+def _input_time_args(start_time_seconds=0.0, end_time_seconds=0.0):
+    start = float(start_time_seconds or 0.0)
+    end = float(end_time_seconds or 0.0)
+    args = []
+    if start > 0:
+        args.extend(["-ss", f"{start:.6f}"])
+    if end > 0 and end > start:
+        args.extend(["-t", f"{end - start:.6f}"])
+    return args
+
+
 def _probe_duration_seconds(input_path: Path, log_cb=None):
     try:
         result = subprocess.run(
@@ -62,13 +73,16 @@ def _probe_duration_seconds(input_path: Path, log_cb=None):
         return None
 
 
-def _expected_frame_count(input_path: Path, fps, max_frames, log_cb=None):
+def _expected_frame_count(input_path: Path, fps, max_frames, log_cb=None, start_time_seconds=0.0, end_time_seconds=0.0):
     if max_frames and max_frames > 0:
         return max_frames
     duration = _probe_duration_seconds(input_path, log_cb=log_cb)
     if not duration:
         return None
-    return max(1, int(duration * fps + 0.999999))
+    start = min(float(start_time_seconds or 0.0), duration)
+    end = float(end_time_seconds or 0.0)
+    effective_end = min(end, duration) if end > 0 else duration
+    return max(1, int(max(0.0, effective_end - start) * fps + 0.999999))
 
 
 def _popen_creationflags():
@@ -96,8 +110,27 @@ def _emit_generated_pair_previews(out_root: Path, base_name: str, last_previewed
     return last_previewed
 
 
-def _run_ffmpeg(cmd, input_path: Path, fps, max_frames, progress_cb=None, log_cb=None, out_root=None, base_name=None, preview_cb=None):
-    expected_frames = _expected_frame_count(input_path, fps, max_frames, log_cb=log_cb)
+def _run_ffmpeg(
+    cmd,
+    input_path: Path,
+    fps,
+    max_frames,
+    progress_cb=None,
+    log_cb=None,
+    out_root=None,
+    base_name=None,
+    preview_cb=None,
+    start_time_seconds=0.0,
+    end_time_seconds=0.0,
+):
+    expected_frames = _expected_frame_count(
+        input_path,
+        fps,
+        max_frames,
+        log_cb=log_cb,
+        start_time_seconds=start_time_seconds,
+        end_time_seconds=end_time_seconds,
+    )
     if log_cb:
         if expected_frames:
             log_cb(f"ffmpeg extracting {input_path.name}, expected frames: {expected_frames}")
@@ -204,14 +237,15 @@ def _run_ffmpeg(cmd, input_path: Path, fps, max_frames, progress_cb=None, log_cb
 
 
 def _extract_one(args):
-    task, fps, out_root, max_frames, preview_cb, progress_cb, log_cb, model_prefix = args
+    task, fps, out_root, max_frames, preview_cb, progress_cb, log_cb, model_prefix, start_time_seconds, end_time_seconds = args
     left = task["left_file"]
     right = task["right_file"]
     base_name = task["clean_name"]
+    input_time_args = _input_time_args(start_time_seconds, end_time_seconds)
     if task["type"] == "insta_split":
         cmd = [
             locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
-            "-i", str(left), "-i", str(right),
+            *input_time_args, "-i", str(left), *input_time_args, "-i", str(right),
             "-map", "0:0", "-vf", f"fps={fps}",
         ]
         _append_frame_limit(cmd, max_frames)
@@ -228,7 +262,7 @@ def _extract_one(args):
     else:
         cmd = [
             locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
-            "-i", str(left),
+            *input_time_args, "-i", str(left),
             "-map", "0:0", "-vf", f"fps={fps}",
         ]
         _append_frame_limit(cmd, max_frames)
@@ -252,6 +286,8 @@ def _extract_one(args):
         out_root=out_root,
         base_name=base_name,
         preview_cb=preview_cb,
+        start_time_seconds=start_time_seconds,
+        end_time_seconds=end_time_seconds,
     )
 
     left_files = sorted(out_root.glob(f"{base_name}_L_*.jpg"))
@@ -279,7 +315,18 @@ def _extract_one(args):
     return extracted
 
 
-def extract_frames(input_path, out_root, fps, max_frames=0, preview_cb=None, progress_cb=None, log_cb=None, model_prefix=None):
+def extract_frames(
+    input_path,
+    out_root,
+    fps,
+    max_frames=0,
+    start_time_seconds=0.0,
+    end_time_seconds=0.0,
+    preview_cb=None,
+    progress_cb=None,
+    log_cb=None,
+    model_prefix=None,
+):
     input_path = Path(input_path)
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -302,20 +349,45 @@ def extract_frames(input_path, out_root, fps, max_frames=0, preview_cb=None, pro
     }
     if progress_cb:
         progress_cb(0, max_frames if max_frames and max_frames > 0 else 1)
-    extracted = _extract_one((task, fps, out_root, max_frames, preview_cb, progress_cb, log_cb, model_prefix))
+    extracted = _extract_one(
+        (
+            task,
+            fps,
+            out_root,
+            max_frames,
+            preview_cb,
+            progress_cb,
+            log_cb,
+            model_prefix,
+            start_time_seconds,
+            end_time_seconds,
+        )
+    )
     if progress_cb:
         progress_cb(1, 1)
     return extracted
 
 
-def extract_single_video_frames(input_path, out_root, fps, max_frames=0, preview_cb=None, progress_cb=None, log_cb=None, model_prefix=None):
+def extract_single_video_frames(
+    input_path,
+    out_root,
+    fps,
+    max_frames=0,
+    start_time_seconds=0.0,
+    end_time_seconds=0.0,
+    preview_cb=None,
+    progress_cb=None,
+    log_cb=None,
+    model_prefix=None,
+):
     input_path = Path(input_path)
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     base_name = model_prefix or input_path.stem
+    input_time_args = _input_time_args(start_time_seconds, end_time_seconds)
     cmd = [
         locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
-        "-i", str(input_path),
+        *input_time_args, "-i", str(input_path),
         "-map", "0:v:0", "-vf", f"fps={fps}",
     ]
     _append_frame_limit(cmd, max_frames)
@@ -331,6 +403,8 @@ def extract_single_video_frames(input_path, out_root, fps, max_frames=0, preview
         log_cb=log_cb,
         out_root=out_root,
         base_name=None,
+        start_time_seconds=start_time_seconds,
+        end_time_seconds=end_time_seconds,
     )
 
     frame_files = sorted(out_root.glob(f"{base_name}_*.jpg"))

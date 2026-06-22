@@ -1,10 +1,13 @@
 import json
 import math
+import os
 import shutil
 import subprocess
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from scripts.dependency_checks import resolve_executable
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,7 @@ class ColmapBackendConfig:
     mapper_tri_ignore_two_view_tracks: bool = None
     mapper_filter_max_reproj_error: float = None
     mapper_tri_min_angle: float = None
+    mapper_snapshot_frames_freq: int = 5
 
 
 COLMAP_DENSITY_PRESETS = ("stable", "high-density", "experimental-high-density")
@@ -79,6 +83,12 @@ def _collect_panorama_frames(manifest):
 
 def build_colmap_plan(manifest, output_dir, config=None):
     config = config or ColmapBackendConfig()
+    config = ColmapBackendConfig(
+        **{
+            **config.__dict__,
+            "colmap_exe": resolve_executable(config.colmap_exe, "colmap"),
+        }
+    )
     output_dir = Path(output_dir)
     image_dir = output_dir / "colmap_images"
     sparse_dir = output_dir / "sparse"
@@ -195,6 +205,10 @@ def build_colmap_plan(manifest, output_dir, config=None):
             str(image_dir),
             "--output_path",
             str(sparse_dir),
+            "--Mapper.snapshot_path",
+            str(output_dir / "snapshots"),
+            "--Mapper.snapshot_frames_freq",
+            str(config.mapper_snapshot_frames_freq),
         ]
     )
     mapper_command = commands[-1]
@@ -232,14 +246,47 @@ def _command_name(command):
     return "COLMAP"
 
 
+def _command_stage_label(name):
+    return {
+        "feature_extractor": "COLMAP_STAGE: feature_extraction",
+        "sequential_matcher": "COLMAP_STAGE: feature_matching",
+        "exhaustive_matcher": "COLMAP_STAGE: feature_matching",
+        "mapper": "COLMAP_STAGE: mapping",
+    }.get(name, f"COLMAP_STAGE: {name}")
+
+
 def _popen_creationflags():
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _colmap_process_env(command):
+    env = os.environ.copy()
+    if not command:
+        return env
+    exe = Path(str(command[0]))
+    if not exe.exists():
+        return env
+    bin_dir = exe.parent
+    root_dir = bin_dir.parent if bin_dir.name.lower() == "bin" else exe.parent
+    plugin_dir = root_dir / "plugins"
+    platform_dir = plugin_dir / "platforms"
+    path_parts = [str(bin_dir), str(root_dir)]
+    existing_path = env.get("PATH") or env.get("Path") or ""
+    if existing_path:
+        path_parts.append(existing_path)
+    env["PATH"] = os.pathsep.join(path_parts)
+    if plugin_dir.exists():
+        env["QT_PLUGIN_PATH"] = str(plugin_dir)
+    if platform_dir.exists():
+        env["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platform_dir)
+    return env
 
 
 def _run_command_streaming(command, cwd, log_cb):
     proc = subprocess.Popen(
         command,
         cwd=str(cwd),
+        env=_colmap_process_env(command),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -255,6 +302,27 @@ def _run_command_streaming(command, cwd, log_cb):
             log_cb(line)
     rc = proc.wait()
     return subprocess.CompletedProcess(command, rc, stdout="\n".join(output_lines), stderr="")
+
+
+def _looks_like_cuda_unavailable(output):
+    lowered = (output or "").lower()
+    return (
+        "without cuda" in lowered
+        or "cuda is not available" in lowered
+        or "not compiled with cuda" in lowered
+        or "siftgpu" in lowered and "cuda" in lowered
+    )
+
+
+def _command_with_gpu_disabled(command):
+    command = [str(part) for part in command]
+    gpu_flags = {"--FeatureExtraction.use_gpu", "--FeatureMatching.use_gpu"}
+    changed = False
+    for index, part in enumerate(command[:-1]):
+        if part in gpu_flags and command[index + 1] != "0":
+            command[index + 1] = "0"
+            changed = True
+    return command if changed else None
 
 
 def _has_sparse_model(sparse_dir):
@@ -389,8 +457,8 @@ def read_colmap_images(model_dir):
     return images
 
 
-def read_colmap_points3d(model_dir):
-    path = Path(model_dir) / "points3D.bin"
+def read_colmap_points3d_file(path):
+    path = Path(path)
     data = path.read_bytes()
     offset = 0
     count = struct.unpack_from("<Q", data, offset)[0]
@@ -414,6 +482,10 @@ def read_colmap_points3d(model_dir):
             track.append((image_id, point2d_idx))
         points.append({"id": point_id, "xyz": xyz, "rgb": rgb, "error": error, "track": track})
     return points
+
+
+def read_colmap_points3d(model_dir):
+    return read_colmap_points3d_file(Path(model_dir) / "points3D.bin")
 
 
 def _write_cstring(handle, text):
@@ -706,6 +778,7 @@ def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
 
     for index, command in enumerate(plan.commands, 1):
         name = _command_name(command)
+        log_cb(_command_stage_label(name))
         log_cb(f"COLMAP {name}: {' '.join(str(part) for part in command)}")
         if runner is None:
             result = _run_command_streaming(command, plan.output_dir, log_cb)
@@ -723,8 +796,29 @@ def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
                     if line:
                         log_cb(line)
         if getattr(result, "returncode", 0) != 0:
+            retry_command = _command_with_gpu_disabled(command)
+            if retry_command and _looks_like_cuda_unavailable(getattr(result, "stdout", "") + "\n" + getattr(result, "stderr", "")):
+                log_cb(f"COLMAP {name}: CUDA is unavailable in this COLMAP build; retrying with CPU.")
+                if runner is None:
+                    result = _run_command_streaming(retry_command, plan.output_dir, log_cb)
+                else:
+                    result = runner(
+                        retry_command,
+                        cwd=str(plan.output_dir),
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    for stream in [getattr(result, "stdout", ""), getattr(result, "stderr", "")]:
+                        for line in (stream or "").splitlines():
+                            if line:
+                                log_cb(line)
+                command = retry_command
+        if getattr(result, "returncode", 0) != 0:
             raise RuntimeError(f"COLMAP {name} failed with return code {result.returncode}")
         progress_cb(35 + int(55 * index / total))
+        log_cb(f"COLMAP_STAGE_DONE: {name}")
 
     if not Path(plan.database_path).exists():
         raise RuntimeError(f"COLMAP database output is missing: {plan.database_path}")

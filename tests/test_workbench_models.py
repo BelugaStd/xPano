@@ -48,6 +48,11 @@ class WorkbenchModelTests(unittest.TestCase):
         self.assertEqual(updated.extraction.seconds_per_frame, 0.5)
         self.assertEqual(updated.extraction.max_frames, 10)
 
+    def test_creates_photo_track_with_track_bound_photo_limit(self):
+        track = create_track(1, STANDARD_PHOTOS, "photos", [Path("photos")], photo_limit=59)
+
+        self.assertEqual(track.photo_limit, 59)
+
 
 if __name__ == "__main__":
     unittest.main()

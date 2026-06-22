@@ -92,6 +92,7 @@ import cv2
 import numpy
 import PIL
 import piexif
+import viser
 
 payload = {
     "executable": sys.executable,
@@ -101,6 +102,7 @@ payload = {
     "cv2": cv2.__version__,
     "PIL": PIL.__version__,
     "piexif": getattr(piexif, "__version__", "n/a"),
+    "viser": getattr(viser, "__version__", "n/a"),
 }
 print(json.dumps(payload, ensure_ascii=False))
 assert site.ENABLE_USER_SITE in (False, None)
@@ -213,14 +215,26 @@ if (-not $SkipPyInstaller) {
         "--distpath", $DistRoot,
         "--workpath", (Join-Path $BuildDir "pyinstaller"),
         "--specpath", $SpecDir,
+        "--add-data", "$Root\xpano_workbench\assets;xpano_workbench\assets",
+        "--collect-all", "PySide6.QtWebEngineCore",
+        "--collect-all", "PySide6.QtWebEngineWidgets",
         "--collect-all", "numpy",
         "--collect-all", "cv2",
+        "--collect-all", "viser",
         "--copy-metadata", "numpy",
         "--copy-metadata", "opencv-python-headless",
+        "--copy-metadata", "viser",
         "--hidden-import", "numpy",
         "--hidden-import", "numpy.core._multiarray_umath",
         "--hidden-import", "cv2",
-        (Join-Path $Root "app.py")
+        "--hidden-import", "PySide6.QtWebEngineCore",
+        "--hidden-import", "PySide6.QtWebEngineWidgets",
+        "--hidden-import", "viser",
+        "--hidden-import", "app",
+        "--hidden-import", "xpano_workbench.main",
+        "--hidden-import", "xpano_workbench.reconstruction_scene",
+        "--hidden-import", "xpano_workbench.viser_bridge",
+        (Join-Path $Root "xpano_workbench\__main__.py")
     )
     & $ReleasePython -m PyInstaller @PyInstallerArgs
     if ($LASTEXITCODE -ne 0) {

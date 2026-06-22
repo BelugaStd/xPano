@@ -217,6 +217,59 @@ class AppPipelineTests(unittest.TestCase):
             progress.assert_any_call(35)
             progress.assert_any_call(100)
 
+    def test_colmap_backend_resolves_executable_before_building_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            left = output / "left.jpg"
+            right = output / "right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                """{
+                  "schema_version": 1,
+                  "workflow": "xpano_multi_track",
+                  "tracks": [
+                    {
+                      "track_id": "track_001",
+                      "track_type": "panorama_video",
+                      "metashape_mode": "dual_fisheye_station",
+                      "export_mode": "cubemap",
+                      "frames": [
+                        {"left": "%s", "right": "%s"}
+                      ]
+                    }
+                  ]
+                }""" % (left.as_posix(), right.as_posix()),
+                encoding="utf-8",
+            )
+            bundled = output / "tools" / "colmap" / "bin" / "colmap.exe"
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                seconds_per_frame=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+                backend="colmap",
+                manifest_path=manifest_path,
+                colmap_exe="colmap",
+            )
+            fake_plan = Mock()
+            fake_plan.output_dir = output / "colmap"
+
+            with patch("app.resolve_executable", return_value=str(bundled)) as resolve_executable, \
+                patch("app.build_colmap_plan", return_value=fake_plan) as build_colmap_plan, \
+                patch("app.run_colmap_plan"), \
+                patch("app.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
+                patch("app.write_run_summary"):
+                run_multi_track_pipeline(job, Mock(), Mock(), Mock())
+
+            resolve_executable.assert_called_once_with("colmap", "colmap")
+            self.assertEqual(build_colmap_plan.call_args.kwargs["config"].colmap_exe, str(bundled))
+
     def test_colmap_backend_can_run_lichtfield_postprocess(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)

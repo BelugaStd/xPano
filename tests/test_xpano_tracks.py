@@ -67,7 +67,15 @@ class PhotoTrackTests(unittest.TestCase):
             calls = []
 
             def fake_pano(**kwargs):
-                calls.append(("pano", kwargs["seconds_per_frame"], kwargs["max_frames"]))
+                calls.append(
+                    (
+                        "pano",
+                        kwargs["seconds_per_frame"],
+                        kwargs["max_frames"],
+                        kwargs["start_time_seconds"],
+                        kwargs["end_time_seconds"],
+                    )
+                )
                 return {
                     "track_id": "pano",
                     "track_type": "panorama_video",
@@ -77,7 +85,15 @@ class PhotoTrackTests(unittest.TestCase):
                 }
 
             def fake_ordinary(**kwargs):
-                calls.append(("ordinary", kwargs["seconds_per_frame"], kwargs["max_frames"]))
+                calls.append(
+                    (
+                        "ordinary",
+                        kwargs["seconds_per_frame"],
+                        kwargs["max_frames"],
+                        kwargs["start_time_seconds"],
+                        kwargs["end_time_seconds"],
+                    )
+                )
                 return {
                     "track_id": "ordinary",
                     "track_type": "ordinary_video",
@@ -88,8 +104,18 @@ class PhotoTrackTests(unittest.TestCase):
                 }
 
             settings = {
-                str(pano.resolve()): {"seconds_per_frame": 1.0, "max_frames": 10},
-                str(ordinary.resolve()): {"seconds_per_frame": 2.0, "max_frames": 20},
+                str(pano.resolve()): {
+                    "seconds_per_frame": 1.0,
+                    "max_frames": 10,
+                    "start_time_seconds": 3.0,
+                    "end_time_seconds": 8.0,
+                },
+                str(ordinary.resolve()): {
+                    "seconds_per_frame": 2.0,
+                    "max_frames": 20,
+                    "start_time_seconds": 4.0,
+                    "end_time_seconds": 12.0,
+                },
             }
             with patch("scripts.xpano_tracks.build_panorama_track", side_effect=fake_pano), \
                 patch("scripts.xpano_tracks.build_ordinary_video_track", side_effect=fake_ordinary):
@@ -102,7 +128,7 @@ class PhotoTrackTests(unittest.TestCase):
                     track_extraction_settings=settings,
                 )
 
-            self.assertEqual(calls, [("pano", 1.0, 10), ("ordinary", 2.0, 20)])
+            self.assertEqual(calls, [("pano", 1.0, 10, 3.0, 8.0), ("ordinary", 2.0, 20, 4.0, 12.0)])
 
     def test_splits_same_size_photos_by_exif_camera_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,6 +156,23 @@ class PhotoTrackTests(unittest.TestCase):
             self.assertEqual(len(track["photos"]), 2)
             self.assertEqual(len(track["photo_sensors"]), 1)
             self.assertEqual(len(track["photo_sensors"][0]["photos"]), 2)
+
+    def test_photo_track_uses_even_sampling_when_max_photos_is_below_total(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            photos = [
+                write_jpeg(root / f"image_{index:02d}.jpg", (100, 80), "PhoneCo", "Pocket 1", "Wide", 240)
+                for index in range(10)
+            ]
+
+            track = build_photo_track(1, "phone", photos, "standard_photos", max_photos=4)
+
+            self.assertEqual(
+                [Path(path).name for path in track["photos"]],
+                ["image_00.jpg", "image_03.jpg", "image_06.jpg", "image_09.jpg"],
+            )
+            self.assertEqual(track["photo_count_total"], 10)
+            self.assertEqual(track["photo_count_selected"], 4)
 
     def test_validates_photo_sensor_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
