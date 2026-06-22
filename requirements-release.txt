@@ -4,5 +4,4 @@ Pillow
 piexif
 pyinstaller
 PySide6==6.8.1
-PySide6-WebEngine==6.8.1
 viser==1.0.30

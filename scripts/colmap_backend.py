@@ -29,7 +29,7 @@ class ColmapBackendConfig:
     mapper_tri_ignore_two_view_tracks: bool = None
     mapper_filter_max_reproj_error: float = None
     mapper_tri_min_angle: float = None
-    mapper_snapshot_frames_freq: int = 5
+    mapper_snapshot_frames_freq: int = 0
 
 
 COLMAP_DENSITY_PRESETS = ("stable", "high-density", "experimental-high-density")
@@ -205,13 +205,16 @@ def build_colmap_plan(manifest, output_dir, config=None):
             str(image_dir),
             "--output_path",
             str(sparse_dir),
+        ]
+    )
+    mapper_command = commands[-1]
+    if config.mapper_snapshot_frames_freq and config.mapper_snapshot_frames_freq > 0:
+        mapper_command.extend([
             "--Mapper.snapshot_path",
             str(output_dir / "snapshots"),
             "--Mapper.snapshot_frames_freq",
             str(config.mapper_snapshot_frames_freq),
-        ]
-    )
-    mapper_command = commands[-1]
+        ])
     if config.mapper_filter_max_reproj_error is not None:
         mapper_command.extend(["--Mapper.filter_max_reproj_error", str(config.mapper_filter_max_reproj_error)])
     if config.mapper_tri_min_angle is not None:

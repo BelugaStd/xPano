@@ -91,14 +91,51 @@ class ColmapBackendPlanTests(unittest.TestCase):
             self.assertIn("--FeatureMatching.use_gpu", plan.commands[1])
             self.assertIn("--FeatureMatching.guided_matching", plan.commands[1])
             self.assertIn("--SequentialMatching.overlap", plan.commands[1])
-            self.assertIn("--Mapper.snapshot_path", plan.commands[2])
-            self.assertIn(str((root / "out" / "snapshots")), plan.commands[2])
-            self.assertIn("--Mapper.snapshot_frames_freq", plan.commands[2])
-            self.assertIn("5", plan.commands[2])
+            self.assertNotIn("--Mapper.snapshot_path", plan.commands[2])
+            self.assertNotIn("--Mapper.snapshot_frames_freq", plan.commands[2])
             self.assertTrue((plan.image_dir / "left" / "000001.jpg").exists())
             self.assertTrue((plan.image_dir / "right" / "000001.jpg").exists())
             image_manifest = json.loads(plan.image_manifest_path.read_text(encoding="utf-8"))
             self.assertEqual([item["side"] for item in image_manifest], ["left", "right"])
+
+    def test_colmap_mapper_snapshots_are_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            left = root / "frame_left.jpg"
+            right = root / "frame_right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            fake_colmap = root / "colmap.exe"
+            fake_colmap.write_bytes(b"")
+            manifest = {
+                "schema_version": 1,
+                "workflow": "xpano_multi_track",
+                "tracks": [
+                    {
+                        "track_type": "panorama_video",
+                        "export_mode": "cubemap",
+                        "frames": [
+                            {
+                                "frame_id": "frame_00001",
+                                "group_label": "frame_00001",
+                                "left": str(left),
+                                "right": str(right),
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            plan = build_colmap_plan(
+                manifest,
+                output_dir=root / "out",
+                config=ColmapBackendConfig(colmap_exe=str(fake_colmap), mapper_snapshot_frames_freq=5),
+            )
+
+            self.assertIn("--Mapper.snapshot_path", plan.commands[2])
+            self.assertIn(str((root / "out" / "snapshots")), plan.commands[2])
+            self.assertIn("--Mapper.snapshot_frames_freq", plan.commands[2])
+            self.assertIn("5", plan.commands[2])
 
     def test_high_density_preset_adds_more_features_and_guided_matching(self):
         config = colmap_config_for_density_preset("high-density", colmap_exe="colmap.exe")
