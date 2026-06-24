@@ -6,7 +6,7 @@ from unittest.mock import patch
 import piexif
 from PIL import Image
 
-from scripts.xpano_tracks import build_manifest, build_ordinary_video_track, build_photo_track
+from scripts.xpano_tracks import build_manifest, build_ordinary_video_track, build_panorama_track, build_photo_track
 from scripts.xpano_tracks import validate_manifest
 
 
@@ -32,6 +32,21 @@ def write_jpeg(path, size, make, model, lens, focal_num):
 
 
 class PhotoTrackTests(unittest.TestCase):
+    def test_rejects_mp4_as_panorama_track(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"video")
+
+            with self.assertRaisesRegex(ValueError, "Unsupported panorama video"):
+                build_panorama_track(
+                    1,
+                    video,
+                    root / "work",
+                    seconds_per_frame=1.0,
+                    max_frames=1,
+                )
+
     def test_builds_ordinary_video_track_as_frame_photo_track(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 import Metashape
 import os
-import cv2
-import numpy as np
 import struct
 import math
 import concurrent.futures
 import sys
+
+try:
+    import numpy as np
+except Exception as exc:
+    raise RuntimeError(
+        "Metashape Python could not load NumPy. xPano's Metashape export requires "
+        "Metashape's bundled NumPy runtime."
+    ) from exc
 
 # ==========================================
 # 0. 基础工具与 COLMAP 二进制打包
@@ -197,8 +203,8 @@ def get_image_safe(camera):
                 img_arr = np.frombuffer(buf, dtype=np_type).reshape(image.height, image.width, image.cn)
                 if np_type == np.uint16: img_arr = (img_arr / 256.0).astype(np.uint8)
                 elif np_type == np.float32: img_arr = np.clip(img_arr * 255.0, 0, 255).astype(np.uint8)
-                if image.cn == 3: return img_arr[:, :, ::-1].copy()
-                elif image.cn == 4: return cv2.cvtColor(img_arr, cv2.COLOR_RGBA2BGR)
+                if image.cn == 3: return img_arr.copy()
+                elif image.cn == 4: return img_arr[:, :, :3].copy()
                 elif image.cn == 1: return img_arr.copy()
     except Exception as e:
         pass
@@ -254,13 +260,61 @@ def build_remap_grid(face, W, calib, R_face, sensor_info_str):
     my = (calib.height/2.0 + calib.cy - 0.5) + yd * calib.f
     return mx.astype(np.float32), my.astype(np.float32)
 
+def remap_bilinear(src, mx, my):
+    h, w = src.shape[:2]
+    x0 = np.floor(mx).astype(np.int32)
+    y0 = np.floor(my).astype(np.int32)
+    x1 = x0 + 1
+    y1 = y0 + 1
+    valid = (x0 >= 0) & (x1 < w) & (y0 >= 0) & (y1 < h)
+    if src.ndim == 2:
+        out = np.zeros(mx.shape, dtype=np.uint8)
+    else:
+        out = np.zeros((mx.shape[0], mx.shape[1], src.shape[2]), dtype=np.uint8)
+    if not np.any(valid):
+        return out
+
+    xv = mx[valid]
+    yv = my[valid]
+    x0v = x0[valid]
+    y0v = y0[valid]
+    x1v = x1[valid]
+    y1v = y1[valid]
+    wx = xv - x0v
+    wy = yv - y0v
+
+    if src.ndim == 2:
+        top = src[y0v, x0v] * (1.0 - wx) + src[y0v, x1v] * wx
+        bottom = src[y1v, x0v] * (1.0 - wx) + src[y1v, x1v] * wx
+        out[valid] = np.clip(top * (1.0 - wy) + bottom * wy, 0, 255).astype(np.uint8)
+        return out
+
+    wx = wx[:, None]
+    wy = wy[:, None]
+    top = src[y0v, x0v] * (1.0 - wx) + src[y0v, x1v] * wx
+    bottom = src[y1v, x0v] * (1.0 - wx) + src[y1v, x1v] * wx
+    out[valid] = np.clip(top * (1.0 - wy) + bottom * wy, 0, 255).astype(np.uint8)
+    return out
+
+def save_image_array(image_array, file_path):
+    if image_array.ndim == 2:
+        mode = "L"
+    elif image_array.shape[2] == 4:
+        mode = "RGBA"
+    else:
+        mode = "RGB"
+        image_array = image_array[:, :, :3]
+    image = Metashape.Image.fromstring(image_array.tobytes(), image_array.shape[1], image_array.shape[0], mode)
+    comp = Metashape.ImageCompression()
+    comp.jpeg_quality = 100
+    image.save(file_path, comp)
+
 def threaded_remap_and_save(img_src, mx, my, file_path):
     try:
-        out_img = cv2.remap(img_src, mx, my, cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT)
-        is_success, buffer = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
-        if is_success:
-            with open(file_path, "wb") as f: f.write(buffer)
-    except: pass
+        out_img = remap_bilinear(img_src, mx, my)
+        save_image_array(out_img, file_path)
+    except Exception as exc:
+        print(f"WARN: cubemap image save failed for {file_path}: {exc}", flush=True)
 
 def project_track_to_pinhole(point_xyz, R, T, fx, fy, cx, cy, width, height):
     X = np.array(point_xyz, dtype=np.float64)

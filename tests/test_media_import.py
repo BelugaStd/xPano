@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from xpano_workbench.media_import import (
+    PANORAMA_EXTENSIONS,
     estimate_photo_selection,
     estimate_video_frame_count,
     iter_valid_photo_folder,
@@ -53,6 +54,10 @@ class MediaImportTests(unittest.TestCase):
         values = list(range(10))
 
         self.assertEqual(sample_evenly(values, 4), [0, 3, 6, 9])
+
+    def test_panorama_tracks_only_accept_osv_and_insv(self):
+        self.assertEqual(PANORAMA_EXTENSIONS, {".osv", ".insv"})
+        self.assertNotIn(".mp4", PANORAMA_EXTENSIONS)
 
 
 if __name__ == "__main__":

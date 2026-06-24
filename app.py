@@ -219,6 +219,33 @@ def run_lfs_densification_stage(job, progress_cb, log_cb):
     )
 
 
+def metashape_process_env():
+    env = os.environ.copy()
+    for name in ["QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "PYTHONHOME"]:
+        env.pop(name, None)
+
+    internal = internal_root()
+    if internal.exists():
+        internal_resolved = internal.resolve()
+
+        def outside_internal(item):
+            if not item:
+                return False
+            try:
+                path = Path(item).resolve()
+            except Exception:
+                return True
+            return not _path_is_within(path, internal_resolved)
+
+        for name in ["PYTHONPATH", "PATH"]:
+            parts = [part for part in env.get(name, "").split(os.pathsep) if outside_internal(part)]
+            if parts:
+                env[name] = os.pathsep.join(parts)
+            else:
+                env.pop(name, None)
+    return env
+
+
 def locate_metashape():
     candidates = []
     explicit = os.environ.get("XPANO_METASHAPE")
@@ -460,6 +487,7 @@ def run_multi_track_pipeline(job: MultiTrackJobConfig, progress_cb, preview_cb, 
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=metashape_process_env(),
     )
     for line in proc.stdout:
         line = line.rstrip()
@@ -796,7 +824,7 @@ class App:
             self.advanced_visible.set(True)
 
     def add_panorama_track(self):
-        paths = filedialog.askopenfilenames(filetypes=[("Panorama video", "*.osv *.insv *.mp4"), ("All", "*.*")])
+        paths = filedialog.askopenfilenames(filetypes=[("Panorama video", "*.osv *.insv"), ("All", "*.*")])
         for path in paths:
             video = Path(path)
             self._add_material_track("panorama_video", video.stem, [video])

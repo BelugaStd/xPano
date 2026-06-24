@@ -1,4 +1,5 @@
 import json
+import os
 import struct
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app import App, JobConfig, MaterialTrack, MultiTrackJobConfig, collect_runtime_import_versions, material_tracks_to_job_config, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
+from app import App, JobConfig, MaterialTrack, MultiTrackJobConfig, collect_runtime_import_versions, material_tracks_to_job_config, metashape_process_env, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
 from scripts.colmap_backend import read_colmap_points3d, write_colmap_points3d
 
 
@@ -39,6 +40,35 @@ class AppPipelineTests(unittest.TestCase):
         self.assertTrue(report["modules"]["numpy"]["ok"])
         self.assertFalse(report["modules"]["cv2"]["ok"])
         self.assertIn("missing cv2", report["modules"]["cv2"]["error"])
+
+    def test_metashape_process_env_isolates_gui_runtime_from_metashape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "cv2").mkdir()
+            (root / "numpy.libs").mkdir()
+            external = root.parent / "external"
+            with patch("app.internal_root", return_value=root), patch.dict(
+                "app.os.environ",
+                {
+                    "QT_PLUGIN_PATH": "bad-qt",
+                    "QT_QPA_PLATFORM_PLUGIN_PATH": "bad-platforms",
+                    "PYTHONHOME": "bad-python-home",
+                    "PYTHONPATH": os.pathsep.join([str(root), str(root / "cv2"), str(external)]),
+                    "PATH": os.pathsep.join([str(root), str(root / "numpy.libs"), "existing-path"]),
+                },
+                clear=True,
+            ):
+                env = metashape_process_env()
+
+        self.assertNotIn("QT_PLUGIN_PATH", env)
+        self.assertNotIn("QT_QPA_PLATFORM_PLUGIN_PATH", env)
+        self.assertNotIn("PYTHONHOME", env)
+        self.assertNotIn(str(root), env.get("PYTHONPATH", ""))
+        self.assertNotIn(str(root / "cv2"), env.get("PYTHONPATH", ""))
+        self.assertIn(str(external), env["PYTHONPATH"])
+        self.assertNotIn(str(root), env.get("PATH", ""))
+        self.assertNotIn(str(root / "numpy.libs"), env.get("PATH", ""))
+        self.assertEqual(env["PATH"], "existing-path")
 
     def test_mousewheel_units_supports_windows_and_button_events(self):
         self.assertEqual(App._mousewheel_units(SimpleNamespace(delta=120)), -1)

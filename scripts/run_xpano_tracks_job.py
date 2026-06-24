@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--seconds-per-frame", type=float, default=1.0)
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--manifest")
-    parser.add_argument("--pano", action="append", default=[], help="Panorama OSV/INSV/MP4 video. Repeat for multiple panorama tracks.")
+    parser.add_argument("--pano", action="append", default=[], help="Panorama OSV/INSV video. Repeat for multiple panorama tracks.")
     parser.add_argument("--standard-track", action="append", nargs="+", default=[], metavar=("LABEL", "PATH"))
     parser.add_argument("--aerial-track", action="append", nargs="+", default=[], metavar=("LABEL", "PATH"))
     parser.add_argument("--keep-generated", action="store_true")

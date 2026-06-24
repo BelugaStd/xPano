@@ -6,7 +6,7 @@ from xpano_workbench.models import ExtractionSettings
 
 
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
-PANORAMA_EXTENSIONS = {".osv", ".insv", ".mp4"}
+PANORAMA_EXTENSIONS = {".osv", ".insv"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
 
 

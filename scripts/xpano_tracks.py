@@ -11,7 +11,7 @@ from xpano_workbench.media_import import sample_evenly
 
 
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp"}
-PANO_EXTENSIONS = {".osv", ".insv", ".mp4"}
+PANO_EXTENSIONS = {".osv", ".insv"}
 ORDINARY_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
 TRACK_TYPES = {"panorama_video", "ordinary_video", "standard_photos", "aerial_photos"}
 

@@ -1876,7 +1876,7 @@ class WorkbenchWindow(QMainWindow):
                 self,
                 "选择全景视频",
                 "",
-                "全景视频 (*.osv *.insv *.mp4);;所有文件 (*.*)",
+                "全景视频 (*.osv *.insv);;所有文件 (*.*)",
             )
             if path:
                 self.import_material_paths([Path(path)], PANORAMA_VIDEO)
@@ -2258,7 +2258,7 @@ class WorkbenchWindow(QMainWindow):
             self,
             "添加全景视频",
             "",
-            "全景视频 (*.osv *.insv *.mp4);;所有文件 (*.*)",
+            "全景视频 (*.osv *.insv);;所有文件 (*.*)",
         )
         if paths:
             self.import_material_paths(paths, PANORAMA_VIDEO)
