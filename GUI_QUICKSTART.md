@@ -2,6 +2,13 @@
 
 这是给最终用户看的最短启动说明。完整工作流、CLI 和发布注意事项见 `README.md`。
 
+## 当前版本要点
+
+- 新 GUI 已支持素材轨、滚动参数区、运行日志、抽帧预览和重建预览。
+- 全景轨道只允许 `.osv` / `.insv`；`.mp4` 请导入为普通视频轨。
+- Release 包内置 ffmpeg、COLMAP 和 LichtFeld densification 环境；Metashape 后端仍需要本机安装 Metashape。
+- Metashape 导出不再依赖 `cv2`，可避免部分用户的 Metashape Python 缺少 OpenCV 导致失败。
+
 ## 1. 安装依赖
 
 先确认：

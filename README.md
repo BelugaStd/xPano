@@ -6,6 +6,18 @@
 
 把 xPano/Metashape 操作流程封装成一个可复现的一键 GUI 和 CLI。
 
+## 新 GUI 系列更新
+
+当前发布分支已经从早期 Tk GUI 过渡到新的 PySide Workbench：
+
+- 新增素材轨工作流：全景视频、普通视频、普通照片和航拍照片可以在同一界面管理，并支持单轨参数设置与删除。
+- 全景轨道只接受 `.osv` / `.insv`，普通 `.mp4` 需要作为普通视频轨导入，避免把单视频误当成双鱼眼全景处理。
+- 新增后端切换：Metashape 仍是验证过的基准流程，COLMAP 后端可使用 release 包内置版本，不要求用户额外配置 PATH。
+- 新增内置重建预览：运行中展示抽帧、日志、进度和点云/相机视锥预览；界面左侧参数区支持滚动，适配较小屏幕。
+- 新增 LichtFeld densification 插件接入，可在 Metashape 或 COLMAP 输出后继续生成更密的 COLMAP 点云。
+- 修复 release 环境问题：GUI 自带 NumPy/OpenCV/PySide6 等运行时；Metashape 子进程会隔离 GUI 打包环境，Metashape 导出不再依赖 `cv2`。
+- 发布包使用单个 ZIP64 压缩包，包含 GUI、ffmpeg、COLMAP、致密化 Python 环境和模型缓存；Metashape 后端仍需要用户本机安装并持有合法授权。
+
 ## 功能状态
 
 已验证：
