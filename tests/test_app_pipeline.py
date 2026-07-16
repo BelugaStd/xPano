@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from app import App, JobConfig, MaterialTrack, MultiTrackJobConfig, collect_runtime_import_versions, material_tracks_to_job_config, metashape_process_env, run_metashape_pipeline, run_multi_track_pipeline, write_run_summary
+from scripts.pipeline_core import JobConfig, MaterialTrack, MultiTrackJobConfig, ProgressEtaEstimator, collect_runtime_import_versions, emit_pipeline_event, manifest_expected_camera_count, material_tracks_to_job_config, metashape_process_env, recover_reexport_transaction, report_alignment_rate, run_metashape_pipeline, run_metashape_reexport_from_existing_project, run_multi_track_pipeline, write_run_summary
 from scripts.colmap_backend import read_colmap_points3d, write_colmap_points3d
 
 
@@ -19,15 +19,302 @@ class FakeProcess:
         return 0
 
 
-class FakeVar:
-    def __init__(self, value):
-        self.value = value
-
-    def get(self):
-        return self.value
-
-
 class AppPipelineTests(unittest.TestCase):
+    def test_metashape_camera_export_progress_uses_planned_images_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "workflow": "xpano_multi_track",
+                    "tracks": [],
+                }),
+                encoding="utf-8",
+            )
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                frames_per_second=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+            )
+            process = FakeProcess()
+            process.stdout = ["Exporting camera [1/2]\n", "Exporting camera [2/2]\n"]
+            logs = []
+
+            with patch("scripts.pipeline_core.build_manifest", return_value=({}, manifest_path)), \
+                patch("scripts.pipeline_core.subprocess.Popen", return_value=process), \
+                patch("scripts.pipeline_core.write_run_summary"):
+                run_multi_track_pipeline(job, Mock(), Mock(), logs.append)
+
+            counted_stages = [
+                json.loads(line.split(":", 1)[1])["stage"]
+                for line in logs
+                if line.startswith("PIPELINE_EVENT:")
+                and json.loads(line.split(":", 1)[1]).get("current") is not None
+            ]
+            self.assertEqual(counted_stages, ["export.images", "export.images"])
+
+    def test_metashape_reexport_progress_uses_planned_images_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            project_path = output / "work" / "xpano.psx"
+            project_path.parent.mkdir(parents=True)
+            project_path.write_text("project", encoding="utf-8")
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                frames_per_second=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+            )
+            process = FakeProcess()
+            process.stdout = ["Exporting camera [1/2]\n", "Exporting camera [2/2]\n"]
+            logs = []
+            runtime_site = output / "runtime with spaces" / "site-packages"
+            runtime_site.mkdir(parents=True)
+            job.metashape_site_packages = runtime_site
+            job.selected_component_key = "42"
+
+            with patch.dict("scripts.pipeline_core.os.environ", {}, clear=True), \
+                patch("scripts.pipeline_core.subprocess.Popen", return_value=process) as popen, \
+                patch("scripts.pipeline_core.write_run_summary"):
+                run_metashape_reexport_from_existing_project(job, project_path, Mock(), logs.append)
+
+            command = popen.call_args.args[0]
+            self.assertEqual(
+                command[command.index("--xpano-site-packages") + 1],
+                str(runtime_site),
+            )
+            self.assertEqual(command[command.index("--component-key") + 1], "42")
+
+            counted_stages = [
+                json.loads(line.split(":", 1)[1])["stage"]
+                for line in logs
+                if line.startswith("PIPELINE_EVENT:")
+                and json.loads(line.split(":", 1)[1]).get("current") is not None
+            ]
+            self.assertEqual(counted_stages, ["export.images", "export.images"])
+            stages = [
+                json.loads(line.split(":", 1)[1])["stage"]
+                for line in logs
+                if line.startswith("PIPELINE_EVENT:")
+            ]
+            self.assertIn("output.validate", stages)
+
+    def test_reexport_stages_before_publishing_and_keeps_live_images_available_for_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            project_path = output / "work" / "manual correction" / "fixed.psx"
+            project_path.parent.mkdir(parents=True)
+            project_path.write_text("manually corrected project", encoding="utf-8")
+            previous_image = output / "images" / "previous.jpg"
+            previous_image.parent.mkdir()
+            previous_image.write_bytes(b"previous")
+            cache_path = output / "work" / "export_image_cache.json"
+            cache_path.write_text('{"schemaVersion": 1, "cameras": {}}', encoding="utf-8")
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                frames_per_second=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+                overwrite_generated=True,
+                reexport_existing_project=True,
+                existing_project_path=project_path,
+            )
+
+            def stage_export(_job, _project, _progress, _log, *, export_dir, reuse_images_dir, image_cache_path, image_cache_output):
+                self.assertTrue(previous_image.is_file())
+                self.assertEqual(reuse_images_dir, output / "images")
+                self.assertEqual(image_cache_path, cache_path)
+                staged_image = export_dir / "images" / "previous.jpg"
+                staged_image.parent.mkdir(parents=True)
+                staged_image.write_bytes(previous_image.read_bytes())
+                sparse = export_dir / "sparse" / "0"
+                sparse.mkdir(parents=True)
+                for name in ("cameras.bin", "images.bin", "points3D.bin"):
+                    (sparse / name).write_bytes(name.encode("ascii"))
+                cache_output = Path(image_cache_output)
+                cache_output.parent.mkdir(parents=True)
+                cache_output.write_text('{"schemaVersion": 1, "cameras": {}}', encoding="utf-8")
+
+            with patch("scripts.pipeline_core.run_metashape_reexport_from_existing_project", side_effect=stage_export) as reexport, \
+                patch("scripts.pipeline_core.verify_output", return_value={"ok": True}), \
+                patch("scripts.pipeline_core.write_run_summary"):
+                run_multi_track_pipeline(job, Mock(), Mock(), Mock())
+
+            self.assertTrue(project_path.is_file())
+            self.assertEqual(previous_image.read_bytes(), b"previous")
+            self.assertTrue((output / "sparse" / "0" / "images.bin").is_file())
+            self.assertTrue(cache_path.is_file())
+            self.assertFalse(list(output.glob(".xpano-reexport-stage-*")))
+            self.assertFalse(list(output.glob(".xpano-reexport-backup-*")))
+            self.assertFalse((output / "work" / "reexport_transaction.json").exists())
+            reexport.assert_called_once()
+            self.assertEqual(reexport.call_args.args[1], project_path)
+
+    def test_failed_reexport_restores_previous_outputs_and_preserves_psx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            project_path = output / "work" / "xpano.psx"
+            project_path.parent.mkdir(parents=True)
+            project_path.write_text("manually corrected project", encoding="utf-8")
+            previous_image = output / "images" / "previous.jpg"
+            previous_image.parent.mkdir()
+            previous_image.write_bytes(b"previous")
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                frames_per_second=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+                overwrite_generated=True,
+                reexport_existing_project=True,
+                existing_project_path=project_path,
+            )
+
+            with patch(
+                "scripts.pipeline_core.run_metashape_reexport_from_existing_project",
+                side_effect=lambda *_args, export_dir, **_kwargs: (
+                    (export_dir / "images").mkdir(parents=True),
+                    (export_dir / "images" / "partial.jpg").write_bytes(b"partial"),
+                    (_ for _ in ()).throw(RuntimeError("export failed")),
+                )[-1],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "export failed"):
+                    run_multi_track_pipeline(job, Mock(), Mock(), Mock())
+
+            self.assertEqual(project_path.read_text(encoding="utf-8"), "manually corrected project")
+            self.assertEqual(previous_image.read_bytes(), b"previous")
+            self.assertFalse(list(output.glob(".xpano-reexport-stage-*")))
+            self.assertFalse((output / "work" / "reexport_transaction.json").exists())
+
+    def test_reexport_recovery_rolls_back_an_interrupted_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            live = output / "images"
+            backup = output / ".xpano-reexport-backup-test"
+            stage = output / ".xpano-reexport-stage-test"
+            live.mkdir()
+            backup.mkdir()
+            stage.mkdir()
+            (live / "new.jpg").write_bytes(b"new")
+            (backup / "images").mkdir()
+            (backup / "images" / "old.jpg").write_bytes(b"old")
+            marker = output / "work" / "reexport_transaction.json"
+            marker.parent.mkdir()
+            marker.write_text(json.dumps({
+                "state": "publishing",
+                "stageDir": str(stage),
+                "backupDir": str(backup),
+                "originalTargets": ["images"],
+            }), encoding="utf-8")
+
+            recover_reexport_transaction(output, Mock())
+
+            self.assertEqual((live / "old.jpg").read_bytes(), b"old")
+            self.assertFalse((live / "new.jpg").exists())
+            self.assertFalse(backup.exists())
+            self.assertFalse(stage.exists())
+            self.assertFalse(marker.exists())
+
+    def test_reexport_recovery_keeps_a_committed_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            live = output / "images"
+            backup = output / ".xpano-reexport-backup-test"
+            stage = output / ".xpano-reexport-stage-test"
+            live.mkdir()
+            backup.mkdir()
+            stage.mkdir()
+            (live / "new.jpg").write_bytes(b"new")
+            (backup / "images").mkdir()
+            (backup / "images" / "old.jpg").write_bytes(b"old")
+            marker = output / "work" / "reexport_transaction.json"
+            marker.parent.mkdir()
+            marker.write_text(json.dumps({
+                "state": "committed",
+                "stageDir": str(stage),
+                "backupDir": str(backup),
+                "originalTargets": ["images"],
+            }), encoding="utf-8")
+
+            recover_reexport_transaction(output, Mock())
+
+            self.assertEqual((live / "new.jpg").read_bytes(), b"new")
+            self.assertFalse(backup.exists())
+            self.assertFalse(stage.exists())
+            self.assertFalse(marker.exists())
+
+    def test_progress_eta_estimator_waits_for_stable_samples(self):
+        ticks = iter([0.0, 0.2, 2.0])
+        estimator = ProgressEtaEstimator(clock=lambda: next(ticks), min_elapsed=1.0)
+
+        self.assertIsNone(estimator.update(0, 10))
+        self.assertIsNone(estimator.update(1, 10))
+        self.assertEqual(estimator.update(2, 10), 8)
+
+    def test_emit_pipeline_event_includes_eta_when_known(self):
+        logs = []
+
+        emit_pipeline_event(
+            logs.append,
+            phase="export",
+            stage="export.cameras",
+            percent=98,
+            phase_percent=50,
+            message="Exporting 5/10 cameras",
+            current=5,
+            total=10,
+            eta_seconds=42,
+        )
+
+        self.assertEqual(len(logs), 1)
+        self.assertTrue(logs[0].startswith("PIPELINE_EVENT:"))
+        payload = json.loads(logs[0].split(":", 1)[1])
+        self.assertEqual(payload["phase"], "export")
+        self.assertEqual(payload["stage"], "export.cameras")
+        self.assertEqual(payload["current"], 5)
+        self.assertEqual(payload["total"], 10)
+        self.assertEqual(payload["etaSeconds"], 42)
+
+    def test_report_alignment_rate_emits_structured_metric(self):
+        logs = []
+
+        report_alignment_rate(logs.append, aligned=7, total=10, percent=95)
+
+        self.assertEqual(len(logs), 1)
+        self.assertTrue(logs[0].startswith("PIPELINE_EVENT:"))
+        payload = json.loads(logs[0].split(":", 1)[1])
+        self.assertEqual(payload["phase"], "align")
+        self.assertEqual(payload["stage"], "align.rate")
+        self.assertEqual(payload["percent"], 95)
+        self.assertEqual(payload["alignedCameras"], 7)
+        self.assertEqual(payload["totalCameras"], 10)
+        self.assertEqual(payload["alignmentRate"], 70.0)
+
+    def test_manifest_expected_camera_count_counts_mixed_tracks(self):
+        manifest = {
+            "tracks": [
+                {"track_type": "panorama_video", "frames": [{"left": "a", "right": "b"}, {"left": "c", "right": "d"}]},
+                {"track_type": "ordinary_video", "photos": ["1.jpg", "2.jpg", "3.jpg"]},
+                {"track_type": "standard_photos", "photos": ["p.jpg"]},
+            ]
+        }
+
+        self.assertEqual(manifest_expected_camera_count(manifest), 8)
+
     def test_runtime_import_report_marks_missing_dependency_as_failure(self):
         def fake_import_module(name):
             if name == "cv2":
@@ -42,19 +329,24 @@ class AppPipelineTests(unittest.TestCase):
         self.assertIn("missing cv2", report["modules"]["cv2"]["error"])
 
     def test_metashape_process_env_isolates_gui_runtime_from_metashape(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as external_tmp:
             root = Path(tmp)
             (root / "cv2").mkdir()
             (root / "numpy.libs").mkdir()
-            external = root.parent / "external"
-            with patch("app.internal_root", return_value=root), patch.dict(
-                "app.os.environ",
+            external = Path(external_tmp) / "external"
+            metashape_site = Path(external_tmp) / "metashape-site"
+            metashape_site.mkdir()
+            (metashape_site / "numpy.libs").mkdir()
+            (metashape_site / "cv2").mkdir()
+            with patch("scripts.pipeline_core.internal_root", return_value=root), patch.dict(
+                "scripts.pipeline_core.os.environ",
                 {
                     "QT_PLUGIN_PATH": "bad-qt",
                     "QT_QPA_PLATFORM_PLUGIN_PATH": "bad-platforms",
                     "PYTHONHOME": "bad-python-home",
                     "PYTHONPATH": os.pathsep.join([str(root), str(root / "cv2"), str(external)]),
                     "PATH": os.pathsep.join([str(root), str(root / "numpy.libs"), "existing-path"]),
+                    "XPANO_METASHAPE_SITE_PACKAGES": str(metashape_site),
                 },
                 clear=True,
             ):
@@ -66,16 +358,13 @@ class AppPipelineTests(unittest.TestCase):
         self.assertNotIn(str(root), env.get("PYTHONPATH", ""))
         self.assertNotIn(str(root / "cv2"), env.get("PYTHONPATH", ""))
         self.assertIn(str(external), env["PYTHONPATH"])
+        self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(metashape_site))
         self.assertNotIn(str(root), env.get("PATH", ""))
         self.assertNotIn(str(root / "numpy.libs"), env.get("PATH", ""))
-        self.assertEqual(env["PATH"], "existing-path")
-
-    def test_mousewheel_units_supports_windows_and_button_events(self):
-        self.assertEqual(App._mousewheel_units(SimpleNamespace(delta=120)), -1)
-        self.assertEqual(App._mousewheel_units(SimpleNamespace(delta=-120)), 1)
-        self.assertEqual(App._mousewheel_units(SimpleNamespace(num=4, delta=0)), -1)
-        self.assertEqual(App._mousewheel_units(SimpleNamespace(num=5, delta=0)), 1)
-        self.assertEqual(App._mousewheel_units(SimpleNamespace(delta=0)), 0)
+        self.assertEqual(
+            env["PATH"].split(os.pathsep),
+            [str(metashape_site / "numpy.libs"), str(metashape_site / "cv2"), str(metashape_site), "existing-path"],
+        )
 
     def test_material_tracks_build_multi_track_job_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,21 +382,24 @@ class AppPipelineTests(unittest.TestCase):
             job = material_tracks_to_job_config(
                 tracks=[
                     MaterialTrack(track_type="panorama_video", label="insta", paths=[pano]),
-                    MaterialTrack(track_type="ordinary_video", label="clip", paths=[ordinary]),
+                    MaterialTrack(track_type="ordinary_video", label="clip", paths=[ordinary], camera_profile="standard"),
                     MaterialTrack(track_type="standard_photos", label="phone", paths=[phone]),
                     MaterialTrack(track_type="aerial_photos", label="mavic", paths=[drone]),
                 ],
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=5,
                 metashape_exe="metashape.exe",
+                metashape_site_packages=root / "runtime" / "site-packages",
             )
 
             self.assertEqual(job.panorama_videos, [pano.resolve()])
             self.assertEqual(job.ordinary_video_tracks, [ordinary.resolve()])
+            self.assertEqual(job.track_camera_profiles[str(ordinary.resolve())], "standard")
             self.assertEqual(job.standard_photo_tracks, [("phone", [phone.resolve()])])
             self.assertEqual(job.aerial_photo_tracks, [("mavic", [drone.resolve()])])
             self.assertEqual(job.output_dir, output.resolve())
+            self.assertEqual(job.metashape_site_packages, (root / "runtime" / "site-packages").resolve())
             self.assertEqual(job.backend, "metashape")
 
     def test_material_tracks_reject_empty_track(self):
@@ -115,43 +407,10 @@ class AppPipelineTests(unittest.TestCase):
             material_tracks_to_job_config(
                 tracks=[MaterialTrack(track_type="panorama_video", label="empty", paths=[])],
                 output_dir=Path("out"),
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=0,
                 metashape_exe="metashape.exe",
             )
-
-    def test_gui_control_mapping_builds_colmap_lichtfield_job(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            pano = root / "a.osv"
-            output = root / "out"
-            pano.write_bytes(b"video")
-            app = object.__new__(App)
-            app.material_tracks = [MaterialTrack(track_type="panorama_video", label="pano", paths=[pano])]
-            app.output_var = FakeVar(str(output))
-            app.backend_var = FakeVar("colmap")
-            app.colmap_density_var = FakeVar("high-density")
-            app.run_lichtfield_var = FakeVar(True)
-
-            job = App._build_job_from_controls(
-                app,
-                spf=1.0,
-                max_frames=3,
-                metashape_exe="metashape.exe",
-                colmap_exe="colmap.exe",
-                lichtfield_exe="lichtfield-studio.exe",
-                licht_point_count=120000,
-                licht_grid=16,
-            )
-
-            self.assertEqual(job.backend, "colmap")
-            self.assertEqual(job.colmap_exe, "colmap.exe")
-            self.assertEqual(job.colmap_density_preset, "high-density")
-            self.assertTrue(job.run_lichtfield)
-            self.assertEqual(job.lichtfield_exe, "lichtfield-studio.exe")
-            self.assertEqual(job.lichtfield_point_count, 120000)
-            self.assertEqual(job.lichtfield_bilateral_grid, 16)
-            self.assertEqual(job.output_dir, output.resolve())
 
     def test_single_video_gui_pipeline_uses_manifest_backend(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,12 +420,15 @@ class AppPipelineTests(unittest.TestCase):
             manifest_path.write_text("{}", encoding="utf-8")
             video = output / "input.osv"
             video.write_bytes(b"video")
+            runtime_site = output / "runtime with spaces" / "site-packages"
+            runtime_site.mkdir(parents=True)
             job = JobConfig(
                 input_video=video,
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=10,
                 metashape_exe="metashape.exe",
+                metashape_site_packages=runtime_site,
             )
 
             popen_calls = []
@@ -175,9 +437,10 @@ class AppPipelineTests(unittest.TestCase):
                 popen_calls.append(cmd)
                 return FakeProcess()
 
-            with patch("app.build_manifest", return_value=({}, manifest_path)) as build_manifest, \
-                patch("app.subprocess.Popen", side_effect=fake_popen), \
-                patch("app.write_run_summary"):
+            with patch.dict("scripts.pipeline_core.os.environ", {}, clear=True), \
+                patch("scripts.pipeline_core.build_manifest", return_value=({}, manifest_path)) as build_manifest, \
+                patch("scripts.pipeline_core.subprocess.Popen", side_effect=fake_popen), \
+                patch("scripts.pipeline_core.write_run_summary"):
                 run_metashape_pipeline(job, Mock(), Mock(), Mock())
 
             build_manifest.assert_called_once()
@@ -185,6 +448,14 @@ class AppPipelineTests(unittest.TestCase):
             command = popen_calls[0]
             self.assertIn("--manifest", command)
             self.assertIn(str(manifest_path), command)
+            self.assertIn("--alignment-mode", command)
+            self.assertEqual(command[command.index("--alignment-mode") + 1], "backbone")
+            self.assertIn("--up-axis", command)
+            self.assertEqual(command[command.index("--up-axis") + 1], "y-up")
+            self.assertEqual(
+                command[command.index("--xpano-site-packages") + 1],
+                str(runtime_site),
+            )
             self.assertNotIn("--input-root", command)
 
     def test_colmap_backend_builds_and_runs_colmap_plan_without_metashape(self):
@@ -220,7 +491,7 @@ class AppPipelineTests(unittest.TestCase):
                 standard_photo_tracks=[],
                 aerial_photo_tracks=[],
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=0,
                 metashape_exe="metashape.exe",
                 backend="colmap",
@@ -232,11 +503,11 @@ class AppPipelineTests(unittest.TestCase):
             fake_plan.output_dir = output / "colmap"
             progress = Mock()
             log = Mock()
-            with patch("app.subprocess.Popen") as popen, \
-                patch("app.build_colmap_plan", return_value=fake_plan) as build_colmap_plan, \
-                patch("app.run_colmap_plan") as run_colmap_plan, \
-                patch("app.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
-                patch("app.write_run_summary"):
+            with patch("scripts.pipeline_core.subprocess.Popen") as popen, \
+                patch("scripts.pipeline_core.build_colmap_plan", return_value=fake_plan) as build_colmap_plan, \
+                patch("scripts.pipeline_core.run_colmap_plan") as run_colmap_plan, \
+                patch("scripts.pipeline_core.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
+                patch("scripts.pipeline_core.write_run_summary"):
                 run_multi_track_pipeline(job, progress, Mock(), log)
 
             popen.assert_not_called()
@@ -246,6 +517,65 @@ class AppPipelineTests(unittest.TestCase):
             run_colmap_plan.assert_called_once()
             progress.assert_any_call(35)
             progress.assert_any_call(100)
+
+    def test_colmap_alignment_rate_uses_mapper_model_before_cubemap_publish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            left = output / "left.jpg"
+            right = output / "right.jpg"
+            left.write_bytes(b"left")
+            right.write_bytes(b"right")
+            manifest_path = output / "work" / "xpano_manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "workflow": "xpano_multi_track",
+                    "tracks": [{
+                        "track_id": "track_001",
+                        "track_type": "panorama_video",
+                        "metashape_mode": "dual_fisheye_station",
+                        "export_mode": "cubemap",
+                        "frames": [{"left": left.as_posix(), "right": right.as_posix()}],
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            job = MultiTrackJobConfig(
+                panorama_videos=[],
+                standard_photo_tracks=[],
+                aerial_photo_tracks=[],
+                output_dir=output,
+                frames_per_second=1.0,
+                max_frames=0,
+                metashape_exe="metashape.exe",
+                backend="colmap",
+                manifest_path=manifest_path,
+            )
+            native_model = output / "colmap" / "sparse" / "0"
+            published_model = output / "sparse" / "0"
+            fake_plan = Mock()
+            fake_plan.output_dir = output / "colmap"
+            fake_plan.sparse_dir = output / "colmap" / "sparse"
+            fake_plan.image_dir = output / "colmap" / "colmap_images"
+            logs = []
+
+            with patch("scripts.pipeline_core.build_colmap_plan", return_value=fake_plan), \
+                patch("scripts.pipeline_core.run_colmap_plan", return_value={"sparse_model_path": str(native_model)}), \
+                patch("scripts.pipeline_core.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(published_model)}), \
+                patch("scripts.pipeline_core.read_colmap_images", side_effect=lambda path: [object()] * (2 if Path(path) == native_model else 10)) as read_images, \
+                patch("scripts.pipeline_core.write_run_summary"):
+                run_multi_track_pipeline(job, Mock(), Mock(), logs.append)
+
+            alignment_event = next(
+                json.loads(line.removeprefix("PIPELINE_EVENT:"))
+                for line in logs
+                if line.startswith("PIPELINE_EVENT:") and '"stage": "align.rate"' in line
+            )
+            self.assertEqual(alignment_event["alignedCameras"], 2)
+            self.assertEqual(alignment_event["totalCameras"], 2)
+            self.assertEqual(alignment_event["alignmentRate"], 100.0)
+            read_images.assert_called_once_with(native_model)
 
     def test_colmap_backend_resolves_executable_before_building_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,7 +610,7 @@ class AppPipelineTests(unittest.TestCase):
                 standard_photo_tracks=[],
                 aerial_photo_tracks=[],
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=0,
                 metashape_exe="metashape.exe",
                 backend="colmap",
@@ -290,11 +620,11 @@ class AppPipelineTests(unittest.TestCase):
             fake_plan = Mock()
             fake_plan.output_dir = output / "colmap"
 
-            with patch("app.resolve_executable", return_value=str(bundled)) as resolve_executable, \
-                patch("app.build_colmap_plan", return_value=fake_plan) as build_colmap_plan, \
-                patch("app.run_colmap_plan"), \
-                patch("app.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
-                patch("app.write_run_summary"):
+            with patch("scripts.pipeline_core.resolve_executable", return_value=str(bundled)) as resolve_executable, \
+                patch("scripts.pipeline_core.build_colmap_plan", return_value=fake_plan) as build_colmap_plan, \
+                patch("scripts.pipeline_core.run_colmap_plan"), \
+                patch("scripts.pipeline_core.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
+                patch("scripts.pipeline_core.write_run_summary"):
                 run_multi_track_pipeline(job, Mock(), Mock(), Mock())
 
             resolve_executable.assert_called_once_with("colmap", "colmap")
@@ -332,7 +662,7 @@ class AppPipelineTests(unittest.TestCase):
                 standard_photo_tracks=[],
                 aerial_photo_tracks=[],
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=0,
                 metashape_exe="metashape.exe",
                 backend="colmap",
@@ -350,11 +680,11 @@ class AppPipelineTests(unittest.TestCase):
             fake_plan.output_dir = output / "colmap"
             fake_plan.sparse_dir = output / "colmap" / "sparse"
             fake_plan.image_dir = image_dir
-            with patch("app.build_colmap_plan", return_value=fake_plan), \
-                patch("app.run_colmap_plan", return_value={"sparse_model_path": str(output / "colmap" / "sparse" / "0")}), \
-                patch("app.publish_colmap_output", return_value={"image_dir": str(final_image_dir), "sparse_model_path": str(sparse_model)}), \
-                patch("app.run_lichtfield_command") as run_lichtfield_command, \
-                patch("app.write_run_summary"):
+            with patch("scripts.pipeline_core.build_colmap_plan", return_value=fake_plan), \
+                patch("scripts.pipeline_core.run_colmap_plan", return_value={"sparse_model_path": str(output / "colmap" / "sparse" / "0")}), \
+                patch("scripts.pipeline_core.publish_colmap_output", return_value={"image_dir": str(final_image_dir), "sparse_model_path": str(sparse_model)}), \
+                patch("scripts.pipeline_core.run_lichtfield_command") as run_lichtfield_command, \
+                patch("scripts.pipeline_core.write_run_summary"):
                 run_multi_track_pipeline(job, Mock(), Mock(), Mock())
 
             config = run_lichtfield_command.call_args.args[0]
@@ -397,7 +727,7 @@ class AppPipelineTests(unittest.TestCase):
                 standard_photo_tracks=[],
                 aerial_photo_tracks=[],
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=0,
                 metashape_exe="metashape.exe",
                 backend="colmap",
@@ -425,11 +755,11 @@ class AppPipelineTests(unittest.TestCase):
                     + struct.pack("<fffBBB", 1.0, 2.0, 3.0, 4, 5, 6)
                 )
 
-            with patch("app.build_colmap_plan", return_value=fake_plan), \
-                patch("app.run_colmap_plan", return_value={"sparse_model_path": str(output / "colmap" / "sparse" / "0")}), \
-                patch("app.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
-                patch("app.run_densify_command", side_effect=fake_densify) as run_densify_command, \
-                patch("app.write_run_summary"):
+            with patch("scripts.pipeline_core.build_colmap_plan", return_value=fake_plan), \
+                patch("scripts.pipeline_core.run_colmap_plan", return_value={"sparse_model_path": str(output / "colmap" / "sparse" / "0")}), \
+                patch("scripts.pipeline_core.publish_colmap_output", return_value={"image_dir": str(output / "images"), "sparse_model_path": str(output / "sparse" / "0")}), \
+                patch("scripts.pipeline_core.run_densify_command", side_effect=fake_densify) as run_densify_command, \
+                patch("scripts.pipeline_core.write_run_summary"):
                 run_multi_track_pipeline(job, Mock(), Mock(), Mock())
 
             config = run_densify_command.call_args.args[0]
@@ -462,7 +792,7 @@ class AppPipelineTests(unittest.TestCase):
 
             clear_log = []
 
-            from app import clear_generated_outputs
+            from scripts.pipeline_core import clear_generated_outputs
 
             clear_generated_outputs(output, clear_log.append, preserve_paths=[manifest_path])
 
@@ -497,7 +827,7 @@ class AppPipelineTests(unittest.TestCase):
                 standard_photo_tracks=[],
                 aerial_photo_tracks=[],
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=0,
                 metashape_exe="metashape.exe",
                 backend="colmap",
@@ -530,7 +860,7 @@ class AppPipelineTests(unittest.TestCase):
                 standard_photo_tracks=[("phone", [phone_dir])],
                 aerial_photo_tracks=[("mavic", [drone_dir])],
                 output_dir=output,
-                seconds_per_frame=1.0,
+                frames_per_second=1.0,
                 max_frames=5,
                 metashape_exe="metashape.exe",
             )
@@ -541,9 +871,9 @@ class AppPipelineTests(unittest.TestCase):
                 popen_calls.append(cmd)
                 return FakeProcess()
 
-            with patch("app.build_manifest", return_value=({}, manifest_path)) as build_manifest, \
-                patch("app.subprocess.Popen", side_effect=fake_popen), \
-                patch("app.write_run_summary"):
+            with patch("scripts.pipeline_core.build_manifest", return_value=({}, manifest_path)) as build_manifest, \
+                patch("scripts.pipeline_core.subprocess.Popen", side_effect=fake_popen), \
+                patch("scripts.pipeline_core.write_run_summary"):
                 run_multi_track_pipeline(job, Mock(), Mock(), Mock())
 
             kwargs = build_manifest.call_args.kwargs
@@ -554,6 +884,10 @@ class AppPipelineTests(unittest.TestCase):
             command = popen_calls[0]
             self.assertIn("--manifest", command)
             self.assertIn(str(manifest_path), command)
+            self.assertIn("--alignment-mode", command)
+            self.assertEqual(command[command.index("--alignment-mode") + 1], "backbone")
+            self.assertIn("--up-axis", command)
+            self.assertEqual(command[command.index("--up-axis") + 1], "y-up")
 
 
 if __name__ == "__main__":

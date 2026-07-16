@@ -16,6 +16,7 @@ from scripts.dependency_checks import (
     require_dependency_checks,
     resolve_executable,
 )
+from scripts.pipeline_core import locate_metashape
 
 
 class DependencyChecksTests(unittest.TestCase):
@@ -25,6 +26,19 @@ class DependencyChecksTests(unittest.TestCase):
             exe.write_bytes(b"")
 
             self.assertEqual(resolve_executable(str(exe), "tool.exe"), str(exe))
+
+    def test_resolves_quoted_unicode_executable_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "Metashape 工具" / "metashape.exe"
+            exe.parent.mkdir()
+            exe.write_bytes(b"")
+
+            self.assertEqual(resolve_executable(f'  "{exe}"  ', "metashape.exe"), str(exe))
+
+    def test_invalid_explicit_metashape_environment_does_not_fall_back(self):
+        missing = r"Z:\missing Metashape\metashape.exe"
+        with patch.dict("scripts.pipeline_core.os.environ", {"XPANO_METASHAPE": missing, "Path": ""}, clear=False):
+            self.assertEqual(locate_metashape(), missing)
 
     def test_locates_colmap_from_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -54,7 +68,7 @@ class DependencyChecksTests(unittest.TestCase):
             with patch("scripts.dependency_checks.shutil.which", return_value=None):
                 self.assertEqual(locate_colmap(project_root=root), str(bundled))
 
-    def test_locates_pyinstaller_internal_bundled_colmap(self):
+    def test_locates_portable_internal_bundled_colmap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bundled = root / "_internal" / "tools" / "colmap" / "bin" / "colmap.exe"
@@ -164,6 +178,92 @@ class DependencyChecksTests(unittest.TestCase):
         self.assertTrue(by_name["LichtFeld densification Python"].ok)
         self.assertTrue(by_name["LichtFeld densification dependencies"].ok)
         self.assertTrue(by_name["LichtFeld densification runner"].ok)
+
+    def test_lfs_densification_uses_bundled_xpano_runner_in_frozen_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin = root / "plugin"
+            xpano_exe = root / "xPano.exe"
+            plugin.mkdir()
+            (plugin / "densify.py").write_text("print('ok')", encoding="utf-8")
+            xpano_exe.write_bytes(b"")
+
+            with patch("scripts.dependency_checks.shutil.which", return_value="C:/Tools/tool.exe"), \
+                patch("scripts.dependency_checks.locate_densify_plugin", return_value=plugin), \
+                patch("scripts.dependency_checks.should_use_bundled_densify_runner", return_value=True), \
+                patch("scripts.dependency_checks.sys.executable", str(xpano_exe)), \
+                patch("scripts.dependency_checks.sys.frozen", True, create=True), \
+                patch("scripts.dependency_checks.check_lfs_densify_imports") as import_check, \
+                patch("scripts.dependency_checks.check_lfs_densify_runner") as runner_check:
+                import_check.return_value = ExecutableCheck(
+                    name="LichtFeld densification dependencies",
+                    requested=str(xpano_exe),
+                    required=True,
+                    ok=True,
+                    resolved=str(xpano_exe),
+                )
+                runner_check.return_value = ExecutableCheck(
+                    name="LichtFeld densification runner",
+                    requested=str(plugin),
+                    required=True,
+                    ok=True,
+                    resolved=str(plugin),
+                )
+
+                checks = check_pipeline_dependencies(
+                    backend="colmap",
+                    colmap_exe="colmap",
+                    run_lfs_densify=True,
+                )
+
+        by_name = {check.name: check for check in checks}
+        self.assertTrue(by_name["LichtFeld densification Python"].ok)
+        self.assertIn("--run-lfs-densify-standalone", by_name["LichtFeld densification Python"].resolved)
+        import_check.assert_called_once_with(None)
+        runner_check.assert_called_once_with(None, plugin)
+
+    def test_lfs_densification_ignores_stale_python_path_in_frozen_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin = root / "plugin"
+            xpano_exe = root / "xPano.exe"
+            plugin.mkdir()
+            (plugin / "densify.py").write_text("print('ok')", encoding="utf-8")
+            xpano_exe.write_bytes(b"")
+
+            with patch("scripts.dependency_checks.shutil.which", return_value="C:/Tools/tool.exe"), \
+                patch("scripts.dependency_checks.locate_densify_plugin", return_value=plugin), \
+                patch("scripts.dependency_checks.should_use_bundled_densify_runner", return_value=True), \
+                patch("scripts.dependency_checks.sys.executable", str(xpano_exe)), \
+                patch("scripts.dependency_checks.check_lfs_densify_imports") as import_check, \
+                patch("scripts.dependency_checks.check_lfs_densify_runner") as runner_check:
+                import_check.return_value = ExecutableCheck(
+                    name="LichtFeld densification dependencies",
+                    requested=str(xpano_exe),
+                    required=True,
+                    ok=True,
+                    resolved=str(xpano_exe),
+                )
+                runner_check.return_value = ExecutableCheck(
+                    name="LichtFeld densification runner",
+                    requested=str(plugin),
+                    required=True,
+                    ok=True,
+                    resolved=str(plugin),
+                )
+
+                checks = check_pipeline_dependencies(
+                    backend="colmap",
+                    colmap_exe="colmap",
+                    run_lfs_densify=True,
+                    lfs_densify_python=r"Z:\old-xpano-build\.venv-densify\Scripts\python.exe",
+                )
+
+        by_name = {check.name: check for check in checks}
+        self.assertEqual(by_name["LichtFeld densification Python"].requested, str(xpano_exe))
+        self.assertIn("--run-lfs-densify-standalone", by_name["LichtFeld densification Python"].resolved)
+        import_check.assert_called_once_with(None)
+        runner_check.assert_called_once_with(None, plugin)
 
     def test_lfs_import_check_reports_missing_dependency(self):
         result = type("Result", (), {"returncode": 1, "stdout": "", "stderr": "No module named pycolmap"})()

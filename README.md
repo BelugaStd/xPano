@@ -1,126 +1,224 @@
 # xPano Multi-Track GUI
 
-面向 360 全景视频、普通照片和航拍照片的 Metashape 自动化重建工具。
+xPano Multi-Track GUI 是一个面向 360 全景视频、普通视频、普通照片和航拍照片的重建工作流工具。它把原始 `.osv` / `.insv` 双鱼眼素材、Metashape / COLMAP 对齐、COLMAP 格式导出、点云预览和可选 LichtFeld 致密化封装到一个 Tauri / React 桌面 GUI 中。
 
-本项目基于 xPano 的核心思想继续扩展：对齐阶段直接使用 `.osv` / `.insv` 原始双鱼眼帧，不先拼接 ERP，也不先切 cubemap；在 Metashape 中先用 `Station` 约束完成稀疏对齐，再释放为 `Folder` 优化，最后导出 COLMAP 结构给 3D Gaussian Splatting、NeRF 或其他重建流程使用。
+本 fork 延续原始 xPano 的核心思想：**对齐阶段直接使用原始左右鱼眼帧，不先拼接 ERP，也不先切 cubemap**。在 Metashape 后端中，全景帧先按 `Station` 约束完成初始空三，再释放为 `Folder` 做保守优化，最后导出适合 3D Gaussian Splatting、NeRF 和其它重建/训练工具使用的 COLMAP 目录。
 
-把 xPano/Metashape 操作流程封装成一个可复现的一键 GUI 和 CLI。
+## 本 Fork 的主要更新
 
-## 新 GUI 系列更新
+- 新增 Tauri / React 桌面 GUI，替代早期脚本式或旧 GUI 操作。
+- 新增素材轨工作流：全景视频、普通视频、普通照片、航拍照片可以在同一个项目中管理。
+- 全景轨道只接受 `.osv` / `.insv`，避免把普通视频误导入为双鱼眼全景。
+- 新增 Metashape / COLMAP 双后端。
+- COLMAP、ffmpeg、内置 Python 随发布包携带，用户不需要额外配置 PATH。
+- Metashape 后端仍要求用户本机安装并授权 Metashape，但 xPano 会把所需 Python 依赖安装到自身目录，再通过 `PYTHONPATH` 注入给 Metashape，不改写 Metashape 安装目录。
+- 新增项目文件夹复用：xPano 输出目录可再次拖入 GUI，复用抽帧、manifest 和 Metashape `.psx`，支持手动调整工程后重新导出。
+- 新增内置点云预览和相机视锥显示。
+- 新增 LichtFeld densification 插件接入，可在 Metashape 或 COLMAP 输出后生成更密的 COLMAP 点云。
+- 新增两种发布包：完整离线包和轻量增强包。
 
-当前发布分支已经从早期 Tk GUI 过渡到新的 PySide Workbench：
+## 发布包选择
 
-- 新增素材轨工作流：全景视频、普通视频、普通照片和航拍照片可以在同一界面管理，并支持单轨参数设置与删除。
-- 全景轨道只接受 `.osv` / `.insv`，普通 `.mp4` 需要作为普通视频轨导入，避免把单视频误当成双鱼眼全景处理。
-- 新增后端切换：Metashape 仍是验证过的基准流程，COLMAP 后端可使用 release 包内置版本，不要求用户额外配置 PATH。
-- 新增内置重建预览：运行中展示抽帧、日志、进度和点云/相机视锥预览；界面左侧参数区支持滚动，适配较小屏幕。
-- 新增 LichtFeld densification 插件接入，可在 Metashape 或 COLMAP 输出后继续生成更密的 COLMAP 点云。
-- 修复 release 环境问题：GUI 自带 NumPy/OpenCV/PySide6 等运行时；Metashape 子进程会隔离 GUI 打包环境，Metashape 导出不再依赖 `cv2`。
-- 发布包使用单个 ZIP64 压缩包，包含 GUI、ffmpeg、COLMAP、致密化 Python 环境和模型缓存；Metashape 后端仍需要用户本机安装并持有合法授权。
+### `xPano-full-offline.zip`
 
-## 功能状态
+完整离线包。适合给没有 Python、COLMAP、ffmpeg、torch 环境的用户直接使用。
 
-已验证：
+包含：
 
-- 选择 `.osv` / `.insv` 全景视频。
-- 按秒/帧抽取左右双鱼眼帧，默认 `1.0` 秒/帧。
-- 自动建立每帧左右鱼眼 Camera Station。
-- 自动调用 Metashape 完成匹配、对齐、优化和工程保存。
-- 全景传感器使用 `Fisheye`，像元尺寸 `0.0024 mm`，焦距 `2.5 mm`。
-- 固定 `B1`、`B2`、`K4`，并在对齐后从 `Station` 释放回 `Folder`。
-- 导出 COLMAP：`images/` 和 `sparse/0/{cameras.bin, images.bin, points3D.bin}`。
-- GUI 进度显示、抽帧预览和日志输出。
+- GUI 可执行文件和 `WebView2Loader.dll`
+- 内置 Python 与基础依赖
+- ffmpeg / ffprobe
+- COLMAP
+- Metashape Python 离线 wheels
+- LichtFeld densification plugin
+- RoMa / DINO 模型缓存
+- `.venv-densify` 致密化 Python 运行时
 
-实验性支持：
+无网情况下可用能力：
 
-- 普通照片轨道：作为 `Frame` 相机导入，同一 COLMAP 模型导出。
-- 航拍照片轨道：作为 `Frame` 相机导入，同一 COLMAP 模型导出。
-- 多轨道混合：全景、普通照片、航拍照片进入同一个 Metashape chunk 共同对齐。
+- GUI 启动
+- OSV / INSV 抽帧
+- Metashape 后端，前提是用户本机已安装并授权 Metashape
+- COLMAP 后端
+- 点云预览
+- LichtFeld 致密化
 
-混合轨道的导入结构、相机类型和导出结构已经有测试覆盖，但真实同场景“全景 + 手机/航拍”对齐质量仍需要更多数据验收。
+### `xPano-light-colmap-densify-ready.zip`
 
-## 为什么这样做
+轻量增强包。它仍然内置 COLMAP、ffmpeg、基础 Python、致密化插件和模型缓存，但不内置完整 torch / Open3D 致密化运行时。
 
-传统 360 重建常见流程是：
+包含：
+
+- GUI 可执行文件和 `WebView2Loader.dll`
+- 内置 Python 与基础依赖
+- ffmpeg / ffprobe
+- COLMAP
+- Metashape Python 离线 wheels
+- LichtFeld densification plugin
+- RoMa / DINO 模型缓存
+
+无网情况下可用能力：
+
+- GUI 启动
+- OSV / INSV 抽帧
+- Metashape 后端，前提是用户本机已安装并授权 Metashape
+- COLMAP 后端
+- 点云预览
+
+无网情况下，light 包的致密化只有在用户电脑已有兼容 Python 环境时才可用。该环境需要能导入：
+
+```text
+torch
+torchvision
+pycolmap
+PIL
+scipy
+tqdm
+einops
+rich
+open3d
+```
+
+如果没有这些依赖，light 包需要联网配置致密化环境，或者改用 full 包。
+联网配置 light 包致密化环境时，目标电脑需要已有支持 `venv` 的 Python 3.10-3.12。发布包内置的 `binaries/python/python.exe` 是给 xPano 主流程使用的 embeddable Python，不包含 `pip` / `venv`，不能直接用于创建 torch / Open3D 致密化环境。
+
+### `xPano-light-Setup.exe`
+
+轻量增强安装器。推荐给普通 Windows 用户分发，内容与 `xPano-light-colmap-densify-ready.zip` 基本一致，但会通过安装向导完成解包、快捷方式和卸载项创建。
+
+安装器特点：
+
+- 默认安装到 `%LOCALAPPDATA%\Programs\xPano`，不需要管理员权限。
+- 自动创建开始菜单快捷方式，可选创建桌面快捷方式。
+- 内置 Microsoft Edge WebView2 Evergreen Standalone Installer；安装时会检测 WebView2，缺失时自动静默安装。
+- 内置 COLMAP、ffmpeg / ffprobe、基础 Python、Metashape Python 离线 wheels、LichtFeld densification plugin 和模型缓存。
+- Metashape 本体不随安装器分发，Metashape 后端仍要求用户本机已安装并授权 Metashape。
+
+无网情况下，安装器版本可直接使用 GUI、OSV / INSV 抽帧、COLMAP 后端、点云预览，以及已安装 Metashape 时的 Metashape 后端。light 安装器不包含完整 torch / Open3D 致密化运行时；如果用户电脑没有兼容环境，致密化需要联网配置或改用 full 包。
+联网配置致密化时同样需要系统中已有支持 `venv` 的 Python 3.10-3.12。
+
+## 快速开始
+
+解压发布包后运行：
+
+```bat
+RUN_XPANO.bat
+```
+
+调试启动：
+
+```bat
+RUN_XPANO_DEBUG.bat
+```
+
+GUI 基本流程：
+
+1. 添加素材轨。
+2. 全景素材放入全景轨道，只支持 `.osv` / `.insv`。
+3. 普通视频、普通照片、航拍照片放入对应轨道。
+4. 选择输出文件夹。
+5. 选择后端：`Metashape` 或 `COLMAP`。
+6. 设置抽帧间隔，单位是“秒/帧”，建议先用 `1.0`。
+7. 可选设置帧数上限；留空表示按所选时间范围抽取全部帧。
+8. 点击开始，等待输出 `images/` 与 `sparse/0/`。
+
+## 后端说明
+
+### Metashape 后端
+
+这是当前最重要、最稳定的全景工作流。用户需要自行安装并授权 Agisoft Metashape Professional。
+
+xPano 会自动寻找：
+
+1. GUI 中指定的 Metashape 路径
+2. `XPANO_METASHAPE`
+3. PATH 中的 `metashape.exe`
+4. 常见安装目录
+
+Metashape Python 依赖处理方式：
+
+- xPano 不再把 `numpy` / `cv2` 安装进 Metashape 安装目录。
+- 首次运行时，xPano 会按 Metashape 自带 Python 版本创建：
+
+```text
+tools/metashape-python/cpXX/site-packages
+```
+
+- 然后通过 `PYTHONPATH` 注入给 Metashape 子进程。
+- 这样可以避免 `C:\Program Files` 权限问题，也不会污染用户的 Metashape 安装。
+
+### COLMAP 后端
+
+发布包已内置 COLMAP，GUI 和 CLI 会优先使用：
+
+```text
+tools/colmap/bin/colmap.exe
+```
+
+用户不需要安装 COLMAP，也不需要配置 PATH。
+
+COLMAP 后端适合不想依赖 Metashape 的场景。它会输出同样的 COLMAP 结构：
+
+```text
+images/
+sparse/0/cameras.bin
+sparse/0/images.bin
+sparse/0/points3D.bin
+```
+
+当前内置 COLMAP 为 Windows no-CUDA 构建。GPU/CUDA 相关能力仍取决于用户本机驱动和所使用的外部环境。
+
+## 已锁定的 Metashape 全景流程
+
+全景 `.osv` / `.insv` 轨道必须遵守以下流程：
+
+1. 每个采样时刻生成一个文件夹，内部包含左右两张原始鱼眼图。
+2. 每个文件夹作为一个 Metashape CameraGroup。
+3. 匹配和初始对齐前，CameraGroup 类型设为 `Station`。
+4. 全景 sensor 类型设为 `Metashape.Sensor.Type.Fisheye`。
+5. 像元尺寸设为 `0.0024 mm`，焦距设为 `2.5 mm`。
+6. 初始 `b1`、`b2`、`k4` 设为 `0`。
+7. 固定参数必须是大写 `["B1", "B2", "K4"]`。
+8. `matchPhotos` 使用 `tiepoint_limit=0`，关闭 `filter_stationary_points`，启用 `keep_keypoints=True`。
+9. `alignCameras(adaptive_fitting=True)`。
+10. 对齐后把 CameraGroup 从 `Station` 改回 `Folder`。
+11. `optimizeCameras(fit_b1=False, fit_b2=False, fit_k4=False)`。
+12. 保存 `work/xpano.psx`。
+13. 执行地面方向校正和 COLMAP / cubemap 导出。
+
+混合素材默认使用 `backbone` 策略：
+
+1. 先只导入并对齐全景双鱼眼轨道。
+2. 释放全景 Station 到 Folder，并做保守优化。
+3. 再导入普通视频帧、普通照片、航拍照片等 Frame 相机。
+4. 不假设不同素材之间有时间或帧号对应关系。
+5. 让 Metashape 按图像内容把新增 Frame 相机注册到已有全景骨架上。
+6. 最后做轻量全局优化。
+
+旧的一阶段混合流程仍可通过高级参数或 CLI 的 `--metashape-alignment-mode mixed` 使用。
+
+## 为什么不先拼接 ERP
+
+传统 360 重建流程通常是：
 
 1. 原始双鱼眼视频先拼接成 ERP 全景图。
 2. ERP 再切成多张透视图。
-3. 用这些透视图做 SfM/3DGS。
+3. 用这些透视图做 SfM / 3DGS。
 
-这个流程容易引入非物理形变：拼接软件为了视觉无缝会做光流拉伸，ERP 顶底也有严重极区拉伸。把这些图再交给摄影测量软件做 bundle adjustment，等于让优化器拟合已经被非刚性处理过的图像，容易导致点云漂移、轨迹弯曲、接缝附近重影。
+这个流程容易引入非物理形变：拼接软件为了视觉无缝可能做光流拉伸，ERP 顶底区域也有严重极区拉伸。把这些图交给摄影测量软件做 bundle adjustment，相当于让优化器拟合已经被非刚性处理过的图像，容易导致点云漂移、轨迹弯曲和接缝附近重影。
 
-本项目采用相反策略：
+xPano 采用相反策略：
 
 1. 对齐阶段只使用原始左右鱼眼。
-2. 同一时刻左右鱼眼先设为 Metashape `Station`，帮助初始化。
-3. 初始对齐完成后释放为 `Folder`，让优化器恢复真实双镜头小基线。
-4. 对齐完成后才做 cubemap/undistort 导出。
+2. 同一时刻左右鱼眼先设为 Metashape `Station`。
+3. 初始对齐完成后释放为 `Folder`。
+4. 对齐完成后才做 cubemap / undistort 导出。
 
-这样可以减少对齐图像数量，避免 ERP/拼接形变进入空三，并让导出的透视图继承已经优化好的相机姿态。
+这样可以减少对齐图像数量，避免 ERP / 拼接形变进入空三，并让导出的透视图继承已经优化好的相机姿态。
 
-## 依赖
+## 项目文件夹复用
 
-Windows 环境：
-
-- Python 3.10+。
-- ffmpeg，并确保 `ffmpeg.exe` 在 `PATH` 中。
-- Agisoft Metashape，并确保 `metashape.exe` 在 `PATH` 中，或设置环境变量 `XPANO_METASHAPE` 指向完整路径。
-- 使用 COLMAP 后端时，推荐把便携版 COLMAP 放进项目内 `tools/colmap/`；GUI 和 CLI 会优先使用项目内版本，不需要用户再配置 `PATH`。
-
-Python 依赖：
-
-- GUI/抽帧侧：见 `requirements.txt`。
-- Metashape Python 侧：见 `metashape_requirements.txt`。
-
-一键安装：
-
-```powershell
-INSTALL_DEPS.bat
-```
-
-安装脚本会：
-
-- 检查 `ffmpeg.exe`。
-- 安装普通 Python 依赖。
-- 查找 `metashape.exe`。
-- 使用 Metashape 自带 Python 安装导出所需依赖。
-
-可选：安装项目内 COLMAP 便携版：
-
-```powershell
-INSTALL_COLMAP.bat
-```
-
-默认下载官方 No-CUDA 版到 `tools/colmap/`。如果需要 CUDA 版：
-
-```powershell
-INSTALL_COLMAP.bat -Variant cuda
-```
-
-## 快速使用
-
-启动 GUI：
-
-```powershell
-RUN_GUI.bat
-```
-
-调试模式启动：
-
-```powershell
-RUN_GUI_DEBUG.bat
-```
-
-GUI 流程：
-
-1. 添加素材轨，至少添加一个全景视频轨。
-2. 选择输出文件夹。
-3. 确认 Metashape 路径。
-4. 输入抽帧间隔，单位为秒/帧，推荐先用 `1.0`。
-5. 帧数限制可留空；测试时可填 `50`。
-6. 点击开始，等待 COLMAP 输出完成。
-
-输出目录结构：
+xPano 输出目录也是 xPano 工程目录。一个有效工程通常包含：
 
 ```text
 output/
@@ -129,32 +227,60 @@ output/
     xpano_manifest.json
     xpano.psx
   images/
-    *.jpg
   sparse/
     0/
       cameras.bin
       images.bin
       points3D.bin
-  xpano_alignment_summary.txt
   xpano_run_summary.json
 ```
 
-## CLI 使用
+把这个输出目录拖入 GUI 后，xPano 会进入项目页，而不是只进入点云预览页。用户可以：
 
-单个全景视频：
+- 复用已抽取帧
+- 复用 manifest
+- 复用 Metashape `.psx`
+- 手动在 Metashape 中调整工程后重新导出 COLMAP
+- 只选择部分步骤重新执行
+
+只有当拖入的是普通 COLMAP 文件夹、且不是 xPano 工程目录时，GUI 才直接进入点云预览。
+
+## LichtFeld 致密化
+
+xPano 集成 LichtFeld densification plugin，用于把 Metashape 或 COLMAP 输出后的稀疏 COLMAP 点云变得更密。
+
+full 包：
+
+- 内置致密化 Python 运行时。
+- 无网可直接运行致密化。
+
+light 包：
+
+- 内置插件源码和模型缓存。
+- 不内置 torch / Open3D 等大型运行时。
+- 会优先复用用户已有兼容环境。
+- 如果无兼容环境，需要联网配置，或改用 full 包。
+
+输出会合并到 COLMAP `sparse/0/points3D.bin`，并保留原始稀疏点备份。
+
+## CLI 示例
+
+单个全景视频，Metashape 后端：
 
 ```powershell
 python scripts\run_xpano_tracks_job.py `
+  --backend metashape `
   --output "D:\path\to\output" `
   --pano "D:\path\to\camera.osv" `
   --seconds-per-frame 1 `
   --metashape "C:\Path\To\Metashape\metashape.exe"
 ```
 
-限制前 50 帧做回归测试：
+限制前 50 帧：
 
 ```powershell
 python scripts\run_xpano_tracks_job.py `
+  --backend metashape `
   --output "D:\path\to\output_50" `
   --pano "D:\path\to\camera.osv" `
   --seconds-per-frame 1 `
@@ -162,90 +288,140 @@ python scripts\run_xpano_tracks_job.py `
   --metashape "C:\Path\To\Metashape\metashape.exe"
 ```
 
-混合普通照片轨：
+COLMAP 后端：
 
 ```powershell
 python scripts\run_xpano_tracks_job.py `
+  --backend colmap `
+  --output "D:\path\to\output_colmap" `
+  --pano "D:\path\to\camera.osv" `
+  --seconds-per-frame 1
+```
+
+混合普通视频：
+
+```powershell
+python scripts\run_xpano_tracks_job.py `
+  --backend metashape `
   --output "D:\path\to\mixed_output" `
   --pano "D:\path\to\camera.osv" `
-  --standard-track phone "D:\path\to\phone_photos" `
-  --seconds-per-frame 1 `
-  --metashape "C:\Path\To\Metashape\metashape.exe"
+  --ordinary-video "D:\path\to\phone_video.mp4" `
+  --ordinary-view wide `
+  --seconds-per-frame 1
 ```
 
-混合航拍照片轨：
+重新导出已有 Metashape 工程：
 
 ```powershell
 python scripts\run_xpano_tracks_job.py `
-  --output "D:\path\to\drone_output" `
-  --pano "D:\path\to\camera.osv" `
-  --aerial-track mavic "D:\path\to\drone_photos" `
-  --seconds-per-frame 1 `
+  --backend metashape `
+  --output "D:\path\to\xpano_project" `
+  --reexport-existing-project `
   --metashape "C:\Path\To\Metashape\metashape.exe"
 ```
 
-## 已锁定的 Metashape 流程
+## 从源码运行
 
-全景轨道必须遵守以下流程：
+开发模式启动 GUI：
 
-1. 每个采样时刻生成一个文件夹，内部包含左右两张原始鱼眼图。
-2. 每个文件夹作为一个 Metashape CameraGroup。
-3. 匹配和对齐前，全景 CameraGroup 设为 `Station`。
-4. 全景 sensor 设为 `Metashape.Sensor.Type.Fisheye`。
-5. 像元尺寸设为 `0.0024`，焦距设为 `2.5`。
-6. 初始 `b1`、`b2`、`k4` 设为 `0`。
-7. 固定参数必须是大写的 `["B1", "B2", "K4"]`。
-8. `matchPhotos` 使用 `tiepoint_limit=0`，并关闭 `filter_stationary_points`。
-9. `alignCameras(adaptive_fitting=True)`。
-10. 对齐后把全景 CameraGroup 改回 `Folder`。
-11. `optimizeCameras(fit_b1=False, fit_b2=False, fit_k4=False)`。
-12. 保存 `.psx` 后再执行地面校正和 COLMAP/cubemap 导出。
+```bat
+RUN_XPANO_UI.bat
+```
 
-详细验收记录见 `docs/VERIFIED_WORKFLOW.md`。
+手动环境检查：
 
-## 项目结构
+```bat
+CHECK_ENV.bat -Backend colmap
+CHECK_ENV.bat -Backend metashape -MetashapeExe "C:\Path\To\Metashape\metashape.exe"
+CHECK_ENV.bat -Backend colmap -IncludeDensify
+```
+
+打包前准备内置 Python 和离线 wheels：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\download_offline_wheels.ps1 -Root .
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_embedded_python.ps1 -Root .
+```
+
+构建发布目录：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1 `
+  -ReleaseName xPano-light-colmap-densify-ready `
+  -Version 0.1.1-light-colmap-densify-ready `
+  -SkipDensifyVenv
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1 `
+  -ReleaseName xPano-full-offline `
+  -Version 0.1.1-full-offline
+```
+
+压缩为单文件 ZIP：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package_release.ps1 `
+  -ReleaseName xPano-light-colmap-densify-ready `
+  -NoSplit
+```
+
+构建轻量安装器：
+
+```powershell
+winget install --id JRSoftware.InnoSetup --exact
+
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_light_installer.ps1 `
+  -Version 0.1.1
+```
+
+安装器输出到：
 
 ```text
-app.py                         GUI 和共享任务编排入口
-scripts/
-  xpano_extract.py             OSV/INSV 抽帧
-  xpano_tracks.py              多素材轨 manifest 构建与校验
-  metashape_pipeline.py        Metashape 自动化对齐流程
-  export_colmap.py             COLMAP/cubemap/Frame 图像导出
-  run_xpano_tracks_job.py      CLI 入口
-  verify_xpano_output.py       输出结构校验
-  diagnose_metashape_project.py Metashape 工程诊断
-docs/
-  VERIFIED_WORKFLOW.md         已验收的全景工作流
-  MULTI_TRACK_BACKEND.md       多轨道后端设计和测试记录
-  COLMAP_LICHT_PLAN.md         COLMAP / LICHT Field Studio 支持计划和状态
-  COLMAP_LICHT_USAGE.md        COLMAP / LICHT Field Studio 使用说明
-tests/                         轻量单元测试
+dist/xPano-light-Setup.exe
+dist/xPano-light-Setup.SHA256SUMS.txt
 ```
 
-## 测试
+轻量安装器使用 Inno Setup 构建。之前测试过 NSIS，但 light 包包含较大的模型和运行资源，NSIS 在大文件打包时可靠性不足，因此当前发布路径固定为 Inno Setup。
 
-```powershell
-python -m py_compile app.py scripts\metashape_pipeline.py scripts\export_colmap.py scripts\xpano_tracks.py
-python -m unittest tests.test_xpano_tracks tests.test_verify_xpano_output tests.test_run_xpano_tracks_job tests.test_app_pipeline
+## 常见问题
+
+### 提示找不到 `WebView2Loader.dll`
+
+说明发布包不完整，`WebView2Loader.dll` 必须和 `xPano.exe` 在同一目录。新版打包脚本会强制复制该 DLL。
+
+### Metashape 找不到 `cv2` 或 `numpy`
+
+新版不再要求用户手动给 Metashape Python 安装依赖。运行任务前环境检查会创建：
+
+```text
+tools/metashape-python/cpXX/site-packages
 ```
 
-如果本机安装了 Metashape，可以进一步使用：
+如果仍失败，优先检查发布包中是否存在：
 
-```powershell
-& "C:\Path\To\Metashape\metashape.exe" -r scripts\diagnose_metashape_project.py `
-  --project "D:\path\to\output\work\xpano.psx" `
-  --expect-fixed-fisheye
+```text
+tools/offline-wheels/metashape/
+tools/offline-wheels/app/
 ```
 
-## 发布前注意
+### light 包无网不能致密化
 
-- 不要提交本机输出目录、`.psx` 工程、抽帧图像、COLMAP 输出和错误日志。
-- 不要把 Metashape 本体打进仓库；用户需要自行安装并遵守 Agisoft 授权。
-- COLMAP 可放在 release 包的 `tools/colmap/` 内随软件分发；源码仓库默认忽略大二进制，避免超过 GitHub 单文件限制。
-- `download/` 是历史下载/迁移目录，不属于发布主体。
-- 混合轨道功能目前建议标为 experimental，直到有更多真实同场景数据验收。
+这是预期行为。light 包包含插件和模型缓存，但不包含完整 torch / Open3D 运行时。无网致密化请使用 full 包。
 
-## License
+### COLMAP 模式内存占用高
 
-本项目保留原 xPano 的 MIT License。发布 fork 时请保留 `LICENSE`，并在 release note 中说明本 fork 追加了 GUI、多素材轨、Metashape CLI 自动化和 COLMAP 混合导出能力。
+先降低抽帧数量或使用更大的秒/帧间隔。COLMAP 特征提取和匹配会随图片数量快速增长，尤其是高分辨率双鱼眼输入。
+
+## 第三方组件与许可
+
+- 原始 xPano：MIT License。
+- COLMAP、ffmpeg、Agisoft Metashape、LichtFeld densification plugin、RoMa / DINO 等第三方组件遵守各自许可证。
+- Metashape 本体不随 xPano 分发，用户必须自行安装并持有合法授权。
+- 若发布包含 RoMa / DINO 模型缓存，请保留对应第三方 license / notice。
+
+## 相关文档
+
+- `docs/VERIFIED_WORKFLOW.md`：已锁定的 Metashape 工作流。
+- `docs/MULTI_TRACK_BACKEND.md`：多素材轨道和后端设计。
+- `docs/COLMAP_DENSIFICATION.md`：当前 COLMAP / LichtFeld 致密化工作流与已知边界。
+- `docs/ARCHITECTURE_HARDENING_PHASES_0_2.md`：环境与运行架构加固前三阶段执行规范。
+- `GUI_QUICKSTART.md`：新 GUI 快速启动说明。

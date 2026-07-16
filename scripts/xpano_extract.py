@@ -1,6 +1,8 @@
+import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -11,6 +13,87 @@ from scripts.runtime_paths import locate_ffmpeg, locate_ffprobe
 
 
 SUPPORTED_EXTENSIONS = {".insv", ".osv", ".mp4"}
+
+
+def _hardware_acceleration_candidates(platform=None, mode=None):
+    platform = platform or sys.platform
+    mode = (mode or os.environ.get("XPANO_HWACCEL", "auto")).strip().lower()
+    software = [("software", [])]
+    if mode in {"none", "off", "software", "cpu", "0"}:
+        return software
+    if mode == "cuda":
+        return [("cuda", ["-hwaccel", "cuda"]), *software]
+    if mode in {"d3d11", "d3d11va"}:
+        return [("d3d11va", ["-hwaccel", "d3d11va"]), *software]
+    candidates = [("cuda", ["-hwaccel", "cuda"])]
+    if platform == "win32":
+        candidates.append(("d3d11va", ["-hwaccel", "d3d11va"]))
+    candidates.extend(software)
+    return candidates
+
+
+def _ffmpeg_input_args(input_path, time_args, hardware_args):
+    return [*hardware_args, *time_args, "-i", str(input_path)]
+
+
+def _is_non_decoder_failure(error):
+    output = str(getattr(error, "output", "") or "").lower()
+    return any(
+        marker in output
+        for marker in (
+            "error opening input",
+            "no such file or directory",
+            "permission denied",
+            "no space left on device",
+            "invalid data found when processing input",
+            "could not open file",
+        )
+    )
+
+
+def _run_ffmpeg_with_hardware_fallback(
+    command_factory,
+    input_path,
+    fps,
+    max_frames,
+    candidates=None,
+    cleanup_cb=None,
+    log_cb=None,
+    **run_kwargs,
+):
+    candidates = candidates or _hardware_acceleration_candidates()
+    for index, (name, hardware_args) in enumerate(candidates):
+        if cleanup_cb:
+            cleanup_cb()
+        if log_cb:
+            log_cb(f"ffmpeg decoder attempt: {name}")
+        try:
+            _run_ffmpeg(
+                command_factory(name, hardware_args),
+                input_path,
+                fps,
+                max_frames,
+                log_cb=log_cb,
+                **run_kwargs,
+            )
+        except subprocess.CalledProcessError as error:
+            if name == "software" or _is_non_decoder_failure(error) or index + 1 >= len(candidates):
+                raise
+            next_name = candidates[index + 1][0]
+            if log_cb:
+                log_cb(f"{name.upper()} 硬件解码不可用，回退到 {next_name}")
+            continue
+        if log_cb:
+            log_cb(f"ffmpeg decoder selected: {name}")
+        return name
+    raise RuntimeError("no FFmpeg decoder candidate was attempted")
+
+
+def _remove_generated_files(out_root, patterns):
+    for pattern in patterns:
+        for path in Path(out_root).glob(pattern):
+            if path.is_file():
+                path.unlink()
 
 
 def _apply_exif(img_path: Path, model: str, make: str):
@@ -97,6 +180,12 @@ def _count_generated_pairs(out_root: Path, base_name: str):
     return min(left_count, right_count)
 
 
+def _count_generated_single_frames(out_root: Path, base_name: str):
+    if not out_root or not base_name:
+        return 0
+    return len(list(out_root.glob(f"{base_name}_*.jpg")))
+
+
 def _emit_generated_pair_previews(out_root: Path, base_name: str, last_previewed: int, preview_cb):
     if not out_root or not base_name or preview_cb is None:
         return last_previewed
@@ -106,6 +195,18 @@ def _emit_generated_pair_previews(out_root: Path, base_name: str, last_previewed
         right = out_root / f"{base_name}_R_{frame_idx:05d}.jpg"
         if left.exists() and right.exists():
             _frame_preview(left, right, preview_cb)
+            last_previewed = frame_idx
+    return last_previewed
+
+
+def _emit_generated_single_previews(out_root: Path, base_name: str, last_previewed: int, preview_cb):
+    if not out_root or not base_name or preview_cb is None:
+        return last_previewed
+    count = _count_generated_single_frames(out_root, base_name)
+    for frame_idx in range(last_previewed + 1, count + 1):
+        frame = out_root / f"{base_name}_{frame_idx:05d}.jpg"
+        if frame.exists():
+            _frame_preview(frame, frame, preview_cb)
             last_previewed = frame_idx
     return last_previewed
 
@@ -120,6 +221,7 @@ def _run_ffmpeg(
     out_root=None,
     base_name=None,
     preview_cb=None,
+    preview_mode="pair",
     start_time_seconds=0.0,
     end_time_seconds=0.0,
 ):
@@ -209,10 +311,13 @@ def _run_ffmpeg(
     out_root = Path(out_root) if out_root else None
     last_previewed = 0
     while proc.poll() is None:
-        generated = _count_generated_pairs(out_root, base_name)
+        generated = _count_generated_single_frames(out_root, base_name) if preview_mode == "single" else _count_generated_pairs(out_root, base_name)
         if generated:
             emit_progress(set_last_frame(generated))
-            last_previewed = _emit_generated_pair_previews(out_root, base_name, last_previewed, preview_cb)
+            if preview_mode == "single":
+                last_previewed = _emit_generated_single_previews(out_root, base_name, last_previewed, preview_cb)
+            else:
+                last_previewed = _emit_generated_pair_previews(out_root, base_name, last_previewed, preview_cb)
 
         now = time.monotonic()
         current_frame = get_last_frame()
@@ -227,10 +332,13 @@ def _run_ffmpeg(
     rc = proc.wait()
     reader_done.wait(timeout=2)
     reader.join(timeout=2)
-    generated = _count_generated_pairs(out_root, base_name)
+    generated = _count_generated_single_frames(out_root, base_name) if preview_mode == "single" else _count_generated_pairs(out_root, base_name)
     if generated:
         emit_progress(set_last_frame(generated))
-        _emit_generated_pair_previews(out_root, base_name, last_previewed, preview_cb)
+        if preview_mode == "single":
+            _emit_generated_single_previews(out_root, base_name, last_previewed, preview_cb)
+        else:
+            _emit_generated_pair_previews(out_root, base_name, last_previewed, preview_cb)
     if rc != 0:
         tail = "\n".join(output_lines[-20:])
         raise subprocess.CalledProcessError(rc, cmd, output=tail)
@@ -242,27 +350,29 @@ def _extract_one(args):
     right = task["right_file"]
     base_name = task["clean_name"]
     input_time_args = _input_time_args(start_time_seconds, end_time_seconds)
-    if task["type"] == "insta_split":
+    def command_factory(_name, hardware_args):
+        if task["type"] == "insta_split":
+            cmd = [
+                locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
+                *_ffmpeg_input_args(left, input_time_args, hardware_args),
+                *_ffmpeg_input_args(right, input_time_args, hardware_args),
+                "-map", "0:0", "-vf", f"fps={fps}",
+            ]
+            _append_frame_limit(cmd, max_frames)
+            cmd.extend([
+                "-q:v", "2",
+                str(out_root / f"{base_name}_L_%05d.jpg"),
+                "-map", "1:0", "-vf", f"fps={fps}",
+            ])
+            _append_frame_limit(cmd, max_frames)
+            cmd.extend([
+                "-q:v", "2",
+                str(out_root / f"{base_name}_R_%05d.jpg"),
+            ])
+            return cmd
         cmd = [
             locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
-            *input_time_args, "-i", str(left), *input_time_args, "-i", str(right),
-            "-map", "0:0", "-vf", f"fps={fps}",
-        ]
-        _append_frame_limit(cmd, max_frames)
-        cmd.extend([
-            "-q:v", "2",
-            str(out_root / f"{base_name}_L_%05d.jpg"),
-            "-map", "1:0", "-vf", f"fps={fps}",
-        ])
-        _append_frame_limit(cmd, max_frames)
-        cmd.extend([
-            "-q:v", "2",
-            str(out_root / f"{base_name}_R_%05d.jpg"),
-        ])
-    else:
-        cmd = [
-            locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
-            *input_time_args, "-i", str(left),
+            *_ffmpeg_input_args(left, input_time_args, hardware_args),
             "-map", "0:0", "-vf", f"fps={fps}",
         ]
         _append_frame_limit(cmd, max_frames)
@@ -276,18 +386,24 @@ def _extract_one(args):
             "-q:v", "2",
             str(out_root / f"{base_name}_R_%05d.jpg"),
         ])
-    _run_ffmpeg(
-        cmd,
+        return cmd
+
+    _run_ffmpeg_with_hardware_fallback(
+        command_factory,
         left,
         fps,
         max_frames,
+        cleanup_cb=lambda: _remove_generated_files(
+            out_root,
+            [f"{base_name}_L_*.jpg", f"{base_name}_R_*.jpg"],
+        ),
         progress_cb=progress_cb,
-        log_cb=log_cb,
         out_root=out_root,
         base_name=base_name,
         preview_cb=preview_cb,
         start_time_seconds=start_time_seconds,
         end_time_seconds=end_time_seconds,
+        log_cb=log_cb,
     )
 
     left_files = sorted(out_root.glob(f"{base_name}_L_*.jpg"))
@@ -385,26 +501,31 @@ def extract_single_video_frames(
     out_root.mkdir(parents=True, exist_ok=True)
     base_name = model_prefix or input_path.stem
     input_time_args = _input_time_args(start_time_seconds, end_time_seconds)
-    cmd = [
-        locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
-        *input_time_args, "-i", str(input_path),
-        "-map", "0:v:0", "-vf", f"fps={fps}",
-    ]
-    _append_frame_limit(cmd, max_frames)
-    cmd.extend(["-q:v", "2", str(out_root / f"{base_name}_%05d.jpg")])
+    def command_factory(_name, hardware_args):
+        cmd = [
+            locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
+            *_ffmpeg_input_args(input_path, input_time_args, hardware_args),
+            "-map", "0:v:0", "-vf", f"fps={fps}",
+        ]
+        _append_frame_limit(cmd, max_frames)
+        cmd.extend(["-q:v", "2", str(out_root / f"{base_name}_%05d.jpg")])
+        return cmd
     if progress_cb:
         progress_cb(0, max_frames if max_frames and max_frames > 0 else 1)
-    _run_ffmpeg(
-        cmd,
+    _run_ffmpeg_with_hardware_fallback(
+        command_factory,
         input_path,
         fps,
         max_frames,
+        cleanup_cb=lambda: _remove_generated_files(out_root, [f"{base_name}_*.jpg"]),
         progress_cb=progress_cb,
-        log_cb=log_cb,
         out_root=out_root,
-        base_name=None,
+        base_name=base_name,
+        preview_cb=preview_cb,
+        preview_mode="single",
         start_time_seconds=start_time_seconds,
         end_time_seconds=end_time_seconds,
+        log_cb=log_cb,
     )
 
     frame_files = sorted(out_root.glob(f"{base_name}_*.jpg"))
@@ -412,10 +533,9 @@ def extract_single_video_frames(
         frame_files = frame_files[:max_frames]
     extracted = []
     for idx, source in enumerate(frame_files, 1):
-        frame_dir = out_root / f"{base_name}_frame_{idx:05d}"
-        frame_dir.mkdir(exist_ok=True)
-        dst = frame_dir / f"{base_name}_frame_{idx:05d}.jpg"
-        shutil.move(str(source), str(dst))
+        dst = out_root / f"{base_name}_frame_{idx:05d}.jpg"
+        if source != dst:
+            shutil.move(str(source), str(dst))
         _apply_exif(dst, f"{base_name}_frame", "xPano")
         extracted.append(dst)
         if preview_cb:
