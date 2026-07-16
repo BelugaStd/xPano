@@ -1,6 +1,7 @@
 import json
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -455,6 +456,101 @@ class ColmapBackendPlanTests(unittest.TestCase):
             self.assertEqual(calls[1][calls[1].index("--FeatureExtraction.use_gpu") + 1], "0")
             self.assertTrue(any("retrying with CPU" in line for line in logs))
 
+    def test_run_plan_reports_stable_command_stage_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = ColmapCommandPlan(
+                output_dir=root,
+                database_path=root / "database.db",
+                image_dir=root / "colmap_images",
+                sparse_dir=root / "sparse",
+                commands=[
+                    ["colmap", "feature_extractor"],
+                    ["colmap", "sequential_matcher"],
+                    ["colmap", "mapper"],
+                ],
+            )
+            plan.image_dir.mkdir()
+            plan.sparse_dir.mkdir()
+            stages = []
+
+            def fake_runner(command, **_kwargs):
+                if command[1] == "feature_extractor":
+                    plan.database_path.write_bytes(b"db")
+                if command[1] == "mapper":
+                    sparse_zero = plan.sparse_dir / "0"
+                    sparse_zero.mkdir()
+                    for name in ["cameras.bin", "images.bin", "points3D.bin"]:
+                        (sparse_zero / name).write_bytes(b"model")
+                return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+            run_colmap_plan(
+                plan,
+                runner=fake_runner,
+                stage_cb=lambda name, index, total: stages.append((name, index, total)),
+            )
+
+            self.assertEqual(
+                stages,
+                [
+                    ("feature_extractor", 1, 3),
+                    ("sequential_matcher", 2, 3),
+                    ("mapper", 3, 3),
+                ],
+            )
+
+    def test_disables_gpu_before_running_when_colmap_reports_no_cuda(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = ColmapCommandPlan(
+                output_dir=root,
+                database_path=root / "database.db",
+                image_dir=root / "colmap_images",
+                sparse_dir=root / "sparse",
+                commands=[
+                    [
+                        "colmap",
+                        "feature_extractor",
+                        "--database_path",
+                        str(root / "database.db"),
+                        "--FeatureExtraction.use_gpu",
+                        "1",
+                    ],
+                    [
+                        "colmap",
+                        "sequential_matcher",
+                        "--FeatureMatching.use_gpu",
+                        "1",
+                    ],
+                    ["colmap", "mapper"],
+                ],
+            )
+            plan.image_dir.mkdir()
+            plan.sparse_dir.mkdir()
+            calls = []
+            logs = []
+
+            def fake_stream(command, cwd, log_cb):
+                calls.append(command)
+                if command[1] == "feature_extractor":
+                    plan.database_path.write_bytes(b"db")
+                if command[1] == "mapper":
+                    sparse_zero = plan.sparse_dir / "0"
+                    sparse_zero.mkdir()
+                    (sparse_zero / "cameras.bin").write_bytes(b"cameras")
+                    (sparse_zero / "images.bin").write_bytes(b"images")
+                    (sparse_zero / "points3D.bin").write_bytes(b"points")
+                return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+            help_result = subprocess.CompletedProcess(["colmap", "-h"], 0, stdout="COLMAP without CUDA", stderr="")
+            with patch("scripts.colmap_backend.subprocess.run", return_value=help_result), \
+                    patch("scripts.colmap_backend._run_command_streaming", side_effect=fake_stream):
+                run_colmap_plan(plan, log_cb=logs.append)
+
+            self.assertEqual(calls[0][calls[0].index("--FeatureExtraction.use_gpu") + 1], "0")
+            self.assertEqual(calls[1][calls[1].index("--FeatureMatching.use_gpu") + 1], "0")
+            self.assertTrue(any("no CUDA support" in line for line in logs))
+
     def test_fails_when_colmap_sparse_output_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -602,6 +698,58 @@ class LichtfeldDensifyCliTests(unittest.TestCase):
         self.assertIn("--max_points", command)
         self.assertIn("100000", command)
 
+    def test_bundled_release_densify_command_uses_xpano_exe_not_copied_venv_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            internal = root / "_internal"
+            site_packages = internal / ".venv-densify" / "Lib" / "site-packages"
+            plugin = internal / "tools" / "lichtfeld-densification-plugin"
+            site_packages.mkdir(parents=True)
+            plugin.mkdir(parents=True)
+            (plugin / "densify.py").write_text("print('ok')", encoding="utf-8")
+            xpano_exe = root / "xPano.exe"
+            xpano_exe.write_bytes(b"")
+
+            with patch("scripts.lichtfeld_densify.candidate_roots", return_value=[root, internal]), \
+                patch("scripts.lichtfeld_densify.sys.executable", str(xpano_exe)), \
+                patch("scripts.lichtfeld_densify.sys.frozen", True, create=True):
+                command = build_densify_command(
+                    LichtfeldDensifyConfig(
+                        python_exe=None,
+                        plugin_dir=None,
+                        scene_root=Path("out"),
+                    )
+                )
+
+        self.assertEqual(command[:3], [str(xpano_exe), "--run-lfs-densify-standalone", "--plugin-dir"])
+        self.assertNotIn("Scripts", " ".join(command))
+
+    def test_bundled_release_densify_command_ignores_stale_python_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            internal = root / "_internal"
+            site_packages = internal / ".venv-densify" / "Lib" / "site-packages"
+            plugin = internal / "tools" / "lichtfeld-densification-plugin"
+            site_packages.mkdir(parents=True)
+            plugin.mkdir(parents=True)
+            (plugin / "densify.py").write_text("print('ok')", encoding="utf-8")
+            xpano_exe = root / "xPano.exe"
+            xpano_exe.write_bytes(b"")
+
+            with patch("scripts.lichtfeld_densify.candidate_roots", return_value=[root, internal]), \
+                patch("scripts.lichtfeld_densify.sys.executable", str(xpano_exe)), \
+                patch("scripts.lichtfeld_densify.sys.frozen", True, create=True):
+                command = build_densify_command(
+                    LichtfeldDensifyConfig(
+                        python_exe=r"Z:\old-xpano-build\.venv-densify\Scripts\python.exe",
+                        plugin_dir=None,
+                        scene_root=Path("out"),
+                    )
+                )
+
+        self.assertEqual(command[:3], [str(xpano_exe), "--run-lfs-densify-standalone", "--plugin-dir"])
+        self.assertNotIn(r"Z:\old-xpano-build", " ".join(command))
+
     def test_integer_one_num_refs_is_passed_as_count_not_fraction(self):
         command = build_densify_command(
             LichtfeldDensifyConfig(
@@ -690,6 +838,40 @@ class LichtfeldDensifyCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--roma_setting", result.stdout)
         self.assertIn("--scene_root", result.stdout)
+
+    def test_standalone_runner_help_does_not_import_heavy_plugin_modules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / "plugin"
+            plugin.mkdir()
+            (plugin / "densify.py").write_text(
+                "raise RuntimeError('plugin top-level must not run for --help')\n"
+                "import argparse\n"
+                "def build_argparser():\n"
+                "    parser = argparse.ArgumentParser()\n"
+                "    parser.add_argument('--scene_root', required=True)\n"
+                "    parser.add_argument('--roma_setting', default='fast')\n"
+                "    return parser\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path.cwd() / "scripts" / "run_lichtfeld_densify_standalone.py"),
+                    "--plugin-dir",
+                    str(plugin),
+                    "--help",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--scene_root", result.stdout)
+            self.assertIn("--roma_setting", result.stdout)
 
 
 if __name__ == "__main__":

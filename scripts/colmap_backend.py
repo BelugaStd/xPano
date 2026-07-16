@@ -328,6 +328,47 @@ def _command_with_gpu_disabled(command):
     return command if changed else None
 
 
+def _colmap_help_text(command):
+    if not command:
+        return ""
+    exe = str(command[0])
+    try:
+        result = subprocess.run(
+            [exe, "-h"],
+            env=_colmap_process_env([exe]),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            creationflags=_popen_creationflags(),
+        )
+    except Exception:
+        return ""
+    return result.stdout or ""
+
+
+def _disable_gpu_for_no_cuda_colmap(commands, log_cb):
+    if not commands or not any(_command_with_gpu_disabled(command) for command in commands):
+        return commands
+    if not _looks_like_cuda_unavailable(_colmap_help_text(commands[0])):
+        return commands
+
+    updated = []
+    changed = False
+    for command in commands:
+        cpu_command = _command_with_gpu_disabled(command)
+        if cpu_command:
+            updated.append(cpu_command)
+            changed = True
+        else:
+            updated.append(command)
+    if changed:
+        log_cb("COLMAP build reports no CUDA support; running COLMAP GPU stages on CPU.")
+    return updated
+
+
 def _has_sparse_model(sparse_dir):
     sparse_dir = Path(sparse_dir)
     return bool(_sparse_model_candidates(sparse_dir))
@@ -771,16 +812,22 @@ def publish_colmap_output(plan, final_output_dir):
     }
 
 
-def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None):
+def run_colmap_plan(plan, progress_cb=None, log_cb=None, runner=None, stage_cb=None):
     progress_cb = progress_cb or (lambda value: None)
     log_cb = log_cb or (lambda text: None)
+    stage_cb = stage_cb or (lambda _name, _index, _total: None)
 
     total = len(plan.commands)
     if total == 0:
         raise ValueError("COLMAP plan has no commands to run")
 
-    for index, command in enumerate(plan.commands, 1):
+    commands = plan.commands
+    if runner is None:
+        commands = _disable_gpu_for_no_cuda_colmap(commands, log_cb)
+
+    for index, command in enumerate(commands, 1):
         name = _command_name(command)
+        stage_cb(name, index, total)
         log_cb(_command_stage_label(name))
         log_cb(f"COLMAP {name}: {' '.join(str(part) for part in command)}")
         if runner is None:

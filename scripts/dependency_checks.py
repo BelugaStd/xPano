@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.pipeline_backends import COLMAP_BACKEND, METASHAPE_BACKEND, normalize_backend
-from scripts.lichtfeld_densify import locate_densify_plugin, locate_densify_python
+from scripts.lichtfeld_densify import (
+    locate_densify_plugin,
+    locate_densify_python,
+    should_use_bundled_densify_runner,
+)
 from scripts.runtime_paths import app_root, first_existing, internal_root, locate_ffmpeg
 
 
@@ -90,7 +94,6 @@ def locate_colmap(project_root=None):
             r"C:\Program Files\COLMAP\COLMAP.bat",
             r"C:\Program Files (x86)\COLMAP\colmap.exe",
             r"D:\Program Files\COLMAP\colmap.exe",
-            r"E:\FastProgram\COLMAP\colmap.exe",
         ],
     )
 
@@ -110,13 +113,14 @@ def locate_lichtfield():
             r"C:\Program Files\LICHT Field Studio\LICHT Field Studio.exe",
             r"C:\Program Files\LICHT\lichtfield-studio.exe",
             r"D:\Program Files\LICHT Field Studio\lichtfield-studio.exe",
-            r"E:\FastProgram\LICHT Field Studio\lichtfield-studio.exe",
         ],
     )
 
 
 def resolve_executable(executable, default_name):
     executable = (executable or "").strip() or default_name
+    if len(executable) >= 2 and executable.startswith('"') and executable.endswith('"'):
+        executable = executable[1:-1].strip()
     if Path(executable).is_absolute() or any(sep in executable for sep in ["\\", "/"]):
         if not Path(executable).exists():
             raise FileNotFoundError(executable)
@@ -158,9 +162,10 @@ def check_pipeline_dependencies(
 ):
     backend = normalize_backend(backend)
     plugin_path = Path(lfs_densify_plugin) if lfs_densify_plugin else locate_densify_plugin()
-    densify_python = (lfs_densify_python or locate_densify_python()).strip()
+    bundled_densify = should_use_bundled_densify_runner()
+    densify_python = (sys.executable if bundled_densify else (lfs_densify_python or locate_densify_python())).strip()
     python_path = Path(densify_python)
-    python_exists = (
+    python_exists = True if bundled_densify else (
         python_path.exists()
         if python_path.is_absolute() or any(sep in densify_python for sep in ["\\", "/"])
         else bool(shutil.which(densify_python))
@@ -188,22 +193,32 @@ def check_pipeline_dependencies(
             requested=densify_python,
             required=run_lfs_densify,
             ok=python_exists if run_lfs_densify else True,
-            resolved=str(python_path) if python_path.exists() else shutil.which(densify_python) or "",
+            resolved=(
+                f"{sys.executable} --run-lfs-densify-standalone"
+                if bundled_densify
+                else str(python_path) if python_path.exists() else shutil.which(densify_python) or ""
+            ),
             message="Not required" if not run_lfs_densify else "Run INSTALL_LFS_DENSIFY.bat to create .venv-densify",
         ),
     ]
     if run_lfs_densify and python_exists:
-        checks.append(check_lfs_densify_imports(densify_python))
+        checks.append(check_lfs_densify_imports(None if bundled_densify else densify_python))
         if (plugin_path / "densify.py").exists():
-            checks.append(check_lfs_densify_runner(densify_python, plugin_path))
+            checks.append(check_lfs_densify_runner(None if bundled_densify else densify_python, plugin_path))
     return checks
 
 
-def check_lfs_densify_imports(python_exe):
+def check_lfs_densify_imports(python_exe=None):
     code = "import torch, pycolmap, PIL, scipy, tqdm, einops, rich, open3d; print('ok')"
+    command = [python_exe, "-c", code] if python_exe else [sys.executable, "--self-test-lfs-imports"]
+    requested = python_exe or f"{sys.executable} --self-test-lfs-imports"
     try:
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        env["PYTHONNOUSERSITE"] = "1"
         result = subprocess.run(
-            [python_exe, "-c", code],
+            command,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -214,17 +229,17 @@ def check_lfs_densify_imports(python_exe):
     except Exception as exc:
         return ExecutableCheck(
             name="LichtFeld densification dependencies",
-            requested=python_exe,
+            requested=requested,
             required=True,
             ok=False,
             message=str(exc),
         )
     return ExecutableCheck(
         name="LichtFeld densification dependencies",
-        requested=python_exe,
+        requested=requested,
         required=True,
         ok=result.returncode == 0,
-        resolved=python_exe if result.returncode == 0 else "",
+        resolved=requested if result.returncode == 0 else "",
         message=(result.stderr or result.stdout or "Import check failed").strip() if result.returncode != 0 else "",
     )
 
@@ -234,7 +249,8 @@ def check_lfs_densify_runner(python_exe, plugin_path):
         internal_root() / "scripts" / "run_lichtfeld_densify_standalone.py",
         _project_root() / "scripts" / "run_lichtfeld_densify_standalone.py",
     ])
-    if not runner:
+    bundled_runner = not python_exe and getattr(sys, "frozen", False)
+    if not runner and not bundled_runner:
         return ExecutableCheck(
             name="LichtFeld densification runner",
             requested=str(plugin_path),
@@ -242,9 +258,18 @@ def check_lfs_densify_runner(python_exe, plugin_path):
             ok=False,
             message="run_lichtfeld_densify_standalone.py was not found",
         )
+    command = (
+        [sys.executable, "--run-lfs-densify-standalone", "--plugin-dir", str(plugin_path), "--help"]
+        if bundled_runner
+        else [python_exe, runner, "--plugin-dir", str(plugin_path), "--help"]
+    )
     try:
+        env = os.environ.copy()
+        env.pop("PYTHONPATH", None)
+        env["PYTHONNOUSERSITE"] = "1"
         result = subprocess.run(
-            [python_exe, runner, "--plugin-dir", str(plugin_path), "--help"],
+            command,
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -266,7 +291,7 @@ def check_lfs_densify_runner(python_exe, plugin_path):
         requested=str(plugin_path),
         required=True,
         ok=ok,
-        resolved=runner if ok else "",
+        resolved=" ".join(command[:2]) if bundled_runner and ok else runner if ok else "",
         message=(result.stderr or result.stdout or "Runner check failed").strip() if not ok else "",
     )
 

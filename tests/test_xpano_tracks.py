@@ -6,7 +6,13 @@ from unittest.mock import patch
 import piexif
 from PIL import Image
 
-from scripts.xpano_tracks import build_manifest, build_ordinary_video_track, build_panorama_track, build_photo_track
+from scripts.xpano_tracks import (
+    _estimate_video_frames,
+    build_manifest,
+    build_ordinary_video_track,
+    build_panorama_track,
+    build_photo_track,
+)
 from scripts.xpano_tracks import validate_manifest
 
 
@@ -32,6 +38,42 @@ def write_jpeg(path, size, make, model, lens, focal_num):
 
 
 class PhotoTrackTests(unittest.TestCase):
+    def test_two_fps_over_five_seconds_estimates_ten_frames(self):
+        with patch("scripts.xpano_tracks._expected_frame_count", return_value=10) as expected:
+            count = _estimate_video_frames(Path("clip.mp4"), 2.0, 0, 0.0, 5.0)
+
+        self.assertEqual(count, 10)
+        self.assertEqual(expected.call_args.args[1], 2.0)
+        self.assertEqual(expected.call_args.kwargs["end_time_seconds"], 5.0)
+
+    def test_rejects_non_finite_frames_per_second(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_bytes(b"video")
+            with self.assertRaisesRegex(ValueError, "finite number"):
+                build_ordinary_video_track(1, video, Path(tmp) / "work", float("inf"), 0)
+
+    def test_ordinary_video_uses_frames_per_second_without_reciprocal_conversion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"video")
+            frame = root / "frame.jpg"
+            Image.new("RGB", (100, 80), (32, 64, 96)).save(frame, "JPEG")
+
+            with patch("scripts.xpano_tracks.extract_single_video_frames", return_value=[frame]) as extract:
+                track = build_ordinary_video_track(
+                    1,
+                    video,
+                    root / "work",
+                    frames_per_second=2.0,
+                    max_frames=0,
+                )
+
+            self.assertEqual(extract.call_args.kwargs["fps"], 2.0)
+            self.assertEqual(track["frames_per_second"], 2.0)
+            self.assertNotIn("seconds_per_frame", track)
+
     def test_rejects_mp4_as_panorama_track(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -43,7 +85,7 @@ class PhotoTrackTests(unittest.TestCase):
                     1,
                     video,
                     root / "work",
-                    seconds_per_frame=1.0,
+                    frames_per_second=1.0,
                     max_frames=1,
                 )
 
@@ -60,16 +102,40 @@ class PhotoTrackTests(unittest.TestCase):
                     1,
                     video,
                     root / "work",
-                    seconds_per_frame=2.0,
+                    frames_per_second=2.0,
                     max_frames=5,
                 )
 
             extract.assert_called_once()
             self.assertEqual(track["track_type"], "ordinary_video")
-            self.assertEqual(track["seconds_per_frame"], 2.0)
+            self.assertEqual(track["frames_per_second"], 2.0)
             self.assertEqual(track["max_frames"], 5)
+            self.assertEqual(track["camera_profile"], "wide")
+            self.assertEqual(track["photo_sensors"][0]["camera_profile"], "wide")
             self.assertEqual(track["metashape_mode"], "pinhole_video_frames")
             self.assertEqual(track["photos"], [str(frame.resolve())])
+            validate_manifest({"schema_version": 1, "workflow": "xpano_multi_track", "tracks": [track]})
+
+    def test_builds_ordinary_video_track_with_standard_camera_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"video")
+            frame = root / "frame.jpg"
+            Image.new("RGB", (100, 80), (32, 64, 96)).save(frame, "JPEG")
+
+            with patch("scripts.xpano_tracks.extract_single_video_frames", return_value=[frame]):
+                track = build_ordinary_video_track(
+                    1,
+                    video,
+                    root / "work",
+                    frames_per_second=2.0,
+                    max_frames=5,
+                    camera_profile="standard",
+                )
+
+            self.assertEqual(track["camera_profile"], "standard")
+            self.assertEqual(track["photo_sensors"][0]["camera_profile"], "standard")
             validate_manifest({"schema_version": 1, "workflow": "xpano_multi_track", "tracks": [track]})
 
     def test_manifest_applies_video_track_specific_extraction_settings(self):
@@ -85,7 +151,7 @@ class PhotoTrackTests(unittest.TestCase):
                 calls.append(
                     (
                         "pano",
-                        kwargs["seconds_per_frame"],
+                        kwargs["frames_per_second"],
                         kwargs["max_frames"],
                         kwargs["start_time_seconds"],
                         kwargs["end_time_seconds"],
@@ -103,10 +169,11 @@ class PhotoTrackTests(unittest.TestCase):
                 calls.append(
                     (
                         "ordinary",
-                        kwargs["seconds_per_frame"],
+                        kwargs["frames_per_second"],
                         kwargs["max_frames"],
                         kwargs["start_time_seconds"],
                         kwargs["end_time_seconds"],
+                        kwargs["camera_profile"],
                     )
                 )
                 return {
@@ -120,17 +187,73 @@ class PhotoTrackTests(unittest.TestCase):
 
             settings = {
                 str(pano.resolve()): {
-                    "seconds_per_frame": 1.0,
+                    "frames_per_second": 1.0,
                     "max_frames": 10,
                     "start_time_seconds": 3.0,
                     "end_time_seconds": 8.0,
                 },
                 str(ordinary.resolve()): {
-                    "seconds_per_frame": 2.0,
+                    "frames_per_second": 2.0,
                     "max_frames": 20,
                     "start_time_seconds": 4.0,
                     "end_time_seconds": 12.0,
                 },
+            }
+            profiles = {str(ordinary.resolve()): "standard"}
+            with patch("scripts.xpano_tracks.build_panorama_track", side_effect=fake_pano), \
+                patch("scripts.xpano_tracks.build_ordinary_video_track", side_effect=fake_ordinary):
+                build_manifest(
+                    root / "out",
+                    panorama_videos=[pano],
+                    ordinary_videos=[ordinary],
+                    frames_per_second=9.0,
+                    max_frames=99,
+                    track_extraction_settings=settings,
+                    track_camera_profiles=profiles,
+                )
+
+            self.assertEqual(calls, [("pano", 1.0, 10, 3.0, 8.0), ("ordinary", 2.0, 20, 4.0, 12.0, "standard")])
+
+    def test_manifest_aggregates_video_extraction_progress_across_tracks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pano = root / "camera.osv"
+            ordinary = root / "clip.mp4"
+            pano.write_bytes(b"pano")
+            ordinary.write_bytes(b"video")
+            progress = []
+            logs = []
+
+            def fake_pano(**kwargs):
+                cb = kwargs["progress_cb"]
+                cb(0, 50)
+                cb(25, 50)
+                cb(50, 50)
+                return {
+                    "track_id": "pano",
+                    "track_type": "panorama_video",
+                    "metashape_mode": "dual_fisheye_station",
+                    "export_mode": "cubemap",
+                    "frames": [{"left": str(pano), "right": str(pano)}],
+                }
+
+            def fake_ordinary(**kwargs):
+                cb = kwargs["progress_cb"]
+                cb(0, 150)
+                cb(75, 150)
+                cb(150, 150)
+                return {
+                    "track_id": "ordinary",
+                    "track_type": "ordinary_video",
+                    "metashape_mode": "pinhole_video_frames",
+                    "export_mode": "undistorted_frame",
+                    "photos": [str(ordinary)],
+                    "photo_sensors": [{"sensor_label": "ordinary_frame", "photos": [str(ordinary)]}],
+                }
+
+            settings = {
+                str(pano.resolve()): {"frames_per_second": 1.0, "max_frames": 50},
+                str(ordinary.resolve()): {"frames_per_second": 1.0, "max_frames": 150},
             }
             with patch("scripts.xpano_tracks.build_panorama_track", side_effect=fake_pano), \
                 patch("scripts.xpano_tracks.build_ordinary_video_track", side_effect=fake_ordinary):
@@ -138,12 +261,17 @@ class PhotoTrackTests(unittest.TestCase):
                     root / "out",
                     panorama_videos=[pano],
                     ordinary_videos=[ordinary],
-                    seconds_per_frame=9.0,
-                    max_frames=99,
                     track_extraction_settings=settings,
+                    progress_cb=lambda cur, total: progress.append((cur, total)),
+                    log_cb=logs.append,
                 )
 
-            self.assertEqual(calls, [("pano", 1.0, 10, 3.0, 8.0), ("ordinary", 2.0, 20, 4.0, 12.0)])
+            self.assertEqual(progress[0], (0, 200))
+            self.assertIn((50, 200), progress)
+            self.assertIn((125, 200), progress)
+            self.assertEqual(progress[-1], (200, 200))
+            self.assertEqual(progress, sorted(progress))
+            self.assertIn("extract progress 200/200", logs)
 
     def test_splits_same_size_photos_by_exif_camera_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

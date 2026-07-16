@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 import Metashape
+import json
 import os
 import struct
 import math
 import concurrent.futures
 import sys
+import time
+from pathlib import Path
 
 try:
     import numpy as np
@@ -13,6 +16,53 @@ except Exception as exc:
         "Metashape Python could not load NumPy. xPano's Metashape export requires "
         "Metashape's bundled NumPy runtime."
     ) from exc
+
+try:
+    from scripts.component_selection import (
+        camera_belongs_to_component,
+        component_inventory,
+        component_membership_is_ambiguous,
+        select_component_key,
+    )
+except ImportError:
+    from component_selection import (
+        camera_belongs_to_component,
+        component_inventory,
+        component_membership_is_ambiguous,
+        select_component_key,
+    )
+
+try:
+    from scripts.export_image_cache import (
+        build_image_signature,
+        empty_image_cache,
+        load_image_cache,
+        output_record,
+        refresh_output_records,
+        reuse_cached_outputs,
+        source_record,
+        write_image_cache,
+    )
+except ImportError:
+    from export_image_cache import (
+        build_image_signature,
+        empty_image_cache,
+        load_image_cache,
+        output_record,
+        refresh_output_records,
+        reuse_cached_outputs,
+        source_record,
+        write_image_cache,
+    )
+
+try:
+    from scripts.export_remap import RemapEngine, benchmark_remap_backends, remap_bilinear, select_remap_backend
+except ImportError:
+    from export_remap import RemapEngine, benchmark_remap_backends, remap_bilinear, select_remap_backend
+
+
+IMAGE_CONTRACT_VERSION = "xpano-images-v1"
+CALIBRATION_FIELDS = ("width", "height", "f", "cx", "cy", "k1", "k2", "k3", "k4", "p1", "p2", "b1", "b2")
 
 # ==========================================
 # 0. 基础工具与 COLMAP 二进制打包
@@ -210,6 +260,67 @@ def get_image_safe(camera):
         pass
     return None
 
+
+def calibration_signature_payload(calibration):
+    payload = {"type": str(getattr(calibration, "type", ""))}
+    for name in CALIBRATION_FIELDS:
+        value = getattr(calibration, name, 0)
+        payload[name] = float(value or 0)
+    payload["width"] = int(getattr(calibration, "width", 0) or 0)
+    payload["height"] = int(getattr(calibration, "height", 0) or 0)
+    return payload
+
+
+def matrix_signature_payload(matrix):
+    if matrix is None:
+        return None
+    values = []
+    for row in range(4):
+        for column in range(4):
+            try:
+                values.append(float(matrix[row, column]))
+            except Exception:
+                return str(matrix)
+    return values
+
+
+def strategy_signature_payload(strategy):
+    if strategy.get("type") == "Cubemap":
+        return {
+            "type": "Cubemap",
+            "optW": int(strategy["opt_W"]),
+            "sensorInfo": str(strategy.get("info_str", "")),
+            "faces": get_face_configs(int(strategy["opt_W"])),
+            "jpegQuality": 100,
+        }
+    return {
+        "type": "Frame",
+        "mode": str(strategy.get("mode", "")),
+        "calibration": calibration_signature_payload(strategy["calib1"]),
+        "transform": matrix_signature_payload(strategy.get("T1")),
+        "jpegQuality": 100,
+    }
+
+
+def camera_image_signature(camera, strategy, source_cache, cached_sources=None):
+    source_path = str(camera.photo.path)
+    source = source_cache.get(source_path)
+    if source is None:
+        source_key = str(Path(source_path).resolve())
+        source = source_record(source_path, cached=(cached_sources or {}).get(source_key))
+        source_cache[source_path] = source
+    sensor = {
+        "key": int(getattr(camera.sensor, "key", 0) or 0),
+        "type": str(getattr(camera.sensor, "type", "")),
+        "calibration": calibration_signature_payload(camera.sensor.calibration),
+    }
+    return build_image_signature(
+        source,
+        sensor,
+        strategy_signature_payload(strategy),
+        IMAGE_CONTRACT_VERSION,
+    )
+
 def get_face_configs(W):
     W_half = int(W / 2)
     return {
@@ -260,42 +371,6 @@ def build_remap_grid(face, W, calib, R_face, sensor_info_str):
     my = (calib.height/2.0 + calib.cy - 0.5) + yd * calib.f
     return mx.astype(np.float32), my.astype(np.float32)
 
-def remap_bilinear(src, mx, my):
-    h, w = src.shape[:2]
-    x0 = np.floor(mx).astype(np.int32)
-    y0 = np.floor(my).astype(np.int32)
-    x1 = x0 + 1
-    y1 = y0 + 1
-    valid = (x0 >= 0) & (x1 < w) & (y0 >= 0) & (y1 < h)
-    if src.ndim == 2:
-        out = np.zeros(mx.shape, dtype=np.uint8)
-    else:
-        out = np.zeros((mx.shape[0], mx.shape[1], src.shape[2]), dtype=np.uint8)
-    if not np.any(valid):
-        return out
-
-    xv = mx[valid]
-    yv = my[valid]
-    x0v = x0[valid]
-    y0v = y0[valid]
-    x1v = x1[valid]
-    y1v = y1[valid]
-    wx = xv - x0v
-    wy = yv - y0v
-
-    if src.ndim == 2:
-        top = src[y0v, x0v] * (1.0 - wx) + src[y0v, x1v] * wx
-        bottom = src[y1v, x0v] * (1.0 - wx) + src[y1v, x1v] * wx
-        out[valid] = np.clip(top * (1.0 - wy) + bottom * wy, 0, 255).astype(np.uint8)
-        return out
-
-    wx = wx[:, None]
-    wy = wy[:, None]
-    top = src[y0v, x0v] * (1.0 - wx) + src[y0v, x1v] * wx
-    bottom = src[y1v, x0v] * (1.0 - wx) + src[y1v, x1v] * wx
-    out[valid] = np.clip(top * (1.0 - wy) + bottom * wy, 0, 255).astype(np.uint8)
-    return out
-
 def save_image_array(image_array, file_path):
     if image_array.ndim == 2:
         mode = "L"
@@ -309,12 +384,75 @@ def save_image_array(image_array, file_path):
     comp.jpeg_quality = 100
     image.save(file_path, comp)
 
-def threaded_remap_and_save(img_src, mx, my, file_path):
+
+def save_metashape_image(image, file_path):
+    comp = Metashape.ImageCompression()
+    comp.jpeg_quality = 100
+    image.save(file_path, comp)
+
+def threaded_remap_and_save(img_src, mx, my, file_path, remap_engine=None):
+    out_img = (remap_engine or RemapEngine(None, "numpy")).remap(img_src, mx, my)
+    save_image_array(out_img, file_path)
+
+
+def sensor_is_fisheye_like(sensor):
+    if sensor.type == Metashape.Sensor.Type.Fisheye:
+        return True
+    if sensor.type != Metashape.Sensor.Type.Frame:
+        text = str(sensor.type)
+        if sensor.calibration:
+            text += " " + str(sensor.calibration.type)
+        return any(k in text for k in ['Fisheye', 'Spherical', 'Equisolid', 'Equidistant', 'Orthographic', 'Stereographic'])
+    return False
+
+
+def make_original_frame_calib(sensor):
+    calib = sensor.calibration
+    width = int(getattr(calib, "width", 0) or getattr(sensor, "width", 0) or 0)
+    height = int(getattr(calib, "height", 0) or getattr(sensor, "height", 0) or 0)
+    f = float(getattr(calib, "f", 0) or max(width, height))
+    cx = float(getattr(calib, "cx", 0) or 0)
+    cy = float(getattr(calib, "cy", 0) or 0)
+    fallback = Metashape.Calibration()
+    fallback.width = width
+    fallback.height = height
+    fallback.f = f
+    fallback.cx = cx
+    fallback.cy = cy
+    return fallback
+
+
+def frame_export_strategy(sensor):
     try:
-        out_img = remap_bilinear(img_src, mx, my)
-        save_image_array(out_img, file_path)
+        calib, T1 = compute_undistorted_calib(sensor)
+        if int(getattr(calib, "width", 0) or 0) > 0 and int(getattr(calib, "height", 0) or 0) > 0:
+            return {"mode": "undistort", "calib": calib, "T1": T1}
     except Exception as exc:
-        print(f"WARN: cubemap image save failed for {file_path}: {exc}", flush=True)
+        print(f"WARN: Frame undistort calibration failed for sensor {sensor.label}: {exc}; using original image", flush=True)
+    return {
+        "mode": "original",
+        "calib": make_original_frame_calib(sensor),
+        "T1": Metashape.Matrix.Diag([1, 1, 1, 1]),
+    }
+
+
+def save_frame_camera_image(camera, calib0, calib1, T1, strategy, path):
+    if strategy.get("mode") == "undistort":
+        try:
+            img_ms = camera.image().warp(calib0, Metashape.Matrix.Diag([1, 1, 1, 1]), calib1, T1)
+            save_metashape_image(img_ms, path)
+            return
+        except Exception as exc:
+            print(f"WARN: Frame warp failed for {camera.label}: {exc}; using original image", flush=True)
+
+    image = get_image_safe(camera)
+    if image is None:
+        try:
+            save_metashape_image(camera.photo.image(), path)
+            return
+        except Exception as exc:
+            raise RuntimeError(f"Frame image export failed for {camera.label}: {exc}") from exc
+    save_image_array(image, path)
 
 def project_track_to_pinhole(point_xyz, R, T, fx, fy, cx, cy, width, height):
     X = np.array(point_xyz, dtype=np.float64)
@@ -335,10 +473,33 @@ def camera_projections(chunk, camera):
     except KeyError:
         return []
 
+
+def emit_export_event(stage, message, percent, current=None, total=None):
+    payload = {
+        "phase": "export",
+        "stage": stage,
+        "percent": percent,
+        "phasePercent": max(0, min(100, round((percent - 95) / 5 * 100))),
+        "message": message,
+    }
+    if current is not None:
+        payload["current"] = int(current)
+    if total is not None:
+        payload["total"] = int(total)
+    print("PIPELINE_EVENT:" + json.dumps(payload, ensure_ascii=True), flush=True)
+
 # ==========================================
 # 3. 缝合调度与二进制写入
 # ==========================================
-def run_mixed_export(out_dir=None):
+def run_mixed_export(
+    out_dir=None,
+    show_dialog=True,
+    reuse_images_dir=None,
+    image_cache_path=None,
+    image_cache_output=None,
+    selected_component_key=None,
+):
+    export_started = time.perf_counter()
     doc = Metashape.app.document
     chunk = doc.chunk
     if not chunk: 
@@ -353,6 +514,25 @@ def run_mixed_export(out_dir=None):
     images_dir = os.path.join(out_dir, "images")
     for d in [sparse_dir, images_dir]: os.makedirs(d, exist_ok=True)
 
+    reuse_images_dir = Path(reuse_images_dir) if reuse_images_dir else None
+    image_cache_path = Path(image_cache_path) if image_cache_path else None
+    image_cache_output = Path(image_cache_output) if image_cache_output else Path(out_dir) / "work" / "export_image_cache.json"
+    image_cache = empty_image_cache()
+    if image_cache_path:
+        try:
+            image_cache = load_image_cache(image_cache_path)
+        except Exception as exc:
+            print(f"WARN: Existing image cache is unavailable; regenerating images: {exc}", flush=True)
+    next_cache_cameras = {}
+    source_cache = {}
+    cached_sources = {}
+    for entry in image_cache.get("cameras", {}).values():
+        cached_source = entry.get("source") if isinstance(entry, dict) else None
+        if isinstance(cached_source, dict) and cached_source.get("path"):
+            cached_sources[cached_source["path"]] = cached_source
+    cache_hits = 0
+    cache_misses = 0
+
     T_shift = get_coord_transform(chunk, True)
     colmap_cams = {}
     colmap_imgs = []
@@ -362,7 +542,26 @@ def run_mixed_export(out_dir=None):
     cam_id_acc = 1
     img_id_acc = 1
 
-    valid_cameras = [c for c in chunk.cameras if c.transform and c.sensor and c.sensor.calibration and c.enabled]
+    inventory = component_inventory(chunk.cameras, getattr(chunk, "components", None))
+    if component_membership_is_ambiguous(inventory):
+        raise RuntimeError(
+            "Metashape reports multiple components but does not expose camera membership; "
+            "xPano will not mix them into one export"
+        )
+    selected_component_key = select_component_key(inventory, selected_component_key)
+    valid_cameras = [
+        c for c in chunk.cameras
+        if c.transform and c.sensor and c.sensor.calibration and c.enabled
+        and camera_belongs_to_component(c, selected_component_key)
+    ]
+    if not valid_cameras:
+        raise RuntimeError("No aligned cameras are available in the selected Metashape component")
+    if len(inventory) > 1:
+        print(
+            f"WARN: Multiple Metashape components found; exporting selected component {selected_component_key} "
+            f"({len(valid_cameras)} aligned cameras). Manual PSX alignment is recommended.",
+            flush=True,
+        )
     used_sensors = []
     used_sensor_keys = set()
     for camera in valid_cameras:
@@ -370,13 +569,14 @@ def run_mixed_export(out_dir=None):
             used_sensors.append(camera.sensor)
             used_sensor_keys.add(camera.sensor.key)
 
+    sensor_scan_started = time.perf_counter()
     print(">>> [1/4] 开始扫描相机模型...", flush=True)
     for sensor in used_sensors:
         sensor_info_str = str(sensor.type)
         if sensor.calibration:
             sensor_info_str += " " + str(sensor.calibration.type)
             
-        if any(k in sensor_info_str for k in ['Fisheye', 'Spherical', 'Equisolid', 'Equidistant', 'Orthographic', 'Stereographic']):
+        if sensor_is_fisheye_like(sensor):
             calib = sensor.calibration
             opt_W = int(round(calib.f * 2.0))
             if opt_W % 2 != 0: opt_W += 1
@@ -391,10 +591,13 @@ def run_mixed_export(out_dir=None):
                 sensor_map[sensor.key]['faces'][face] = cam_id_acc
                 cam_id_acc += 1
         else:
-            calib, T1 = compute_undistorted_calib(sensor)
-            if calib.width == 0: continue
+            strategy = frame_export_strategy(sensor)
+            calib = strategy['calib']
+            T1 = strategy['T1']
+            if calib.width == 0 or calib.height == 0:
+                raise RuntimeError(f"Invalid Frame calibration size for sensor {sensor.label}: {calib.width}x{calib.height}")
             sensor_map[sensor.key] = {
-                'type': 'Frame', 'cid': cam_id_acc, 'calib1': calib, 'T1': T1
+                'type': 'Frame', 'cid': cam_id_acc, 'calib1': calib, 'T1': T1, 'mode': strategy['mode']
             }
             colmap_cams[cam_id_acc] = (
                 1, calib.width, calib.height, calib.f, calib.f, 
@@ -402,6 +605,8 @@ def run_mixed_export(out_dir=None):
             )
             cam_id_acc += 1
 
+    sensor_scan_seconds = time.perf_counter() - sensor_scan_started
+    point_scan_started = time.perf_counter()
     print(">>> [2/4] 提取 3D 轨迹点...", flush=True)
     if chunk.tie_points:
         for i, pt in enumerate(chunk.tie_points.points):
@@ -414,9 +619,15 @@ def run_mixed_export(out_dir=None):
                 'error': 0.0, 'refs': []
             }
 
+    point_scan_seconds = time.perf_counter() - point_scan_started
+    image_export_started = time.perf_counter()
     print(">>> [3/4] 开始处理照片 (严格防 OOM 控制并发)...", flush=True)
     grid_cache = {}
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=5) # 严格限制并发仅供 5 个面使用
+    remap_engine = RemapEngine(
+        warning_cb=lambda message: print(f"WARN: {message}", flush=True),
+    )
+    print(f">>> Image remap backend: {remap_engine.backend}", flush=True)
     
     R_faces = {
         'front': np.eye(3),
@@ -427,14 +638,28 @@ def run_mixed_export(out_dir=None):
     }
 
     total_cams = len(valid_cameras)
+    emit_export_event("export.images", "正在导出训练图像", 97, 0, total_cams)
     
     for idx, camera in enumerate(valid_cameras):
+        emit_export_event(
+            "export.images",
+            f"正在导出训练图像 {idx + 1}/{total_cams}",
+            97 + int(2 * (idx + 1) / max(1, total_cams)),
+            idx + 1,
+            total_cams,
+        )
         # 强制刷新进度条到控制台
         print(f"    处理中 [{idx+1}/{total_cams}] : {camera.label}", flush=True)
         
         if camera.sensor.key not in sensor_map: continue
         strategy = sensor_map[camera.sensor.key]
         img_name_base = f"{camera.key:05d}_{os.path.basename(camera.photo.path)}"
+        projections = list(camera_projections(chunk, camera))
+        try:
+            image_signature = camera_image_signature(camera, strategy, source_cache, cached_sources)
+        except Exception as exc:
+            image_signature = None
+            print(f"WARN: Image cache signature failed for {camera.label}: {exc}", flush=True)
 
         if strategy['type'] == 'Frame':
             calib0 = camera.sensor.calibration
@@ -448,18 +673,29 @@ def run_mixed_export(out_dir=None):
             Q = matrix_to_quat(R)
             
             img_name = f"frame_{img_name_base}"
-            ext = os.path.splitext(img_name)[1].lower()
-            img_ms = camera.image().warp(calib0, Metashape.Matrix.Diag([1, 1, 1, 1]), calib1, T1)
-            if ext in [".jpg", ".jpeg"]:
-                comp = Metashape.ImageCompression()
-                comp.jpeg_quality = 100
-                img_ms.save(os.path.join(images_dir, img_name), comp)
+            out_path = os.path.join(images_dir, img_name)
+            reused = bool(
+                image_signature
+                and reuse_images_dir
+                and reuse_cached_outputs(
+                    image_cache,
+                    str(camera.key),
+                    image_signature,
+                    reuse_images_dir,
+                    images_dir,
+                )
+            )
+            if reused:
+                cache_hits += 1
             else:
-                img_ms.save(os.path.join(images_dir, img_name))
+                cache_misses += 1
+                save_frame_camera_image(camera, calib0, calib1, T1, strategy, out_path)
+            if not os.path.exists(out_path):
+                raise RuntimeError(f"Frame image export did not create {out_path}")
 
             pts2d = []
             T1_inv = T1.inv()
-            for proj in camera_projections(chunk, camera):
+            for proj in projections:
                 track_id = proj.track_id
                 if track_id in points3d_list:
                     pt2d = calib1.project(T1_inv.mulp(calib0.unproject(proj.coord)))
@@ -471,6 +707,20 @@ def run_mixed_export(out_dir=None):
                 'id': img_id_acc, 'Q': Q, 'T': T, 'cid': cid, 'name': img_name, 'pts2d': pts2d
             })
             img_id_acc += 1
+            if image_signature:
+                cached_entry = image_cache.get("cameras", {}).get(str(camera.key), {})
+                next_cache_cameras[str(camera.key)] = {
+                    "signature": image_signature,
+                    "source": source_cache[str(camera.photo.path)],
+                    "outputs": (
+                        refresh_output_records(cached_entry.get("outputs", []), images_dir)
+                        if reused
+                        else [output_record(out_path, images_dir)]
+                    ),
+                    "backend": "cache" if reused else (
+                        "metashape-warp" if strategy.get("mode") == "undistort" else "metashape-image"
+                    ),
+                }
 
         elif strategy['type'] == 'Cubemap':
             opt_W = strategy['opt_W']
@@ -481,14 +731,37 @@ def run_mixed_export(out_dir=None):
             R_w2c = R_c2w.T
             T_w2c = -R_w2c @ C_w
 
-            img_src = get_image_safe(camera)
+            expected_names = []
+            for face in ['front', 'left', 'right', 'top', 'bottom']:
+                expected_name = f"cube_{face}_{img_name_base}"
+                if not expected_name.lower().endswith(('.jpg', '.jpeg')):
+                    expected_name += ".jpg"
+                expected_names.append(expected_name)
+            reused = bool(
+                image_signature
+                and reuse_images_dir
+                and reuse_cached_outputs(
+                    image_cache,
+                    str(camera.key),
+                    image_signature,
+                    reuse_images_dir,
+                    images_dir,
+                )
+            )
+            if reused:
+                cache_hits += 1
+                img_src = None
+            else:
+                cache_misses += 1
+                img_src = get_image_safe(camera)
+                if img_src is None:
+                    raise RuntimeError(f"Cubemap source image could not be loaded for {camera.label}")
 
             # 只为当前的这张图片创建临时并发池，处理完立刻清空内存
             cam_tasks = []
-            for face in ['front', 'left', 'right', 'top', 'bottom']:
+            output_paths = []
+            for face, img_name in zip(['front', 'left', 'right', 'top', 'bottom'], expected_names):
                 cid = strategy['faces'][face]
-                img_name = f"cube_{face}_{img_name_base}"
-                if not img_name.lower().endswith(('.jpg', '.jpeg')): img_name += ".jpg"
                 
                 rf, tf = R_faces[face] @ R_w2c, R_faces[face] @ T_w2c
                 qw, qx, qy, qz = matrix_to_quat(Metashape.Matrix(rf.tolist()))
@@ -497,7 +770,7 @@ def run_mixed_export(out_dir=None):
                 pts2d = []
 
                 fx = fy = opt_W / 2.0
-                for proj in camera_projections(chunk, camera):
+                for proj in projections:
                     track_id = proj.track_id
                     point = points3d_list.get(track_id)
                     if point is None:
@@ -514,22 +787,47 @@ def run_mixed_export(out_dir=None):
                 })
                 img_id_acc += 1
 
-                if img_src is not None:
+                out_path = os.path.join(images_dir, img_name)
+                output_paths.append(out_path)
+                if not reused:
                     cache_key = (camera.sensor.key, opt_W, face)
                     if cache_key not in grid_cache:
                         grid_cache[cache_key] = build_remap_grid(face, opt_W, camera.sensor.calibration, R_faces[face], strategy['info_str'])
                     mx, my = grid_cache[cache_key]
                     # 提交这一个面的渲染任务
-                    cam_tasks.append(executor.submit(threaded_remap_and_save, img_src.copy(), mx, my, os.path.join(images_dir, img_name)))
+                    cam_tasks.append((executor.submit(threaded_remap_and_save, img_src, mx, my, out_path, remap_engine), out_path))
             
             if cam_tasks:
-                concurrent.futures.wait(cam_tasks)
+                futures = [task for task, _path in cam_tasks]
+                concurrent.futures.wait(futures)
+                for task, out_path in cam_tasks:
+                    task.result()
+                    if not os.path.exists(out_path):
+                        raise RuntimeError(f"Cubemap image export did not create {out_path}")
+            for out_path in output_paths:
+                if not os.path.exists(out_path):
+                    raise RuntimeError(f"Cubemap image export did not create {out_path}")
+            if image_signature:
+                cached_entry = image_cache.get("cameras", {}).get(str(camera.key), {})
+                next_cache_cameras[str(camera.key)] = {
+                    "signature": image_signature,
+                    "source": source_cache[str(camera.photo.path)],
+                    "outputs": (
+                        refresh_output_records(cached_entry.get("outputs", []), images_dir)
+                        if reused
+                        else [output_record(path, images_dir) for path in output_paths]
+                    ),
+                    "backend": "cache" if reused else remap_engine.backend,
+                }
 
     executor.shutdown()
+    image_export_seconds = time.perf_counter() - image_export_started
 
     points3d_list = {track_id: point for track_id, point in points3d_list.items() if point['refs']}
 
+    colmap_write_started = time.perf_counter()
     print(">>> [4/4] 写入 COLMAP 二进制文件...", flush=True)
+    emit_export_event("export.colmap", "正在写出 COLMAP 模型", 99)
     with open(os.path.join(sparse_dir, "cameras.bin"), "wb") as fout:
         fout.write(u64(len(colmap_cams)))
         for cid in sorted(colmap_cams.keys()):
@@ -557,6 +855,31 @@ def run_mixed_export(out_dir=None):
             for ref in p['refs']:
                 fout.write(u32(ref[0])); fout.write(u32(ref[1]))
 
+    colmap_write_seconds = time.perf_counter() - colmap_write_started
+    cache_write_started = time.perf_counter()
+    write_image_cache(image_cache_output, next_cache_cameras)
+    cache_write_seconds = time.perf_counter() - cache_write_started
+    print(
+        f">>> Image cache summary: reused={cache_hits}, regenerated={cache_misses}, path={image_cache_output}",
+        flush=True,
+    )
+    print(
+        "XPANO_EXPORT_METRICS:" + json.dumps({
+            "backend": remap_engine.backend,
+            "cacheHits": cache_hits,
+            "cacheMisses": cache_misses,
+            "sensorScanSeconds": round(sensor_scan_seconds, 3),
+            "pointScanSeconds": round(point_scan_seconds, 3),
+            "imageExportSeconds": round(image_export_seconds, 3),
+            "colmapWriteSeconds": round(colmap_write_seconds, 3),
+            "cacheWriteSeconds": round(cache_write_seconds, 3),
+            "totalSeconds": round(time.perf_counter() - export_started, 3),
+        }, ensure_ascii=True),
+        flush=True,
+    )
+
+    if not show_dialog:
+        return
     print(">>> 运行完毕！", flush=True)
     try:
         Metashape.app.messageBox("混合导出完成！请检查输出文件夹。")
@@ -571,4 +894,15 @@ if __name__ == "__main__":
         idx = sys.argv.index("--export-dir")
         if idx + 1 < len(sys.argv):
             export_arg = sys.argv[idx + 1]
-    run_mixed_export(export_arg)
+    def argument_value(name):
+        if name not in sys.argv:
+            return None
+        index = sys.argv.index(name)
+        return sys.argv[index + 1] if index + 1 < len(sys.argv) else None
+
+    run_mixed_export(
+        export_arg,
+        reuse_images_dir=argument_value("--reuse-images-dir"),
+        image_cache_path=argument_value("--image-cache-path"),
+        image_cache_output=argument_value("--image-cache-output"),
+    )

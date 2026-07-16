@@ -40,6 +40,14 @@ function Resolve-7Zip {
     return $null
 }
 
+function Resolve-Tar {
+    $cmd = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+    return $null
+}
+
 if (-not (Test-Path $ReleaseDir)) {
     throw "Release folder not found: $ReleaseDir"
 }
@@ -65,6 +73,16 @@ if ($sevenZip) {
         & $sevenZip a -tzip "$ReleaseName.zip" "$ReleaseName\*" -mx=5
         if ($LASTEXITCODE -ne 0) {
             throw "7-Zip failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
+} elseif ($tar = Resolve-Tar) {
+    Push-Location $DistRoot
+    try {
+        & $tar -a -cf "$ReleaseName.zip" "$ReleaseName"
+        if ($LASTEXITCODE -ne 0) {
+            throw "tar failed with exit code $LASTEXITCODE"
         }
     } finally {
         Pop-Location
