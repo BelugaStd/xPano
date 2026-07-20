@@ -871,3 +871,111 @@
 - Independently verified `build/release-stage/release-manifest.json`: exact version `1.0.0-preview`, 2,201 entries, zero missing files and zero size/SHA-256 mismatches.
 - Rechecked the staged Python entrypoints against source; all selected production scripts are byte-identical. No installer-build, NSIS or LFS process remains active. The already-running installed `xpano-ui.exe` is unrelated to packaging and was left untouched.
 - Phase 54 is complete. No commit, tag or external publication was created.
+
+# 2026-07-17 Phase 55 started
+
+- User reports broad field evidence that current xPano aligns worse than `0.1.0` even with the same Metashape version and separately reports that xPano shows only one Component when the PSX contains two.
+- Investigation is diagnosis-only and will compare behavior rather than release labels: import manifest, extraction/resolution/EXIF, sensor identity/model/group, match/alignment/optimization stages, camera-state transitions, Component inventory and export filtering.
+- Confirmed the old source tree exists at `C:\Users\Beluga\Downloads\xPano-0.1.0`; current source is `D:\CodeFiles\360gaussain`. No source, test, version or package has been modified.
+
+# 2026-07-17 Phase 55 completed
+
+- Compared the full import, extraction, sensor, matching, alignment, optimization, report and export paths against the downloaded `0.1.0` source and official Metashape 2.3 manual/API.
+- Ruled out hidden image downscaling, default frame truncation, hardware decode and JPEG pixel differences. Current panorama frames remain 3840x3840; standard photos are not resized.
+- Confirmed the primary mixed-material regression: the old documented panorama-first incremental workflow was replaced by one global match graph followed by subset solves. Flat cameras already influence matching before they are disabled.
+- Confirmed a separate pure-panorama pre-solve regression boundary in sensor/calibration initialization. Native 2.3 probes show old and current start from materially different model/calibration states despite equivalent tested projection formulas.
+- Opened the real PSX through Metashape 2.3 and proved it contains Components of 458, 221 and 177 cameras, with 24 unassigned. xPano reports only 458 because transforms and tie points are active-Component scoped.
+- Proved selection/export does not activate the requested Component and the UI relies on a stale persisted report rather than current PSX state. Phase 55 is diagnosis-complete; no product source or package was changed.
+
+# 2026-07-17 Phase 56 started
+
+- User authorized restoring the alignment process and initial calibration to `0.1.0` behavior, and explicitly requested the progress/display chain be updated at the same time.
+- Scope is panorama calibration bootstrap, panorama-first incremental alignment, execution-plan/stage truthfulness and regression tests. Component selection remains a separately confirmed defect and is not being mixed into this change.
+- RED coverage first proved the current implementation differed from the initial calibration and staged call order. The restored implementation now passes the focused Python and Rust contract tests.
+- Removed the reachable one-pass Metashape branch while preserving old `mixed` configuration input as an alias for the stable staged workflow. Updated the settings surfaces and development progress preview so users cannot select or see a graph that the runtime no longer executes.
+- Full acceptance passed: Python 284/284 with one intentional skip, Rust 94/94, frontend 47/47, frontend lint, TypeScript/Vite production build, Python compilation and diff whitespace checks. No real dataset alignment or installer build was performed.
+- Final correctness/readability/architecture/security/performance review found no blocker. The second match is an intentional restoration of the verified incremental workflow; no new dependency, subprocess boundary or unbounded UI work was introduced.
+
+# 2026-07-17 Phase 56 completed
+
+- Restored the initial-release panorama calibration and staged Metashape execution contract across backend, execution plan and UI progress surfaces.
+- Component inventory/export remains the next separate repair boundary and was not changed in this phase.
+
+# 2026-07-17 Phase 57 started
+
+- User requested a concrete optimization plan for the confirmed Component inventory/selection/export defect.
+- This phase is design-only. It will trace the current PSX-to-Python-to-Rust-to-frontend contract, then specify the smallest implementation and acceptance sequence without changing runtime behavior.
+- Confirmed the primary ownership boundary: Python inventory and export read active-Component-scoped transforms without switching `chunk.component`; Rust and React only preserve and display the resulting incomplete report.
+- Confirmed Rust report validation can remain strict once Python inventory is correct, and the existing re-export transaction is the right publication boundary.
+- One source search used a PowerShell-incompatible wildcard path (`tests/test_reexport*`) and returned an invalid filename error. No files changed; subsequent searches will use `rg` include globs instead of shell wildcards.
+- Confirmed initial alignment has no explicit Component request and should choose the largest automatically; re-export carries an explicit UI selection and requires strict missing-key handling.
+- Expanded the activation boundary to include ground-plane leveling because it reads active Component tie points before export.
+- Selected the interaction design for the plan: read-only PSX inspection on re-export click, conditional Component confirmation, then strict transactional export of the confirmed key. This avoids both stale selection and an unnecessary first export.
+- Release staging will automatically copy a new Python inspector but needs an explicit required-file regression. A search also referenced nonexistent `scripts/build_release.py`; the relevant staging implementation is `scripts/release_staging.py`, which was inspected instead.
+- Completed the design in `docs/METASHAPE_COMPONENT_REPAIR_PLAN.md`: one activation/restoration helper, truthful schema-v2 inventory, selected-Component leveling/export, read-only live PSX inspection, conditional selection dialog, strict revalidation and transactional publication.
+- Defined Python, Rust, frontend, staging and native acceptance tests, including the known 458/221/177 Component PSX. No runtime code, project output or installer was changed.
+- The planning completeness helper still reports older historical release phases as in progress; Phase 57 itself is complete and those unrelated deferred phases were intentionally left unchanged.
+
+# 2026-07-17 Phase 58 started
+
+- User approved implementation of the Component repair plan.
+- Work begins with a dynamic fake chunk that reproduces Metashape's active-Component-scoped transforms and tie points before product code changes.
+- RED confirmed: `tests.test_component_selection` fails because the active-Component inspection and activation API does not exist. The fake chunk changes transforms and tie points with `chunk.component`, reproducing the native defect boundary.
+- Implemented active-scoped Component inventory, global aligned-camera union, strict key resolution and success/failure restoration. Focused Python Component, export and release-staging coverage is green.
+- Integrated selected-Component activation into initial alignment, ground leveling, export and PSX re-export. Reports now carry schema-v2 inventory, unaligned counts and selected-Component camera counts.
+- Added the read-only `inspect_metashape_components.py` entrypoint and made release staging fail when it is missing.
+- Added Rust schema-v2 DTO validation, revision/PSX/executable preflight, hidden asynchronous Metashape inspection, Unicode-safe argument construction, temporary-output cleanup, command registration and truthful select/validate execution-plan nodes.
+- Added a pure frontend selection decision, live inspection-on-click, direct single-Component flow, multi-Component confirmation dialog and a read-only current-export display. Frontend unit tests, lint and production build are green.
+- RED/GREEN evidence was preserved for the missing Python API, missing staged inspector, Rust DTO/argument API, schema-v2 report validation and frontend selection view model.
+- Full source acceptance passed: Python 288/288 with one intentional skip, Rust 100/100, frontend 50/50, frontend lint, TypeScript/Vite production build, Python compilation and diff whitespace checks.
+- Native read-only acceptance passed under both Metashape 2.2.1 and 2.3.0 against `D:\3DRegistration\test\xPano\work\xpano.psx`: 458/221/177 Components, 856/880 globally aligned, 24 unaligned and 132270/94262/74148 tie points. The PSX hash and write time did not change.
+- Five-axis review found no correctness, readability, architecture, security or performance blocker. Phase 58 is complete; no installer, release, version bump, commit or external publication was created.
+
+# 2026-07-17 Phase 59 started
+
+- User requested a new Windows release package at version `2.0.0-preview` containing the completed alignment and Component fixes.
+- Scope is version synchronization, full source/release gates, installer construction and independent artifact verification. No commit, tag or external publication is authorized.
+- Synchronized npm, Cargo, lockfile and Tauri versions to `2.0.0-preview` and added the matching changelog entry.
+- Reconfirmed the standard dependency-complete release entrypoint. The source LFS payload is missing its executable and must be hydrated before release staging can pass.
+- Selected a missing-only restore from the canonical `D:/FastPrograms/LichtFeld-Studio-windows-v0.5.3` tree so existing xPano-specific runtime files are preserved.
+- Compared source, prior valid stage and canonical LFS trees. The 235 current files are hash-identical to canonical, with 1,215 canonical files missing and no conflicts; the prior stage's 205 omissions are generated/excluded runtime files.
+- Restored all 1,215 missing LFS files from the canonical payload without overwriting the 235 existing files. Independent verification found 1,450/1,450 files, zero missing files and zero SHA-256 differences.
+- Confirmed the 205 files absent from the previous valid stage are all explained by the release cache/debug filters, with zero unexpected omissions.
+- Re-ran a strict six-source version proof; every value is exactly `2.0.0-preview`.
+- Source regression gates passed: Python 288 tests with one intentional skip, Rust 100 tests, frontend 50 tests and frontend lint.
+- Frontend production build, Python compile-all and `git diff --check` passed. Release preflight found 140.34 GB free space, no stale `2.0.0-preview` artifact and no active installer/compiler process.
+- First installer attempt correctly failed closed during bundled-runtime manifest validation because the cp39 NumPy Metashape wheel is missing or corrupt. Rust release compilation and DLL closure passed; no installer was emitted.
+- Manifest audit showed all five required Metashape wheels were absent. Restored the four NumPy ABI wheels and OpenCV abi3 wheel from the local full-offline payload, then independently validated all five against manifest size and SHA-256.
+- Second installer attempt advanced past wheel validation and was correctly stopped by the Windows runtime manifest because `msvcp140.dll` is missing or corrupt. No installer was emitted.
+- Audited the complete six-DLL Windows runtime manifest. The source payload is empty, while the currently installed xPano runtime contains exact manifest-matching copies of all six files.
+- Restored and validated all six Windows runtime DLLs. A broader required-source check then found the bundled Python executable/module and app `tqdm` wheel absent.
+- Filter-aware comparison confirmed the installed xPano Python/runtime and app wheel trees are strict supersets of source with no portable-file hash conflicts: 618 Python files and 9 app wheels are missing.
+- Restored 618 portable Python files and 9 app wheels missing-only. Post-copy comparison reports zero missing/hash differences; isolated bundled Python imports `cv2`, NumPy, Pillow, piexif and tqdm successfully.
+- Full preflight now passes both runtime manifests, all six VC++ DLLs and all 26 required release-source resources.
+- Third installer build passed repeated source gates, release staging, 66/127/227-file PE DLL closure checks, Tauri release compilation and NSIS bundling.
+- Built `dist/xPano-2.0.0-preview-windows-x64-setup.exe`; build-reported SHA-256 is `5A4A39C7594B68114D7D1D41B92EE4CABE83BF2726D06E7F2444E04A89648C68`.
+- Independent installer verification confirmed 728,701,363 bytes, ProductVersion/FileVersion `2.0.0-preview` and a sidecar matching the recomputed SHA-256.
+- Independently verified all 2,201 staged manifest records with zero missing, size or hash failures; six critical alignment/Component scripts are byte-identical to source, LFS has 1,245 portable files, and stage contains no forbidden cache/debug payload.
+- Final staged smoke tests passed for bundled Python imports, the six-DLL Windows runtime and bundled dependency manifest. No installer/compiler process remains active.
+- Five-axis release review found no blocker: behavior is regression-covered; packaging uses the existing narrow staging architecture; immutable runtime payloads are manifest/hash validated; no new execution or privilege surface was added; and runtime performance behavior is unchanged. The remaining distribution risk is that the installer is unsigned.
+- Phase 59 complete. No commit, tag, push or external release publication was performed.
+- The planning completeness helper still reports an older historical build-22170 phase as in progress; Phase 59 itself is complete and that unrelated deferred gate was not altered.
+
+# 2026-07-20 Phase 60 started
+
+- User provided `C:/Users/Beluga/Downloads/pano_extractor_GUI.py` as the updated upstream reference and requested feasibility research plus an implementation plan for LUT restoration support.
+- Scope is diagnosis/design only. Existing dirty worktree and release payloads will be preserved; no product behavior, package or external state will be changed.
+- Inspected the complete upstream symbol/LUT surface. The feature is a single `.cube` FFmpeg `lut3d` color transform applied after temporal sampling and before JPEG output on each eye/stream; it is not lens undistortion or coordinate remapping.
+- Confirmed the upstream file is syntactically valid and the repository has no existing product LUT contract. Located the active extraction implementation and its hardware-decoder fallback/progress boundaries for deeper tracing.
+- Traced the active dual-eye and single-video command factories. A shared optional FFmpeg filter-chain builder is the likely minimal integration point; post-extraction rewriting would add I/O, duplicate JPEG loss and break live prepared-frame previews.
+- Traced project persistence and invalidation. Per-track optional LUT state fits the existing extraction settings and repeated CLI argument model, and changing it will correctly stale only the affected prepared track plus downstream reconstruction.
+- Confirmed the bundled FFmpeg already includes the slice-threaded `lut3d` filter. The first Unicode-path probe exposed a subprocess diagnostic-decoding issue and will be rerun with explicit UTF-8 handling.
+- Verified that upstream-style direct filter-path interpolation fails on a deliberately difficult Windows path, while a safe staged basename succeeds. Corrected the synthetic identity cube channel ordering before fidelity measurements.
+- Corrected identity-LUT fidelity is effectively exact (2 byte values differ by one level). A 4K-square microbenchmark confirms meaningful CPU overhead and unexpectedly larger JPEG output, prompting an explicit pixel-format compatibility check before finalizing the plan.
+- Confirmed LUT-only filtering negotiates 4:4:4 JPEGs; an explicit trailing 4:2:0 format restores current storage characteristics. Corrected the entrypoint trace to the registered `run_xpano_prepare_project.py` GUI media job.
+- Verified xPano already decodes FFmpeg logs as UTF-8 safely. Located the project-aware staging boundary and determined LUT content should be copied to a safe per-track snapshot before extraction, then referenced by basename through an FFmpeg working directory.
+- Stabilized the LUT output to current 4:2:0 JPEG semantics and quantified the optional CPU cost. Reviewed project-source validation and existing test surfaces; no new dependency, schema version or test framework is needed.
+- Completed a final consistency review against the current Rust extraction contract, project-aware media entrypoint, shared Python extractor, panorama/ordinary-video builders and existing frontend settings surfaces.
+- Confirmed the smallest stable ownership split: Rust validates and persists an optional per-video-track path; `run_xpano_prepare_project.py` propagates it; `xpano_extract.py` owns one copied, prevalidated temporary `lut.cube` snapshot across decoder fallback attempts.
+- Recorded the implementation plan in `docs/LUT_RESTORATION_INTEGRATION_PLAN.md`, including test-first order, special-path handling, explicit `yuvj420p`, failure semantics, performance limits and non-goals.
+- Phase 60 complete. Feasibility is confirmed; no product code, package, version, commit or external state was changed.

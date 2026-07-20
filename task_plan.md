@@ -4,7 +4,7 @@
 在保留现有用户改动的前提下，完整实现 `docs/UI_WORKSPACE_REDESIGN_SPEC.md` 的阶段 3（对齐工作区）和阶段 4（成果与后处理），使用 `D:\3DRegistration\test` 的真实素材打通抽帧、对齐、点云预览和致密化；随后实现可重复、可诊断、安装即用的 Windows 安装器。CUDA、torch、Open3D 等致密化大依赖不随包发布，缺失时按受控镜像源自动配置；本任务期间禁止实际下载大包，使用下载计划、假源和小型探针验收。
 
 ## Current Phase
-Phase 52 complete
+Phase 60 complete
 
 ## Phases
 
@@ -990,3 +990,130 @@ Ship the accepted training UI and camera/runtime fixes as `1.0.0-preview`, inclu
 
 - The first post-fix source search passed an `rg` pattern beginning with `--executable` before the option terminator, so `rg` rejected it as a flag. Retried with a literal search form.
 - `cargo fmt --check` is unavailable because `rustfmt` is not installed for `stable-x86_64-pc-windows-gnu`. This is a local tooling gap, not a source failure; verification will use an available formatter toolchain if present plus compiler and diff checks.
+
+# Phase 55: 0.1.0/current alignment-quality differential and Component inventory diagnosis
+
+## Goal
+
+Establish evidence-backed root causes for current xPano producing lower Metashape alignment quality than `0.1.0` with the same Metashape version. Audit the complete import-to-export behavior and independently determine why a PSX with two Components is represented as one Component in xPano. This phase is diagnosis-only and must not change product behavior.
+
+## Plan
+
+- [x] Inventory the authoritative `0.1.0` and current entrypoints, manifests, extraction scripts, defaults, and persisted reconstruction artifacts.
+- [x] Build an exact behavior matrix for import grouping, image dimensions/encoding/EXIF, sensor creation, camera model/group assignment, Metashape match/alignment/optimization calls, retries, and camera state transitions.
+- [x] Compare available old-good and new-bad workspaces to distinguish input/preprocessing differences from solver-policy differences.
+- [x] Trace Component enumeration from Metashape PSX through summary/report persistence, Rust project state, and frontend selector rendering.
+- [x] Rank confirmed causes and contributing risks by evidence and blast radius; explicitly separate proven defects from hypotheses.
+- [x] Report the smallest maintainable correction boundaries and required regression coverage without editing product code or packaging.
+
+**Status:** complete; the current solver contract and Component inventory/export defects are isolated with native Metashape 2.3 evidence. No product behavior or release artifact was changed.
+
+## Errors Encountered
+
+- The first calibration probe used a raw Windows string ending in a backslash and failed at parse time. The path was split at a safe boundary and the probe then ran successfully under Metashape 2.3.0.
+- A local Metashape 2.2.1 runner does not expose `EquidistantFisheye`; the compatibility comparison was rerun with the installed 2.3.0 build used by the old-good/current-bad evidence.
+
+# Phase 56: restore 0.1.0 Metashape alignment contract and progress truthfulness
+
+## Goal
+
+Restore the proven `0.1.0` panorama calibration bootstrap and panorama-first incremental alignment behavior, while making the execution plan, stage events and frontend progress display describe the actual Metashape calls. Component inventory/export is intentionally outside this phase.
+
+## Plan
+
+- [x] Add failing regression tests for legacy-compatible panorama calibration, panorama-only behavior, and mixed-material incremental call ordering.
+- [x] Add failing plan/progress tests proving mixed reconstruction exposes separate panorama match/align and flat incremental match/align stages.
+- [x] Implement the smallest compatibility helper and sequential alignment flow without adding a second solver abstraction.
+- [x] Synchronize backend execution plans, development preview stages and user-facing stage labels with the restored flow.
+- [x] Run focused tests, complete Python/frontend/Rust gates appropriate to the touched layers, static compile checks and diff hygiene.
+- [x] Perform a five-axis review and record remaining risks; do not build or publish a release.
+
+**Status:** complete; the `0.1.0` calibration/alignment contract and truthful progress graph are restored. Static and automated source gates passed; no installer was built.
+
+# Phase 57: correct Component inventory, selection and re-export plan
+
+## Goal
+
+Design the smallest maintainable repair that makes xPano enumerate every Metashape Component correctly, lets the user select a Component based on real per-Component camera counts, exports the selected Component reliably, and refreshes stale PSX-derived state without mixing Component logic into alignment.
+
+## Plan
+
+- [x] Re-audit the Python Component helper, alignment report writer, initial export and PSX re-export call sites against Metashape's active-Component semantics.
+- [x] Re-audit Rust persistence and frontend selector behavior, including when reports become stale after manual PSX edits.
+- [x] Define one activation/restoration boundary and exact failure semantics for missing, empty or changed Components.
+- [x] Specify data-contract changes, stage/progress changes and backward compatibility for existing projects.
+- [x] Specify RED tests and static/native acceptance cases in implementation order.
+- [x] Record a complete implementation plan with explicit non-goals and common implementation mistakes; do not change product behavior in this phase.
+
+**Status:** complete; implementation plan recorded in `docs/METASHAPE_COMPONENT_REPAIR_PLAN.md`. No product behavior or release artifact was changed.
+
+# Phase 58: implement Component inventory, selection and export repair
+
+## Goal
+
+Implement the approved Phase 57 design end to end: truthful active-Component inventory, selected-Component leveling/export, live PSX inspection before re-export, strict key revalidation, truthful progress stages and regression coverage. Do not package a release.
+
+## Plan
+
+- [x] Add RED Python tests for active-scoped inventory, restoration, strict selection and selected export behavior.
+- [x] Implement the Python activation/inventory boundary and integrate initial/re-export reporting and export.
+- [x] Add the read-only PSX inspection entrypoint and release-staging guard.
+- [x] Add RED Rust tests, then implement validated asynchronous inspection and execution-plan stages.
+- [x] Add frontend view-model tests, then implement live inspection and conditional Component confirmation UI.
+- [x] Run focused and full Python/Rust/frontend gates, native read-only inspection where available, diff hygiene and five-axis review.
+
+**Status:** complete; Component inventory, selection and export now use the live active-Component contract end to end. No installer was built.
+
+## Errors Encountered
+
+- The first new release-staging regression called a nonexistent `self.fixture` helper. It was corrected to use the file's existing `make_fixture` pattern before confirming the intended missing-resource RED failure.
+- The first focused Rust run correctly exposed one older exact-stage-list assertion that had not yet included `metashape.component.select`; the expectation was updated and the full reconstruction module returned green.
+- `rustup` is not available on this machine, so no new formatter component could be queried or installed. Compiler, tests, lint, production build and `git diff --check` all passed without rewriting unrelated files.
+
+# Phase 59: package 2.0.0-preview Windows release
+
+## Goal
+
+Synchronize the application version to `2.0.0-preview`, run the repository's full release gates, build a new dependency-complete Windows x64 installer containing the restored alignment and Component repairs, and independently verify its manifest and SHA-256. Do not commit, tag or publish externally.
+
+## Plan
+
+- [x] Audit every authoritative version source and the existing standard release command.
+- [x] Add/execute version-consistency evidence, then update only authoritative version files to `2.0.0-preview`.
+- [x] Run Python, Rust and frontend source gates plus release-staging coverage.
+- [x] Build the standard dependency-complete Windows x64 installer with the existing release pipeline.
+- [x] Independently verify installer name/version/hash, staged manifest closure and critical Component scripts.
+- [x] Perform the five-axis release review and record final artifact details.
+
+**Status:** complete; the verified `2.0.0-preview` standard dependency-complete Windows x64 installer and SHA-256 sidecar are ready in `dist`. No commit, tag or external publication was performed.
+
+## Errors Encountered
+
+- A PowerShell `rg` version probe parsed embedded quotes as path fragments and failed after the npm/Tauri values had already been printed. Retried Cargo versions with `Select-String`; all six authoritative values are `2.0.0-preview`.
+- Two PowerShell runtime inventory attempts used a `foreach (...) { ... } |` construct rejected by this host as an empty pipe element. No files changed; subsequent inventory stores loop output in an explicit array before formatting.
+- The first installer build passed source tests and Rust release compilation but release staging rejected `tools/offline-wheels/metashape/numpy-1.26.4-cp39-cp39-win_amd64.whl` as missing or corrupt. No installer was produced; the exact manifest artifact is being restored from a hash-matching local payload before retrying.
+- A diagnostic wheel-tree inventory repeated the host-incompatible `foreach (...) { ... } |` PowerShell shape and failed without changing files. A manifest-driven retry found all five required Metashape wheels absent and verified exact size/SHA-256 matches for all five in the prior local full-offline payload.
+- The second installer attempt passed bundled-wheel validation but failed closed on `runtime/windows-x64/msvcp140.dll`. This revealed a broader source-payload cleanup; the entire Windows runtime manifest will be audited and restored in one pass before another build attempt.
+- The first combined source-closure probe had a PowerShell/Python nested-quote syntax error and changed nothing. The corrected probe validated both manifests, then found three further source omissions: bundled `python.exe`, bundled `tqdm` and the app `tqdm` wheel. The complete bundled Python tree is being compared before missing-only restoration.
+
+# Phase 60: investigate original LUT restoration support
+
+## Goal
+
+Determine exactly how the updated upstream `pano_extractor_GUI.py` implements LUT restoration, whether the behavior can be integrated into xPano without regressing extraction speed, preview consistency or alignment inputs, and produce a maintainable implementation plan. This phase is research/design only and must not change product behavior.
+
+## Plan
+
+- [x] Reverse-engineer the upstream LUT file contract, validation, image transform and GUI state flow.
+- [x] Trace xPano's current panorama import, extraction, thumbnail, manifest and alignment-input boundaries.
+- [x] Compare dependencies, color/depth/geometry behavior, hardware acceleration constraints and large-media performance.
+- [x] Select the smallest integration boundary and define compatibility, fallback and failure semantics.
+- [x] Record an implementation sequence, regression tests and static/runtime acceptance criteria with explicit non-goals.
+
+**Status:** complete; feasibility is confirmed and the implementation sequence is recorded in `docs/LUT_RESTORATION_INTEGRATION_PLAN.md`. No product code or behavior was changed.
+
+## Errors Encountered
+
+- The first synthetic FFmpeg LUT probe decoded subprocess stderr with the Windows GBK default. FFmpeg echoed the Unicode/special-character test path as UTF-8, causing `UnicodeDecodeError` and then a diagnostic-only `None.strip()` failure. No product files changed; the probe will be rerun with explicit UTF-8 replacement decoding.
+- The first identity-LUT pixel comparison used blue-fastest cube ordering, which is not the `.cube` red-fastest ordering expected by FFmpeg and produced an intentional-looking channel swap. The test fixture was corrected before drawing any color-fidelity conclusion.
+- A source read targeted nonexistent `scripts/prepare_project.py`; repository search identified the actual project media entrypoint as `scripts/run_xpano_prepare_project.py`. No files changed; subsequent tracing uses the registered entrypoint.

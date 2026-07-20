@@ -12,6 +12,7 @@ interface ReconstructionMonitorProps {
   blockReason: string
   showReexport: boolean
   canReexport: boolean
+  reexportBusy: boolean
   reexportReason: string
   onStart: () => void
   onReexport: () => void
@@ -26,8 +27,7 @@ interface ReconstructionMonitorProps {
     warnings?: string[]
   } | null
   components?: Array<{ componentKey: string; alignedCameraCount: number; totalCameraCount: number }>
-  selectedComponentKey?: string
-  onSelectComponent?: (key: string) => void
+  exportedComponentKey?: string
   overlay?: boolean
   onClose?: () => void
 }
@@ -37,7 +37,7 @@ function formatTime(seconds?: number) {
   return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`
 }
 
-export function ReconstructionMonitor({ plan, progress, logs, running, canStart, blockReason, showReexport, canReexport, reexportReason, onStart, onReexport, onStop, onOpenOutput, onOpenProject, onViewResults, alignmentReport, components = [], selectedComponentKey = '', onSelectComponent, overlay = false, onClose }: ReconstructionMonitorProps) {
+export function ReconstructionMonitor({ plan, progress, logs, running, canStart, blockReason, showReexport, canReexport, reexportBusy, reexportReason, onStart, onReexport, onStop, onOpenOutput, onOpenProject, onViewResults, alignmentReport, components = [], exportedComponentKey = '', overlay = false, onClose }: ReconstructionMonitorProps) {
   const logRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
 
@@ -56,6 +56,7 @@ export function ReconstructionMonitor({ plan, progress, logs, running, canStart,
     : typeof historicalRemaining === 'number'
       ? `历史约 ${formatTime(historicalRemaining)}`
       : '正在估算'
+  const exportedComponent = components.find((component) => component.componentKey === exportedComponentKey)
 
   return (
     <aside className={`reconstruction-monitor liquid-panel flex min-h-0 flex-col overflow-hidden p-0 ${overlay ? 'reconstruction-monitor-overlay' : ''}`} data-testid="reconstruction-monitor">
@@ -78,7 +79,7 @@ export function ReconstructionMonitor({ plan, progress, logs, running, canStart,
 
         {alignmentReport && <div className="mt-3 border-y border-[var(--xp-line)] py-3 text-[10px]">
           <div className="flex items-center justify-between gap-3"><span className="font-medium text-ink">对齐质量</span><span className="font-mono text-muted">{alignmentReport.alignedCameras ?? 0}/{alignmentReport.totalCameras ?? 0} · {(alignmentReport.alignmentRate ?? 0).toFixed(1)}%</span></div>
-          {components.length > 1 && <label className="mt-2 flex items-center justify-between gap-2 text-muted"><span>导出 Component</span><select value={selectedComponentKey} onChange={(event) => onSelectComponent?.(event.target.value)} disabled={running} className="h-7 min-w-0 max-w-[170px] rounded-comfortable border border-[var(--xp-line)] bg-transparent px-2 text-[10px] text-ink"><option value="" disabled>选择 Component</option>{components.map((item) => <option key={item.componentKey} value={item.componentKey}>#{item.componentKey} · {item.alignedCameraCount} 相机</option>)}</select></label>}
+          {exportedComponentKey && <div className="mt-2 flex items-center justify-between gap-3 text-muted"><span>当前导出</span><span className="font-mono text-ink/75">Component #{exportedComponentKey}{exportedComponent ? ` · ${exportedComponent.alignedCameraCount} 相机` : ''}</span></div>}
           {(alignmentReport.warnings ?? []).map((warning) => <p key={warning} className="mt-2 leading-4 text-warning">{warning}</p>)}
         </div>}
 
@@ -97,9 +98,9 @@ export function ReconstructionMonitor({ plan, progress, logs, running, canStart,
 
       <div className="shrink-0 border-t border-[var(--xp-line)] p-3">
         {finished && <div className="mb-2 grid grid-cols-3 gap-1.5"><button type="button" onClick={onViewResults} className="glass-control motion-press flex h-8 items-center justify-center gap-1 text-[9px] text-ink/70 hover:text-brand"><ExternalLink className="h-3 w-3" /> 成果</button><button type="button" onClick={onOpenProject} className="glass-control motion-press flex h-8 items-center justify-center gap-1 text-[9px] text-ink/70 hover:text-brand"><ExternalLink className="h-3 w-3" /> PSX</button><button type="button" onClick={onOpenOutput} className="glass-control motion-press flex h-8 items-center justify-center gap-1 text-[9px] text-ink/70 hover:text-brand"><FolderOpen className="h-3 w-3" /> 目录</button></div>}
-        {running ? <button type="button" onClick={onStop} className="motion-press flex h-10 w-full items-center justify-center gap-2 rounded-comfortable bg-danger px-4 text-[12px] font-semibold text-white shadow-sm shadow-danger/20"><Square className="h-3.5 w-3.5 fill-current" /> 停止任务</button> : <div className={`grid gap-2 ${showReexport ? 'grid-cols-2' : 'grid-cols-1'}`}><button type="button" onClick={onStart} disabled={!canStart} title={!canStart ? blockReason : undefined} className="motion-press flex h-10 items-center justify-center gap-2 rounded-comfortable bg-brand px-3 text-[12px] font-semibold text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-45"><Play className="h-4 w-4 fill-current" /> 一键启动对齐</button>{showReexport && <button type="button" onClick={onReexport} disabled={!canReexport} title={!canReexport ? reexportReason : '保留 PSX 中的手工相机修正，仅重新导出图像与 COLMAP'} className="glass-control motion-press flex h-10 items-center justify-center gap-1.5 rounded-comfortable px-2 text-[11px] font-semibold text-ink/80 hover:text-brand disabled:cursor-not-allowed disabled:opacity-45"><RefreshCw className="h-3.5 w-3.5" /> 从 PSX 重新导出</button>}</div>}
+        {running ? <button type="button" onClick={onStop} className="motion-press flex h-10 w-full items-center justify-center gap-2 rounded-comfortable bg-danger px-4 text-[12px] font-semibold text-white shadow-sm shadow-danger/20"><Square className="h-3.5 w-3.5 fill-current" /> 停止任务</button> : <div className={`grid gap-2 ${showReexport ? 'grid-cols-2' : 'grid-cols-1'}`}><button type="button" onClick={onStart} disabled={!canStart || reexportBusy} title={!canStart ? blockReason : undefined} className="motion-press flex h-10 items-center justify-center gap-2 rounded-comfortable bg-brand px-3 text-[12px] font-semibold text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-45"><Play className="h-4 w-4 fill-current" /> 一键启动对齐</button>{showReexport && <button type="button" onClick={onReexport} disabled={!canReexport || reexportBusy} title={!canReexport ? reexportReason : '保留 PSX 中的手工相机修正，仅重新导出图像与 COLMAP'} className="glass-control motion-press flex h-10 items-center justify-center gap-1.5 rounded-comfortable px-2 text-[11px] font-semibold text-ink/80 hover:text-brand disabled:cursor-not-allowed disabled:opacity-45"><RefreshCw className={`h-3.5 w-3.5 ${reexportBusy ? 'animate-spin' : ''}`} /> {reexportBusy ? '读取 PSX' : '从 PSX 重新导出'}</button>}</div>}
         {!canStart && !running && <p className="mt-2 text-center text-[9px] leading-4 text-warning">{blockReason}</p>}
-        {showReexport && !canReexport && !running && <p className="mt-1 text-center text-[9px] leading-4 text-warning">{reexportReason}</p>}
+        {showReexport && !canReexport && !running && !reexportBusy && <p className="mt-1 text-center text-[9px] leading-4 text-warning">{reexportReason}</p>}
       </div>
     </aside>
   )

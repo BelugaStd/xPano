@@ -2,6 +2,24 @@
 
 All notable xPano release changes are recorded here. Versions follow Semantic Versioning.
 
+## [2.0.0-preview] - 2026-07-17
+
+### Changed
+
+- Restored the initial-release panorama calibration bootstrap and the panorama-first, flat-camera incremental Metashape workflow, with execution plans and UI progress matching the native stages.
+- Replaced the stale persisted Component selector with live, read-only PSX inspection and an explicit multi-Component confirmation flow before re-export.
+
+### Fixed
+
+- Enumerated every Metashape Component under its active scope, computed the global aligned-camera union, and kept the selected Component active through ground leveling and COLMAP/image export.
+- Strictly revalidated Component keys during transactional PSX re-export so a changed project cannot silently export another Component or overwrite the previous valid result.
+- Added schema-v2 inventory validation, Unicode-safe asynchronous inspection, and release-staging protection for the new Component inspection entrypoint.
+
+### Verification
+
+- Accepted the source with 288 Python tests (one intentional skip), 100 Rust tests, 50 frontend tests, lint, production build, Python compilation and release hygiene checks.
+- Reproduced the known 458/221/177 Component inventory and 856/880 global aligned count under both Metashape 2.2.1 and 2.3.0 without modifying the PSX.
+
 ## [1.0.0-preview] - 2026-07-15
 
 ### Changed

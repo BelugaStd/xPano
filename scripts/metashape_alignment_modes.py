@@ -10,9 +10,11 @@ def normalize_alignment_mode(value):
         "staged": ALIGNMENT_MODE_BACKBONE,
         "stage": ALIGNMENT_MODE_BACKBONE,
         "骨架": ALIGNMENT_MODE_BACKBONE,
-        "mixed": ALIGNMENT_MODE_MIXED,
-        "legacy": ALIGNMENT_MODE_MIXED,
-        "混合": ALIGNMENT_MODE_MIXED,
+        # NOTE: Keep accepting stored/CLI values from releases that exposed the
+        # one-pass strategy, but always execute the restored staged workflow.
+        "mixed": ALIGNMENT_MODE_BACKBONE,
+        "legacy": ALIGNMENT_MODE_BACKBONE,
+        "混合": ALIGNMENT_MODE_BACKBONE,
     }
     mode = aliases.get(raw, raw)
     if mode not in SUPPORTED_ALIGNMENT_MODES:

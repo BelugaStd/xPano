@@ -283,6 +283,7 @@ def stage_release_resources(
             temporary / "scripts" / "metashape_runtime_probe.py",
             temporary / "scripts" / "metashape_pipeline.py",
             temporary / "scripts" / "reexport_colmap_from_project.py",
+            temporary / "scripts" / "inspect_metashape_components.py",
             temporary / "scripts" / "component_selection.py",
             temporary / "tools" / "colmap" / "bin" / "colmap.exe",
             temporary / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",

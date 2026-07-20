@@ -9,9 +9,13 @@ use crate::project::{
 };
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use tauri::Emitter;
 use uuid::Uuid;
 
@@ -91,6 +95,96 @@ pub struct BackendProbe {
     pub path: String,
     pub cuda_available: Option<bool>,
     pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentInspectionItem {
+    pub component_key: String,
+    #[serde(default)]
+    pub label: String,
+    pub aligned_camera_count: u64,
+    #[serde(default)]
+    pub total_camera_count: u64,
+    #[serde(default)]
+    pub tie_point_count: u64,
+    #[serde(default)]
+    pub is_initially_active: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentInspection {
+    pub schema_version: u32,
+    pub inventory_complete: bool,
+    pub total_cameras: u64,
+    pub aligned_cameras: u64,
+    pub unaligned_cameras: u64,
+    pub default_component_key: String,
+    pub components: Vec<ComponentInspectionItem>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+fn parse_component_inspection(payload: &[u8]) -> Result<ComponentInspection, ProjectCommandError> {
+    let inspection: ComponentInspection = serde_json::from_slice(payload).map_err(|error| {
+        ProjectCommandError::new(
+            "artifact_corrupt",
+            format!("failed to parse Metashape Component inventory: {error}"),
+        )
+    })?;
+    if inspection.schema_version != 2
+        || inspection.total_cameras == 0
+        || inspection.aligned_cameras == 0
+        || inspection.aligned_cameras > inspection.total_cameras
+        || inspection.unaligned_cameras != inspection.total_cameras - inspection.aligned_cameras
+        || inspection.components.is_empty()
+        || inspection.default_component_key.trim().is_empty()
+    {
+        return Err(ProjectCommandError::new(
+            "artifact_corrupt",
+            "Metashape Component inventory has inconsistent totals",
+        ));
+    }
+
+    let mut keys = HashSet::new();
+    let mut default_is_usable = false;
+    for component in &inspection.components {
+        if component.component_key.trim().is_empty()
+            || !keys.insert(component.component_key.as_str())
+            || component.aligned_camera_count > inspection.total_cameras
+            || component.total_camera_count > 0
+                && component.aligned_camera_count > component.total_camera_count
+        {
+            return Err(ProjectCommandError::new(
+                "artifact_corrupt",
+                "Metashape Component inventory contains an invalid Component",
+            ));
+        }
+        if component.component_key == inspection.default_component_key
+            && component.aligned_camera_count > 0
+        {
+            default_is_usable = true;
+        }
+    }
+    if !default_is_usable {
+        return Err(ProjectCommandError::new(
+            "artifact_corrupt",
+            "Metashape Component inventory has no usable default Component",
+        ));
+    }
+    Ok(inspection)
+}
+
+fn component_inspection_args(script: &Path, project: &Path, output: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("-r"),
+        script.as_os_str().to_owned(),
+        OsString::from("--project"),
+        project.as_os_str().to_owned(),
+        OsString::from("--output"),
+        output.as_os_str().to_owned(),
+    ]
 }
 
 fn normalize_executable_path(path: &str) -> &str {
@@ -562,12 +656,66 @@ fn validated_alignment_report(project_root: &Path) -> Result<serde_json::Value, 
                         > 0
             })
         });
+    let schema_version = match report.get("schemaVersion") {
+        None => 1,
+        Some(value) => value.as_u64().unwrap_or(0),
+    };
+    let schema_v2_inventory_is_valid = if schema_version == 2 {
+        let unaligned = report
+            .get("unalignedCameras")
+            .and_then(serde_json::Value::as_u64);
+        let selected_aligned = report
+            .get("selectedComponentAlignedCameras")
+            .and_then(serde_json::Value::as_u64);
+        let components = report
+            .get("components")
+            .and_then(serde_json::Value::as_array);
+        let mut keys = HashSet::new();
+        let mut selected_count = None;
+        let components_are_valid = components.is_some_and(|components| {
+            !components.is_empty()
+                && components.iter().all(|component| {
+                    let Some(key) = component
+                        .get("componentKey")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|key| !key.trim().is_empty())
+                    else {
+                        return false;
+                    };
+                    let Some(component_aligned) = component
+                        .get("alignedCameraCount")
+                        .and_then(serde_json::Value::as_u64)
+                    else {
+                        return false;
+                    };
+                    let component_total = component
+                        .get("totalCameraCount")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(component_aligned);
+                    if key == selected_component {
+                        selected_count = Some(component_aligned);
+                    }
+                    keys.insert(key) && component_aligned <= component_total && component_aligned <= total
+                })
+        });
+        report
+            .get("inventoryComplete")
+            .and_then(serde_json::Value::as_bool)
+            .is_some()
+            && unaligned == total.checked_sub(aligned)
+            && components_are_valid
+            && selected_count == selected_aligned
+            && selected_aligned.is_some_and(|count| count > 0)
+    } else {
+        schema_version == 1
+    };
     if !succeeded
         || state != "complete"
         || aligned == 0
         || total < aligned
         || selected_component.is_empty()
         || !selected_component_is_valid
+        || !schema_v2_inventory_is_valid
     {
         return Err(ProjectCommandError::new(
             "artifact_corrupt",
@@ -808,38 +956,21 @@ fn metashape_backbone_nodes(has_panorama: bool, has_frames: bool) -> Vec<Executi
         node("input.validate", "校验输入", &[], 0.02, ProgressMode::Counted, false, None),
         node("metashape.project.create", "创建 Metashape 工程", &["input.validate"], 0.02, ProgressMode::Indeterminate, false, None),
         node("metashape.pano.import", "导入全景双鱼眼与站点", &["metashape.project.create"], 0.07, ProgressMode::Counted, false, no_panorama),
-        node("metashape.frame.import", "导入普通帧与照片", &["metashape.pano.import"], 0.06, ProgressMode::Counted, false, no_frames),
-        node("metashape.pano.station", "设置全景站点", &["metashape.frame.import"], 0.02, ProgressMode::Counted, false, no_panorama),
-        node("metashape.all.match", "联合匹配全部素材", &["metashape.pano.station"], 0.28, ProgressMode::Indeterminate, true, None),
-        node("metashape.pano.align", "求解全景骨架", &["metashape.all.match"], 0.12, ProgressMode::Indeterminate, true, no_panorama),
-        node("metashape.pano.release", "处理全景站点约束", &["metashape.pano.align"], 0.02, ProgressMode::Counted, false, no_panorama),
-        node("metashape.pano.optimize", "优化全景骨架", &["metashape.pano.release"], 0.07, ProgressMode::Indeterminate, true, no_panorama),
-        node("metashape.frame.align", "增量求解平面相机", &["metashape.pano.optimize"], 0.10, ProgressMode::Indeterminate, true, no_frames),
-        node("metashape.all.optimize", "全局相机优化", &["metashape.frame.align"], 0.06, ProgressMode::Indeterminate, true, no_frames),
-        node("metashape.project.save", "保存 Metashape 工程", &["metashape.all.optimize"], 0.02, ProgressMode::Indeterminate, false, None),
-        node("coordinate.auto_level", "自动校正地面方向", &["metashape.project.save"], 0.02, ProgressMode::Indeterminate, false, None),
-        node("export.images", "导出训练图像", &["coordinate.auto_level"], 0.05, ProgressMode::Counted, false, None),
-        node("export.colmap", "写出 COLMAP 模型", &["export.images"], 0.04, ProgressMode::Counted, false, None),
-        node("output.validate", "验证输出完整性", &["export.colmap"], 0.03, ProgressMode::Counted, false, None),
-    ]
-}
-
-fn metashape_mixed_nodes(has_panorama: bool) -> Vec<ExecutionPlanNode> {
-    let no_panorama = (!has_panorama).then_some("No panorama station groups selected");
-    vec![
-        node("input.validate", "校验输入", &[], 0.03, ProgressMode::Counted, false, None),
-        node("metashape.project.create", "创建 Metashape 工程", &["input.validate"], 0.03, ProgressMode::Indeterminate, false, None),
-        node("metashape.all.import", "导入全部素材", &["metashape.project.create"], 0.10, ProgressMode::Counted, false, None),
-        node("metashape.pano.station", "设置全景站点", &["metashape.all.import"], 0.02, ProgressMode::Counted, false, no_panorama),
-        node("metashape.all.match", "联合匹配全部素材", &["metashape.pano.station"], 0.24, ProgressMode::Indeterminate, true, None),
-        node("metashape.all.align", "联合求解全部相机", &["metashape.all.match"], 0.18, ProgressMode::Indeterminate, true, None),
-        node("metashape.pano.release", "处理全景站点约束", &["metashape.all.align"], 0.02, ProgressMode::Counted, false, no_panorama),
-        node("metashape.all.optimize", "全局相机优化", &["metashape.pano.release"], 0.10, ProgressMode::Indeterminate, true, None),
-        node("metashape.project.save", "保存 Metashape 工程", &["metashape.all.optimize"], 0.03, ProgressMode::Indeterminate, false, None),
-        node("coordinate.auto_level", "自动校正地面方向", &["metashape.project.save"], 0.03, ProgressMode::Indeterminate, false, None),
-        node("export.images", "导出训练图像", &["coordinate.auto_level"], 0.09, ProgressMode::Counted, false, None),
-        node("export.colmap", "写出 COLMAP 模型", &["export.images"], 0.08, ProgressMode::Counted, false, None),
-        node("output.validate", "验证输出完整性", &["export.colmap"], 0.05, ProgressMode::Counted, false, None),
+        node("metashape.pano.station", "设置全景站点", &["metashape.pano.import"], 0.02, ProgressMode::Counted, false, no_panorama),
+        node("metashape.pano.match", "匹配全景素材", &["metashape.pano.station"], 0.20, ProgressMode::Indeterminate, true, no_panorama),
+        node("metashape.pano.align", "求解全景骨架", &["metashape.pano.match"], 0.11, ProgressMode::Indeterminate, true, no_panorama),
+        node("metashape.pano.release", "释放全景站点以优化外参", &["metashape.pano.align"], 0.02, ProgressMode::Counted, false, no_panorama),
+        node("metashape.pano.optimize", "优化全景骨架", &["metashape.pano.release"], 0.06, ProgressMode::Indeterminate, true, no_panorama),
+        node("metashape.frame.import", "导入普通帧与照片", &["metashape.pano.optimize"], 0.06, ProgressMode::Counted, false, no_frames),
+        node("metashape.frame.match", "匹配新增普通素材", &["metashape.frame.import"], 0.17, ProgressMode::Indeterminate, true, no_frames),
+        node("metashape.frame.align", "增量接入普通相机", &["metashape.frame.match"], 0.08, ProgressMode::Indeterminate, true, no_frames),
+        node("metashape.all.optimize", "全局相机优化", &["metashape.frame.align"], 0.05, ProgressMode::Indeterminate, true, no_frames),
+        node("metashape.project.save", "保存 Metashape 工程", &["metashape.all.optimize"], 0.01, ProgressMode::Indeterminate, false, None),
+        node("metashape.component.select", "检查并选择主 Component", &["metashape.project.save"], 0.01, ProgressMode::Counted, false, None),
+        node("coordinate.auto_level", "自动校正地面方向", &["metashape.component.select"], 0.02, ProgressMode::Indeterminate, false, None),
+        node("export.images", "导出训练图像", &["coordinate.auto_level"], 0.04, ProgressMode::Counted, false, None),
+        node("export.colmap", "写出 COLMAP 模型", &["export.images"], 0.03, ProgressMode::Counted, false, None),
+        node("output.validate", "验证输出完整性", &["export.colmap"], 0.01, ProgressMode::Counted, false, None),
     ]
 }
 
@@ -860,7 +991,8 @@ fn colmap_panorama_nodes() -> Vec<ExecutionPlanNode> {
 fn metashape_reexport_nodes() -> Vec<ExecutionPlanNode> {
     vec![
         node("export.reuse_project", "读取已保存的 Metashape 工程", &[], 0.05, ProgressMode::Indeterminate, false, None),
-        node("export.images", "重新导出训练图像", &["export.reuse_project"], 0.80, ProgressMode::Counted, true, None),
+        node("metashape.component.validate", "确认导出 Component", &["export.reuse_project"], 0.05, ProgressMode::Counted, false, None),
+        node("export.images", "重新导出训练图像", &["metashape.component.validate"], 0.75, ProgressMode::Counted, true, None),
         node("export.colmap", "重新写出 COLMAP 模型", &["export.images"], 0.10, ProgressMode::Counted, false, None),
         node("output.validate", "验证重新导出结果", &["export.colmap"], 0.05, ProgressMode::Counted, false, None),
     ]
@@ -869,6 +1001,11 @@ fn metashape_reexport_nodes() -> Vec<ExecutionPlanNode> {
 fn normalize_plan_config(
     mut config: ReconstructionPlanConfig,
 ) -> Result<ReconstructionPlanConfig, ProjectCommandError> {
+    if config.backend == ReconstructionBackend::Metashape
+        && config.alignment_mode.as_deref() == Some("mixed")
+    {
+        config.alignment_mode = Some("backbone".to_string());
+    }
     config.metashape_path = config
         .metashape_path
         .as_deref()
@@ -899,9 +1036,13 @@ fn validate_reexport_project(
             "PSX re-export is only available for Metashape projects",
         ));
     }
-    if project.reconstruction.status == ReconstructionStatus::Running
-        || project.reconstruction.input_revision != project.revisions.alignment_input
-    {
+    if project.reconstruction.status == ReconstructionStatus::Running {
+        return Err(ProjectCommandError::new(
+            "job_conflict",
+            "PSX inspection and re-export are unavailable while reconstruction is running",
+        ));
+    }
+    if project.reconstruction.input_revision != project.revisions.alignment_input {
         return Err(ProjectCommandError::new(
             "invalid_project",
             "PSX re-export requires a current, non-running Metashape reconstruction",
@@ -961,13 +1102,7 @@ pub fn build_execution_plan_impl(
     }
     let (has_panorama, has_frames) = active_track_types(project_root, &project)?;
     let nodes = match config.backend {
-        ReconstructionBackend::Metashape => {
-            if config.alignment_mode.as_deref() == Some("mixed") {
-                metashape_mixed_nodes(has_panorama)
-            } else {
-                metashape_backbone_nodes(has_panorama, has_frames)
-            }
-        }
+        ReconstructionBackend::Metashape => metashape_backbone_nodes(has_panorama, has_frames),
         ReconstructionBackend::Colmap => {
             if has_frames {
                 return Err(ProjectCommandError::new(
@@ -1029,6 +1164,93 @@ pub fn build_reexport_plan_impl(
     Ok(plan)
 }
 
+fn inspect_metashape_components_impl(
+    project_root: &Path,
+    expected_revision: u64,
+    metashape_path: &str,
+    script_path: &Path,
+) -> Result<ComponentInspection, ProjectCommandError> {
+    let project = read_project(project_root)?;
+    if project.revision != expected_revision {
+        return Err(ProjectCommandError::revision_conflict(
+            expected_revision,
+            project.revision,
+        ));
+    }
+    let project_relative = validate_reexport_project(project_root, &project)?;
+    let executable = normalize_executable_path(metashape_path);
+    if executable.is_empty() || !command_available(executable) {
+        return Err(ProjectCommandError::new(
+            "backend_unavailable",
+            "The selected Metashape executable is not available",
+        ));
+    }
+    if !script_path.is_file() {
+        return Err(ProjectCommandError::new(
+            "backend_unavailable",
+            format!(
+                "Metashape Component inspection script is missing: {}",
+                script_path.display()
+            ),
+        ));
+    }
+
+    let work_dir = project_root.join("work");
+    std::fs::create_dir_all(&work_dir).map_err(|error| {
+        ProjectCommandError::new(
+            "artifact_corrupt",
+            format!("failed to prepare Component inspection output: {error}"),
+        )
+    })?;
+    let output_path = work_dir.join(format!(
+        "component-inspection-{}.json",
+        Uuid::new_v4()
+    ));
+    let project_path = project_root.join(project_relative);
+    let result = (|| {
+        let mut command = Command::new(executable);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(0x08000000);
+        let output = command
+            .args(component_inspection_args(
+                script_path,
+                &project_path,
+                &output_path,
+            ))
+            .env("PYTHONIOENCODING", "utf-8:replace")
+            .env("PYTHONUTF8", "1")
+            .output()
+            .map_err(|error| {
+                ProjectCommandError::new(
+                    "backend_unavailable",
+                    format!("failed to launch Metashape Component inspection: {error}"),
+                )
+            })?;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ProjectCommandError::new(
+                "artifact_corrupt",
+                format!(
+                    "Metashape could not inspect the current PSX (exit {:?}): {}{}",
+                    output.status.code(),
+                    stdout.trim(),
+                    stderr.trim()
+                ),
+            ));
+        }
+        let payload = std::fs::read(&output_path).map_err(|error| {
+            ProjectCommandError::new(
+                "artifact_corrupt",
+                format!("Metashape did not produce Component inventory: {error}"),
+            )
+        })?;
+        parse_component_inspection(&payload)
+    })();
+    let _ = std::fs::remove_file(&output_path);
+    result
+}
+
 #[tauri::command]
 pub fn build_execution_plan(
     app: tauri::AppHandle,
@@ -1069,6 +1291,32 @@ pub fn build_reexport_plan(
         );
     }
     Ok(plan)
+}
+
+#[tauri::command]
+pub async fn inspect_metashape_components(
+    project_root: String,
+    expected_revision: u64,
+    metashape_path: String,
+) -> Result<ComponentInspection, ProjectCommandError> {
+    let script_path = crate::tool_resolver::resolve_script_path(
+        "scripts/inspect_metashape_components.py",
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_metashape_components_impl(
+            Path::new(&project_root),
+            expected_revision,
+            &metashape_path,
+            &script_path,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ProjectCommandError::new(
+            "backend_unavailable",
+            format!("Metashape Component inspection worker failed: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -1187,6 +1435,19 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn schema_v2_alignment_report_rejects_inconsistent_component_inventory() {
+        let root = temp_case("invalid-v2-alignment-report");
+        std::fs::write(
+            root.join("xpano_alignment_report.json"),
+            br#"{"schemaVersion":2,"processSucceeded":true,"state":"complete","inventoryComplete":true,"totalCameras":2,"alignedCameras":1,"unalignedCameras":0,"components":[{"componentKey":"7","alignedCameraCount":1,"totalCameraCount":1,"tiePointCount":10},{"componentKey":"7","alignedCameraCount":1,"totalCameraCount":1,"tiePointCount":10}],"selectedComponentKey":"7","selectedComponentAlignedCameras":1,"warnings":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(validated_alignment_report(&root).unwrap_err().code, "artifact_corrupt");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn write_active_manifest(root: &Path, project: &mut XpanoProjectV2, types: &[&str]) {
         let relative = "work/manifests/alignment_00000002.json";
         let path = root.join(relative);
@@ -1219,6 +1480,98 @@ mod tests {
     }
 
     #[test]
+    fn component_inspection_accepts_truthful_schema_v2_inventory() {
+        let inspection = parse_component_inspection(br#"{
+            "schemaVersion": 2,
+            "inventoryComplete": true,
+            "totalCameras": 880,
+            "alignedCameras": 856,
+            "unalignedCameras": 24,
+            "defaultComponentKey": "12",
+            "components": [
+                {"componentKey":"12","label":"Main","alignedCameraCount":458,"totalCameraCount":458,"tiePointCount":132270,"isInitiallyActive":false},
+                {"componentKey":"27","label":"Secondary","alignedCameraCount":221,"totalCameraCount":221,"tiePointCount":94262,"isInitiallyActive":true}
+            ],
+            "warnings": ["Multiple Components"]
+        }"#).unwrap();
+
+        assert_eq!(inspection.default_component_key, "12");
+        assert_eq!(inspection.components.len(), 2);
+        assert_eq!(inspection.components[0].aligned_camera_count, 458);
+    }
+
+    #[test]
+    fn component_inspection_rejects_inconsistent_or_ambiguous_inventory() {
+        for payload in [
+            br#"{"schemaVersion":2,"inventoryComplete":true,"totalCameras":2,"alignedCameras":3,"unalignedCameras":0,"defaultComponentKey":"1","components":[{"componentKey":"1","alignedCameraCount":1,"tiePointCount":1}],"warnings":[]}"#.as_slice(),
+            br#"{"schemaVersion":2,"inventoryComplete":true,"totalCameras":2,"alignedCameras":1,"unalignedCameras":1,"defaultComponentKey":"missing","components":[{"componentKey":"1","alignedCameraCount":1,"tiePointCount":1}],"warnings":[]}"#.as_slice(),
+            br#"{"schemaVersion":2,"inventoryComplete":true,"totalCameras":2,"alignedCameras":1,"unalignedCameras":1,"defaultComponentKey":"1","components":[{"componentKey":"1","alignedCameraCount":1,"tiePointCount":1},{"componentKey":"1","alignedCameraCount":1,"tiePointCount":2}],"warnings":[]}"#.as_slice(),
+            br#"{"schemaVersion":2,"inventoryComplete":true,"totalCameras":2,"alignedCameras":0,"unalignedCameras":2,"defaultComponentKey":"1","components":[{"componentKey":"1","alignedCameraCount":0,"tiePointCount":0}],"warnings":[]}"#.as_slice(),
+        ] {
+            assert_eq!(parse_component_inspection(payload).unwrap_err().code, "artifact_corrupt");
+        }
+    }
+
+    #[test]
+    fn component_inspection_arguments_preserve_spaces_and_unicode_paths() {
+        let script = Path::new("D:/xPano scripts/inspect_metashape_components.py");
+        let project = Path::new("D:/项目 素材/work/xpano.psx");
+        let output = Path::new("D:/项目 素材/work/component.json");
+
+        assert_eq!(
+            component_inspection_args(script, project, output),
+            vec![
+                std::ffi::OsString::from("-r"),
+                script.as_os_str().to_owned(),
+                std::ffi::OsString::from("--project"),
+                project.as_os_str().to_owned(),
+                std::ffi::OsString::from("--output"),
+                output.as_os_str().to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn component_inspection_rejects_revision_conflict_before_process_launch() {
+        let root = temp_case("component-inspection-revision");
+        let project = fixture_project();
+        write_project_atomic(&root, &project).unwrap();
+
+        let error = inspect_metashape_components_impl(
+            &root,
+            project.revision + 1,
+            "missing-metashape.exe",
+            Path::new("missing-inspector.py"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "revision_conflict");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn component_inspection_rejects_missing_psx_before_process_launch() {
+        let root = temp_case("component-inspection-missing-psx");
+        let mut project = fixture_project();
+        project.reconstruction.backend = ReconstructionBackend::Metashape;
+        project.reconstruction.status = ReconstructionStatus::Complete;
+        project.reconstruction.input_revision = project.revisions.alignment_input;
+        project.reconstruction.project_path = Some("work/xpano.psx".to_string());
+        write_project_atomic(&root, &project).unwrap();
+
+        let error = inspect_metashape_components_impl(
+            &root,
+            project.revision,
+            "missing-metashape.exe",
+            Path::new("missing-inspector.py"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "artifact_corrupt");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn backbone_plan_marks_absent_flat_branch_as_skipped() {
         let root = temp_case("pano");
         let mut project = fixture_project();
@@ -1243,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn backbone_plan_matches_once_before_staged_panorama_and_flat_alignment() {
+    fn backbone_plan_exposes_panorama_first_incremental_alignment() {
         let nodes = metashape_backbone_nodes(true, true);
         let stages = nodes
             .iter()
@@ -1256,31 +1609,30 @@ mod tests {
                 "input.validate",
                 "metashape.project.create",
                 "metashape.pano.import",
-                "metashape.frame.import",
                 "metashape.pano.station",
-                "metashape.all.match",
+                "metashape.pano.match",
                 "metashape.pano.align",
                 "metashape.pano.release",
                 "metashape.pano.optimize",
+                "metashape.frame.import",
+                "metashape.frame.match",
                 "metashape.frame.align",
                 "metashape.all.optimize",
                 "metashape.project.save",
+                "metashape.component.select",
                 "coordinate.auto_level",
                 "export.images",
                 "export.colmap",
                 "output.validate",
             ]
         );
-        assert!(nodes.iter().all(|node| {
-            node.stage_id != "metashape.pano.match" && node.stage_id != "metashape.frame.match"
-        }));
         assert_eq!(
             nodes
                 .iter()
-                .find(|node| node.stage_id == "metashape.all.match")
+                .find(|node| node.stage_id == "metashape.frame.import")
                 .unwrap()
                 .depends_on,
-            vec!["metashape.pano.station"]
+            vec!["metashape.pano.optimize"]
         );
         let total_weight = nodes.iter().map(|node| node.weight).sum::<f64>();
         assert!((total_weight - 1.0).abs() < 1e-9);
@@ -1413,12 +1765,13 @@ mod tests {
             stages,
             vec![
                 "export.reuse_project",
+                "metashape.component.validate",
                 "export.images",
                 "export.colmap",
                 "output.validate"
             ]
         );
-        assert!(!stages.iter().any(|stage| stage.starts_with("metashape.")));
+        assert!((plan.nodes.iter().map(|node| node.weight).sum::<f64>() - 1.0).abs() < 1e-9);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1602,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_only_and_mixed_plans_expose_their_real_stage_graphs() {
+    fn flat_only_and_legacy_mixed_configs_expose_the_staged_graph() {
         let flat_root = temp_case("flat-plan");
         let mut flat_project = fixture_project();
         write_active_manifest(&flat_root, &mut flat_project, &["standard_photos"]);
@@ -1645,11 +1998,19 @@ mod tests {
         assert!(mixed_plan
             .nodes
             .iter()
-            .any(|node| node.stage_id == "metashape.all.match"));
-        assert!(!mixed_plan
+            .any(|node| node.stage_id == "metashape.pano.match"));
+        assert!(mixed_plan
             .nodes
             .iter()
             .any(|node| node.stage_id == "metashape.frame.match"));
+        assert!(mixed_plan
+            .nodes
+            .iter()
+            .any(|node| node.stage_id == "metashape.component.select"));
+        assert!(!mixed_plan
+            .nodes
+            .iter()
+            .any(|node| node.stage_id == "metashape.all.match"));
 
         let _ = std::fs::remove_dir_all(flat_root);
         let _ = std::fs::remove_dir_all(mixed_root);

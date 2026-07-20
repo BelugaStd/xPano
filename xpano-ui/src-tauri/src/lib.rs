@@ -3695,6 +3695,7 @@ pub fn run() {
             media::fail_media_job,
             reconstruction::build_execution_plan,
             reconstruction::build_reexport_plan,
+            reconstruction::inspect_metashape_components,
             reconstruction::probe_reconstruction_backends,
             probe_runtime_readiness,
             reconstruction::update_reconstruction_config,

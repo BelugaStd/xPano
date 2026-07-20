@@ -10,6 +10,36 @@ from unittest.mock import patch
 import numpy as np
 
 
+class ActiveComponentCamera:
+    def __init__(self, chunk, key, component_key):
+        self.chunk = chunk
+        self.key = key
+        self.component_key = str(component_key)
+
+    @property
+    def transform(self):
+        return object() if str(self.chunk.component.key) == self.component_key else None
+
+
+class ActiveComponentChunk:
+    def __init__(self):
+        self.components = [
+            types.SimpleNamespace(key="first", label="First"),
+            types.SimpleNamespace(key="second", label="Second"),
+        ]
+        self.component = self.components[0]
+        self.cameras = [
+            ActiveComponentCamera(self, 1, "first"),
+            ActiveComponentCamera(self, 2, "second"),
+            ActiveComponentCamera(self, 3, "second"),
+        ]
+
+    @property
+    def tie_points(self):
+        count = 1 if self.component.key == "first" else 2
+        return types.SimpleNamespace(points=[object()] * count)
+
+
 class ExportColmapTests(unittest.TestCase):
     def _load_module_with_metashape(self, metashape):
         previous_metashape = sys.modules.get("Metashape")
@@ -183,6 +213,40 @@ class ExportColmapTests(unittest.TestCase):
                 baseline,
                 module.camera_image_signature(camera, {**strategy, "opt_W": 102}, source_cache),
             )
+
+    def test_mixed_export_activates_selected_component_and_restores_original(self):
+        chunk = ActiveComponentChunk()
+        metashape = types.SimpleNamespace(app=types.SimpleNamespace(
+            document=types.SimpleNamespace(chunk=chunk),
+        ))
+        module = self._load_module_with_metashape(metashape)
+
+        with patch.object(
+            module,
+            "_run_active_component_export",
+            side_effect=lambda *args, **kwargs: str(chunk.component.key),
+        ):
+            active_key = module.run_mixed_export(selected_component_key="second")
+
+        self.assertEqual(active_key, "second")
+        self.assertEqual(chunk.component.key, "first")
+
+    def test_mixed_export_restores_original_component_after_export_failure(self):
+        chunk = ActiveComponentChunk()
+        metashape = types.SimpleNamespace(app=types.SimpleNamespace(
+            document=types.SimpleNamespace(chunk=chunk),
+        ))
+        module = self._load_module_with_metashape(metashape)
+
+        def fail_while_selected(*args, **kwargs):
+            self.assertEqual(chunk.component.key, "second")
+            raise RuntimeError("export failed")
+
+        with patch.object(module, "_run_active_component_export", side_effect=fail_while_selected):
+            with self.assertRaisesRegex(RuntimeError, "export failed"):
+                module.run_mixed_export(selected_component_key="second")
+
+        self.assertEqual(chunk.component.key, "first")
 
 
 

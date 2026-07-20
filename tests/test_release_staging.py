@@ -57,6 +57,7 @@ class ReleaseStagingTests(unittest.TestCase):
             "scripts/metashape_runtime_probe.py": b"print('probe')",
             "scripts/metashape_pipeline.py": b"print('pipeline')",
             "scripts/reexport_colmap_from_project.py": b"print('reexport')",
+            "scripts/inspect_metashape_components.py": b"print('inspect components')",
             "scripts/component_selection.py": b"def select_component_key(): pass",
             "scripts/configure_environment.ps1": b"Write-Host ok",
             "scripts/build_release.ps1": b"must not ship",
@@ -195,6 +196,7 @@ class ReleaseStagingTests(unittest.TestCase):
             self.assertTrue((stage / "scripts/metashape_runtime_probe.py").is_file())
             self.assertTrue((stage / "scripts/metashape_pipeline.py").is_file())
             self.assertTrue((stage / "scripts/reexport_colmap_from_project.py").is_file())
+            self.assertTrue((stage / "scripts/inspect_metashape_components.py").is_file())
             self.assertTrue((stage / "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe").is_file())
             self.assertTrue((stage / "tools/offline-wheels/metashape/numpy-1.26.4-cp39-cp39-win_amd64.whl").is_file())
             self.assertTrue((stage / "runtime/bundled-runtime-manifest.json").is_file())
@@ -316,6 +318,30 @@ class ReleaseStagingTests(unittest.TestCase):
                     ffmpeg,
                     ffprobe,
                     webview2_loader,
+                    version="1.2.3",
+                )
+
+    def test_stage_rejects_missing_component_inspection_entrypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            stage = Path(tmp) / "stage"
+            root.mkdir()
+            self.make_fixture(root)
+            (root / "scripts/inspect_metashape_components.py").unlink()
+            ffmpeg = Path(tmp) / "ffmpeg.exe"
+            ffprobe = Path(tmp) / "ffprobe.exe"
+            loader = Path(tmp) / "WebView2Loader.dll"
+            ffmpeg.write_bytes(b"ffmpeg-real")
+            ffprobe.write_bytes(b"ffprobe-real")
+            loader.write_bytes(b"webview-loader-real")
+
+            with self.assertRaisesRegex(ReleaseStagingError, "inspect_metashape_components.py"):
+                stage_release_resources(
+                    root,
+                    stage,
+                    ffmpeg,
+                    ffprobe,
+                    loader,
                     version="1.2.3",
                 )
 

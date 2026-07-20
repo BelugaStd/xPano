@@ -43,7 +43,6 @@ import type {
   ColmapDensityPreset,
   ColmapMatcher,
   MaterialTrack,
-  MetashapeAlignmentMode,
   PipelineConfig,
   PipelinePhase,
   PipelineProgress,
@@ -500,7 +499,7 @@ export function PipelinePage({
           ...prev,
           outputDir: normalizeDisplayPath(project.projectDir),
           alignmentEngine: project.backend === 'colmap' ? 'colmap' : 'metashape',
-          metaAlignmentMode: project.metashapeAlignmentMode === 'mixed' ? 'mixed' : 'backbone',
+          metaAlignmentMode: 'backbone',
           framesPerSecond: project.framesPerSecond || prev.framesPerSecond,
           frameLimit: project.maxFrames > 0 ? project.maxFrames : 0,
         }))
@@ -554,7 +553,7 @@ export function PipelinePage({
     }))
     const firstVideo = v2Project.tracks.find((track) => isVideoTrack(track.type))
     const reconstructionConfig = v2Project.reconstruction.config
-    const alignmentMode = reconstructionConfig.alignmentMode === 'mixed' ? 'mixed' : 'backbone'
+    const alignmentMode = 'backbone'
     const alignmentManifestPath = typeof reconstructionConfig.alignmentManifestPath === 'string'
       ? reconstructionConfig.alignmentManifestPath
       : ''
@@ -987,9 +986,7 @@ export function PipelinePage({
                 </Field>
               {config.alignmentEngine === 'metashape' ? (<>
                 <Field label="策略">
-                  <ThemeSelect className="w-20" value={config.metaAlignmentMode} onChange={(v) => setConfig({ ...config, metaAlignmentMode: v as MetashapeAlignmentMode })} options={[
-                    { value: 'backbone', label: '骨架' }, { value: 'mixed', label: '混合' },
-                  ]} />
+                  <div className="glass-control flex h-8 w-24 items-center justify-center rounded-control text-[11px] text-ink/75">稳定分阶段</div>
                 </Field>
                 <Field label="关键点"><NumberInput value={config.metaKeypointLimit} onChange={(value) => setConfig({ ...config, metaKeypointLimit: value })} /></Field>
                 <Field label="连接点"><NumberInput value={config.metaTiepointLimit} onChange={(value) => setConfig({ ...config, metaTiepointLimit: value })} /></Field>

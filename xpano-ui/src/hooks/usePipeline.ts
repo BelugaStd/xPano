@@ -50,11 +50,11 @@ const devProgress: PipelineProgress = devTrainingPreview ? {
   splatCount: 824512,
 } : {
   phase: 'align',
-  stage: 'metashape.all.match',
-  percent: 55,
-  message: '正在联合匹配全部素材',
+  stage: 'metashape.frame.match',
+  percent: 82,
+  message: '正在匹配新增普通素材',
   elapsed: 512,
-  phasePercents: { extract: 100, align: 31, export: 0 },
+  phasePercents: { extract: 100, align: 72, export: 0 },
   heartbeat: true,
 }
 const devLogs = devTrainingPreview ? [

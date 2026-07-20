@@ -19,17 +19,15 @@ except Exception as exc:
 
 try:
     from scripts.component_selection import (
-        camera_belongs_to_component,
-        component_inventory,
-        component_membership_is_ambiguous,
-        select_component_key,
+        activated_component,
+        inspect_components,
+        resolve_component_key,
     )
 except ImportError:
     from component_selection import (
-        camera_belongs_to_component,
-        component_inventory,
-        component_membership_is_ambiguous,
-        select_component_key,
+        activated_component,
+        inspect_components,
+        resolve_component_key,
     )
 
 try:
@@ -491,7 +489,7 @@ def emit_export_event(stage, message, percent, current=None, total=None):
 # ==========================================
 # 3. 缝合调度与二进制写入
 # ==========================================
-def run_mixed_export(
+def _run_active_component_export(
     out_dir=None,
     show_dialog=True,
     reuse_images_dir=None,
@@ -542,26 +540,17 @@ def run_mixed_export(
     cam_id_acc = 1
     img_id_acc = 1
 
-    inventory = component_inventory(chunk.cameras, getattr(chunk, "components", None))
-    if component_membership_is_ambiguous(inventory):
-        raise RuntimeError(
-            "Metashape reports multiple components but does not expose camera membership; "
-            "xPano will not mix them into one export"
-        )
-    selected_component_key = select_component_key(inventory, selected_component_key)
     valid_cameras = [
         c for c in chunk.cameras
         if c.transform and c.sensor and c.sensor.calibration and c.enabled
-        and camera_belongs_to_component(c, selected_component_key)
     ]
     if not valid_cameras:
         raise RuntimeError("No aligned cameras are available in the selected Metashape component")
-    if len(inventory) > 1:
-        print(
-            f"WARN: Multiple Metashape components found; exporting selected component {selected_component_key} "
-            f"({len(valid_cameras)} aligned cameras). Manual PSX alignment is recommended.",
-            flush=True,
-        )
+    print(
+        f">>> Exporting Metashape Component {selected_component_key} "
+        f"({len(valid_cameras)} aligned cameras).",
+        flush=True,
+    )
     used_sensors = []
     used_sensor_keys = set()
     for camera in valid_cameras:
@@ -885,6 +874,35 @@ def run_mixed_export(
         Metashape.app.messageBox("混合导出完成！请检查输出文件夹。")
     except Exception:
         print("混合导出完成！请检查输出文件夹。", flush=True)
+
+
+def run_mixed_export(
+    out_dir=None,
+    show_dialog=True,
+    reuse_images_dir=None,
+    image_cache_path=None,
+    image_cache_output=None,
+    selected_component_key=None,
+):
+    chunk = Metashape.app.document.chunk
+    if not chunk:
+        print("错误：没有有效 Chunk！")
+        return
+    inspection = inspect_components(chunk)
+    selected = resolve_component_key(
+        inspection,
+        selected_component_key,
+        strict=selected_component_key is not None,
+    )
+    with activated_component(chunk, selected):
+        return _run_active_component_export(
+            out_dir,
+            show_dialog=show_dialog,
+            reuse_images_dir=reuse_images_dir,
+            image_cache_path=image_cache_path,
+            image_cache_output=image_cache_output,
+            selected_component_key=selected,
+        )
 
 if __name__ == "__main__":
     print("====================================", flush=True)
