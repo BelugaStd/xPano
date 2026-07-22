@@ -1,6 +1,6 @@
 [package]
 name = "xpano-ui"
-version = "2.0.0-preview"
+version = "2.0.0-stable"
 description = "Panoramic 3D Reconstruction Tool"
 authors = ["xPano Team"]
 license = "MIT"
