@@ -152,6 +152,123 @@ class PrepareProjectTests(unittest.TestCase):
                 self.assertTrue((root / item["image"]).is_file())
                 self.assertTrue((root / item["thumbnail"]).is_file())
 
+    def test_prepare_project_propagates_video_color_lut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            video = Path(tmp) / "clip.mp4"
+            lut = Path(tmp) / "restore.cube"
+            frame = root / "work" / "frames" / "video-track" / "frame.jpg"
+            video.write_bytes(b"video")
+            lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
+            frame.parent.mkdir(parents=True)
+            Image.new("RGB", (100, 80), (32, 64, 96)).save(frame, "JPEG")
+            project = json.loads(
+                (Path(__file__).parents[1] / "schemas" / "fixtures" / "xpano_project_v3.example.json").read_text(encoding="utf-8")
+            )
+            project["tracks"] = [{
+                "id": "video-track",
+                "type": "ordinary_video",
+                "label": "Color video",
+                "sourcePath": str(video),
+                "sourceFingerprint": {"size": 5, "mtimeNs": 0},
+                "cameraProfile": "wide",
+                "trim": None,
+                "extraction": {
+                    "framesPerSecond": 1.0,
+                    "frameLimit": 0,
+                    "colorLutPath": str(lut),
+                },
+                "status": "draft",
+                "items": [],
+            }]
+            (root / "xpano_project.json").write_text(json.dumps(project), encoding="utf-8")
+            manifest_track = {
+                "track_id": "track_001_clip",
+                "track_type": "ordinary_video",
+                "device_label": "clip",
+                "source_paths": [str(video.resolve())],
+                "frames_per_second": 1.0,
+                "max_frames": 0,
+                "camera_profile": "wide",
+                "metashape_mode": "pinhole_video_frames",
+                "export_mode": "undistorted_frame",
+                "group_label": "track_001_clip_frames",
+                "sensor_label": "track_001_clip_frame",
+                "photo_sensors": [{
+                    "sensor_id": "track_001_clip_frame",
+                    "sensor_label": "track_001_clip_frame",
+                    "camera_profile": "wide",
+                    "camera_identity": {},
+                    "photos": [str(frame.resolve())],
+                }],
+                "photos": [str(frame.resolve())],
+            }
+
+            with patch(
+                "scripts.run_xpano_prepare_project.build_ordinary_video_track",
+                return_value=manifest_track,
+            ) as build:
+                prepare_project(root, project["revision"], ["video-track"])
+
+            self.assertEqual(build.call_args.kwargs["color_lut_path"], str(lut))
+
+    def test_prepare_project_resolves_the_bundled_dji_lut_for_osv_preset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            video = Path(tmp) / "DJI_0001.osv"
+            frame = root / "work" / "frames" / "pano-track" / "left.jpg"
+            video.write_bytes(b"video")
+            frame.parent.mkdir(parents=True)
+            Image.new("RGB", (100, 80), (32, 64, 96)).save(frame, "JPEG")
+            project = json.loads(
+                (Path(__file__).parents[1] / "schemas" / "fixtures" / "xpano_project_v3.example.json").read_text(encoding="utf-8")
+            )
+            project["tracks"] = [{
+                "id": "pano-track",
+                "type": "panoramic_video",
+                "label": "DJI panorama",
+                "sourcePath": str(video),
+                "sourceFingerprint": {"size": 5, "mtimeNs": 0},
+                "cameraProfile": None,
+                "trim": None,
+                "extraction": {
+                    "framesPerSecond": 1.0,
+                    "frameLimit": 0,
+                    "colorLutPreset": "builtin:dji-osmo360-dlogm-rec709",
+                },
+                "status": "draft",
+                "items": [],
+            }]
+            (root / "xpano_project.json").write_text(json.dumps(project), encoding="utf-8")
+            manifest_track = {
+                "track_id": "track_001_dji",
+                "track_type": "panorama_video",
+                "device_label": "dji",
+                "source_paths": [str(video.resolve())],
+                "frames_per_second": 1.0,
+                "max_frames": 0,
+                "start_time_seconds": 0.0,
+                "end_time_seconds": 0.0,
+                "metashape_mode": "dual_fisheye_station",
+                "export_mode": "cubemap",
+                "left_sensor_label": "track_001_dji_left",
+                "right_sensor_label": "track_001_dji_right",
+                "frames": [{"left": str(frame.resolve()), "right": str(frame.resolve())}],
+            }
+
+            with patch(
+                "scripts.run_xpano_prepare_project.build_panorama_track",
+                return_value=manifest_track,
+            ) as build:
+                prepare_project(root, project["revision"], ["pano-track"])
+
+            self.assertEqual(
+                build.call_args.kwargs["color_lut_path"],
+                str(Path(__file__).parents[1] / "luts" / "dji-osmo360-dlogm-rec709-v1.cube"),
+            )
+
     def test_photo_preview_is_emitted_before_second_identity_is_scanned(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "project"

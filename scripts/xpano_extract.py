@@ -3,8 +3,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import piexif
@@ -172,6 +174,67 @@ def _popen_creationflags():
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def _video_filter(fps, prepared_lut):
+    filter_graph = f"fps={fps}"
+    if prepared_lut is not None:
+        filter_graph += ",lut3d=file=lut.cube:interp=tetrahedral,format=yuvj420p"
+    return filter_graph
+
+
+def _validate_prepared_lut(prepared_lut):
+    prepared_lut = Path(prepared_lut)
+    command = [
+        locate_ffmpeg(),
+        "-hide_banner",
+        "-nostdin",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=2x2:d=0.04",
+        "-vf",
+        "lut3d=file=lut.cube:interp=tetrahedral,format=yuvj420p",
+        "-frames:v",
+        "1",
+        "-f",
+        "null",
+        "-",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=str(prepared_lut.parent),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_popen_creationflags(),
+    )
+    if result.returncode != 0:
+        tail = "\n".join((result.stdout or "").splitlines()[-12:])
+        raise ValueError(f"invalid color LUT: {tail or 'FFmpeg rejected the .cube file'}")
+
+
+@contextmanager
+def _prepare_color_lut(color_lut_path):
+    if not color_lut_path:
+        yield None
+        return
+    source = Path(color_lut_path)
+    if source.suffix.lower() != ".cube":
+        raise ValueError(f"color LUT must be a .cube file: {source}")
+    if not source.is_file():
+        raise FileNotFoundError(f"color LUT does not exist or is not a file: {source}")
+    with tempfile.TemporaryDirectory(prefix="xpano-lut-") as temporary_directory:
+        prepared = Path(temporary_directory) / "lut.cube"
+        shutil.copyfile(source, prepared)
+        try:
+            _validate_prepared_lut(prepared)
+        except ValueError as error:
+            raise ValueError(f"invalid color LUT {source.name}: {error}") from error
+        yield prepared
+
+
 def _count_generated_pairs(out_root: Path, base_name: str):
     if not out_root or not base_name:
         return 0
@@ -224,6 +287,7 @@ def _run_ffmpeg(
     preview_mode="pair",
     start_time_seconds=0.0,
     end_time_seconds=0.0,
+    cwd=None,
 ):
     expected_frames = _expected_frame_count(
         input_path,
@@ -247,6 +311,7 @@ def _run_ffmpeg(
         encoding="utf-8",
         errors="replace",
         creationflags=_popen_creationflags(),
+        cwd=str(cwd) if cwd else None,
     )
     output_lines = []
     last_frame = 0
@@ -345,7 +410,7 @@ def _run_ffmpeg(
 
 
 def _extract_one(args):
-    task, fps, out_root, max_frames, preview_cb, progress_cb, log_cb, model_prefix, start_time_seconds, end_time_seconds = args
+    task, fps, out_root, max_frames, preview_cb, progress_cb, log_cb, model_prefix, start_time_seconds, end_time_seconds, prepared_lut = args
     left = task["left_file"]
     right = task["right_file"]
     base_name = task["clean_name"]
@@ -356,13 +421,13 @@ def _extract_one(args):
                 locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
                 *_ffmpeg_input_args(left, input_time_args, hardware_args),
                 *_ffmpeg_input_args(right, input_time_args, hardware_args),
-                "-map", "0:0", "-vf", f"fps={fps}",
+                "-map", "0:0", "-vf", _video_filter(fps, prepared_lut),
             ]
             _append_frame_limit(cmd, max_frames)
             cmd.extend([
                 "-q:v", "2",
                 str(out_root / f"{base_name}_L_%05d.jpg"),
-                "-map", "1:0", "-vf", f"fps={fps}",
+                "-map", "1:0", "-vf", _video_filter(fps, prepared_lut),
             ])
             _append_frame_limit(cmd, max_frames)
             cmd.extend([
@@ -373,13 +438,13 @@ def _extract_one(args):
         cmd = [
             locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
             *_ffmpeg_input_args(left, input_time_args, hardware_args),
-            "-map", "0:0", "-vf", f"fps={fps}",
+            "-map", "0:0", "-vf", _video_filter(fps, prepared_lut),
         ]
         _append_frame_limit(cmd, max_frames)
         cmd.extend([
             "-q:v", "2",
             str(out_root / f"{base_name}_L_%05d.jpg"),
-            "-map", "0:1", "-vf", f"fps={fps}",
+            "-map", "0:1", "-vf", _video_filter(fps, prepared_lut),
         ])
         _append_frame_limit(cmd, max_frames)
         cmd.extend([
@@ -404,6 +469,7 @@ def _extract_one(args):
         start_time_seconds=start_time_seconds,
         end_time_seconds=end_time_seconds,
         log_cb=log_cb,
+        cwd=prepared_lut.parent if prepared_lut else None,
     )
 
     left_files = sorted(out_root.glob(f"{base_name}_L_*.jpg"))
@@ -442,10 +508,14 @@ def extract_frames(
     progress_cb=None,
     log_cb=None,
     model_prefix=None,
+    color_lut_path=None,
 ):
     input_path = Path(input_path)
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
+    if color_lut_path:
+        input_path = input_path.resolve()
+        out_root = out_root.resolve()
     files = [input_path]
     pair_map = {}
     if input_path.suffix.lower() == ".insv":
@@ -465,20 +535,22 @@ def extract_frames(
     }
     if progress_cb:
         progress_cb(0, max_frames if max_frames and max_frames > 0 else 1)
-    extracted = _extract_one(
-        (
-            task,
-            fps,
-            out_root,
-            max_frames,
-            preview_cb,
-            progress_cb,
-            log_cb,
-            model_prefix,
-            start_time_seconds,
-            end_time_seconds,
+    with _prepare_color_lut(color_lut_path) as prepared_lut:
+        extracted = _extract_one(
+            (
+                task,
+                fps,
+                out_root,
+                max_frames,
+                preview_cb,
+                progress_cb,
+                log_cb,
+                model_prefix,
+                start_time_seconds,
+                end_time_seconds,
+                prepared_lut,
+            )
         )
-    )
     if progress_cb:
         progress_cb(1, 1)
     return extracted
@@ -495,38 +567,44 @@ def extract_single_video_frames(
     progress_cb=None,
     log_cb=None,
     model_prefix=None,
+    color_lut_path=None,
 ):
     input_path = Path(input_path)
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
+    if color_lut_path:
+        input_path = input_path.resolve()
+        out_root = out_root.resolve()
     base_name = model_prefix or input_path.stem
     input_time_args = _input_time_args(start_time_seconds, end_time_seconds)
     def command_factory(_name, hardware_args):
         cmd = [
             locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
             *_ffmpeg_input_args(input_path, input_time_args, hardware_args),
-            "-map", "0:v:0", "-vf", f"fps={fps}",
+            "-map", "0:v:0", "-vf", _video_filter(fps, prepared_lut),
         ]
         _append_frame_limit(cmd, max_frames)
         cmd.extend(["-q:v", "2", str(out_root / f"{base_name}_%05d.jpg")])
         return cmd
     if progress_cb:
         progress_cb(0, max_frames if max_frames and max_frames > 0 else 1)
-    _run_ffmpeg_with_hardware_fallback(
-        command_factory,
-        input_path,
-        fps,
-        max_frames,
-        cleanup_cb=lambda: _remove_generated_files(out_root, [f"{base_name}_*.jpg"]),
-        progress_cb=progress_cb,
-        out_root=out_root,
-        base_name=base_name,
-        preview_cb=preview_cb,
-        preview_mode="single",
-        start_time_seconds=start_time_seconds,
-        end_time_seconds=end_time_seconds,
-        log_cb=log_cb,
-    )
+    with _prepare_color_lut(color_lut_path) as prepared_lut:
+        _run_ffmpeg_with_hardware_fallback(
+            command_factory,
+            input_path,
+            fps,
+            max_frames,
+            cleanup_cb=lambda: _remove_generated_files(out_root, [f"{base_name}_*.jpg"]),
+            progress_cb=progress_cb,
+            out_root=out_root,
+            base_name=base_name,
+            preview_cb=preview_cb,
+            preview_mode="single",
+            start_time_seconds=start_time_seconds,
+            end_time_seconds=end_time_seconds,
+            log_cb=log_cb,
+            cwd=prepared_lut.parent if prepared_lut else None,
+        )
 
     frame_files = sorted(out_root.glob(f"{base_name}_*.jpg"))
     if max_frames and max_frames > 0:

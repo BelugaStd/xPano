@@ -896,6 +896,29 @@
 - Feasibility is confirmed. The maintainable first implementation is an optional per-video-track `colorLutPath`, propagated through the existing project preparation chain and applied in the shared extractor as `fps -> lut3d(tetrahedral) -> yuvj420p`. The source LUT is copied to a temporary ASCII basename and prevalidated with bundled FFmpeg; invalid LUTs fail visibly and never fall back to ungraded extraction.
 - The complete implementation order, file-level changes, regression matrix, runtime acceptance criteria and explicit non-goals are recorded in `docs/LUT_RESTORATION_INTEGRATION_PLAN.md`.
 
+# Phase 61 LUT restoration implementation
+
+- Project schema remains v3. Rust `ExtractionSettings` now deserializes a missing `colorLutPath` as `None` and omits `None` during serialization, so old projects retain their existing JSON shape.
+- LUT ownership is per panorama/ordinary-video track. Import/update validates a regular `.cube` file; photo tracks reject LUT state; editing or clearing the LUT uses existing extraction equality and stales only the target track plus downstream reconstruction.
+- Media-job preflight rechecks the selected LUT before writing `work/media_job.json` or changing track status, so a moved/deleted LUT cannot leave a false running state.
+- The shared extractor copies the selected file to one temporary `lut.cube`, validates that snapshot with FFmpeg, and retains the same working directory through CUDA, D3D11VA and software attempts. Temporary content is removed on success or failure.
+- The enabled filter is exactly `fps=<rate>,lut3d=file=lut.cube:interp=tetrahedral,format=yuvj420p`; the no-LUT filter remains exactly `fps=<rate>` with no temporary snapshot or changed working directory.
+- Prepared panorama eyes use identical filter graphs. Ordinary-video frames, streamed prepared previews, generated thumbnails and later alignment inputs all derive from the same transformed JPEG files.
+- The existing ready-track settings button now opens a real edit state. Both import and edit surfaces provide one compact video-only LUT picker/clear control; cancelling restores persisted values.
+
+# Phase 62 bundled camera LUT presets
+
+- The current upstream reference does not bundle or identify camera-specific LUTs; it accepts one manually selected `.cube` path for all jobs.
+- The repository and `C:\Users\Beluga\Downloads` contain no `.cube` or `.3dl` LUT asset available for packaging.
+- Existing panorama extension detection is reliable at the family level: `.insv` maps to Insta360 and `.osv` maps to DJI/Osmo. It is not proof of a clip's capture color profile, so it cannot safely auto-enable a Log/Flat restoration LUT.
+- The current release path already has the required primitives: `tool_resolver::resolve_resource_path` resolves Tauri resources and portable roots, while `scripts/release_staging.py` copies a staged tree and hashes every release file in `release-manifest.json`.
+- The durable design is a stable builtin preset ID resolved at runtime, not a path under an installation-specific Tauri resource directory. Manual `colorLutPath` remains an explicit advanced override.
+- Official source evidence: `https://www.insta360.com/cn/download/i-log` publishes separate I-Log LUT archives for multiple camera models, including ONE X, ONE X2, X3, X5, ONE R and ONE RS. This confirms that `.insv` is not a sufficient key for a single correct builtin LUT.
+- DJI's initial direct product-download URL resolved to an official 404 page, so no DJI LUT file or redistribution term was accepted into the project. This failed lookup is logged; it must not be replaced by an unofficial mirror.
+- User narrowed the product scope: `.insv` stays manual LUT selection; only `.osv` maps to the DJI Osmo 360 D-Log M -> Rec.709 builtin preset when the user enables restoration.
+- Asset retrieval attempts failed independently: DJI product/download paths did not expose a LUT asset, direct GitHub raw/API requests timed out, the configured `127.0.0.1:7897` proxy is unavailable, and a shallow Git clone could not connect. No LUT was added to the repository. The implementation is blocked until the user supplies the approved `.cube` file or a reachable official source.
+- Real FFmpeg acceptance succeeded with a Unicode/space/comma/apostrophe source path, two extracted frames and `yuvj420p` output. Full gates passed with 296 Python, 104 Rust and 52 frontend tests plus lint/build/compile/diff checks.
+
 # Phase 55 alignment-quality and Component investigation
 
 - The old `0.1.0` source tree is locally available, so the investigation can compare executable behavior and exact parameter construction rather than infer from release history.

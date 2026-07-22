@@ -79,6 +79,7 @@ class ReleaseStagingTests(unittest.TestCase):
             "runtime/THIRD_PARTY_NOTICES.txt": b"NumPy BSD-3-Clause\nOpenCV Apache-2.0\n",
             "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe": b"lichtfeld",
             "runtime/lichtfeld-studio/LICENSE": b"GPL-3.0",
+            "luts/dji-osmo360-dlogm-rec709-v1.cube": b"dji-lut",
             **{
                 f"runtime/windows-x64/{name}": content
                 for name, content in windows_runtime.items()
@@ -198,6 +199,7 @@ class ReleaseStagingTests(unittest.TestCase):
             self.assertTrue((stage / "scripts/reexport_colmap_from_project.py").is_file())
             self.assertTrue((stage / "scripts/inspect_metashape_components.py").is_file())
             self.assertTrue((stage / "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe").is_file())
+            self.assertTrue((stage / "luts/dji-osmo360-dlogm-rec709-v1.cube").is_file())
             self.assertTrue((stage / "tools/offline-wheels/metashape/numpy-1.26.4-cp39-cp39-win_amd64.whl").is_file())
             self.assertTrue((stage / "runtime/bundled-runtime-manifest.json").is_file())
             self.assertTrue((stage / "runtime/THIRD_PARTY_NOTICES.txt").is_file())
@@ -222,6 +224,7 @@ class ReleaseStagingTests(unittest.TestCase):
             self.assertEqual(manifest["version"], "1.2.3")
             self.assertEqual(paths, sorted(paths))
             self.assertIn("WebView2Loader.dll", paths)
+            self.assertIn("luts/dji-osmo360-dlogm-rec709-v1.cube", paths)
             self.assertIn("tools/ffmpeg/bin/ffmpeg.exe", paths)
             self.assertTrue(all(len(item["sha256"]) == 64 for item in manifest["files"]))
 

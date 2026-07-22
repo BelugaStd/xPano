@@ -4,7 +4,7 @@
 在保留现有用户改动的前提下，完整实现 `docs/UI_WORKSPACE_REDESIGN_SPEC.md` 的阶段 3（对齐工作区）和阶段 4（成果与后处理），使用 `D:\3DRegistration\test` 的真实素材打通抽帧、对齐、点云预览和致密化；随后实现可重复、可诊断、安装即用的 Windows 安装器。CUDA、torch、Open3D 等致密化大依赖不随包发布，缺失时按受控镜像源自动配置；本任务期间禁止实际下载大包，使用下载计划、假源和小型探针验收。
 
 ## Current Phase
-Phase 60 complete
+Phase 62 in progress
 
 ## Phases
 
@@ -1117,3 +1117,94 @@ Determine exactly how the updated upstream `pano_extractor_GUI.py` implements LU
 - The first synthetic FFmpeg LUT probe decoded subprocess stderr with the Windows GBK default. FFmpeg echoed the Unicode/special-character test path as UTF-8, causing `UnicodeDecodeError` and then a diagnostic-only `None.strip()` failure. No product files changed; the probe will be rerun with explicit UTF-8 replacement decoding.
 - The first identity-LUT pixel comparison used blue-fastest cube ordering, which is not the `.cube` red-fastest ordering expected by FFmpeg and produced an intentional-looking channel swap. The test fixture was corrected before drawing any color-fidelity conclusion.
 - A source read targeted nonexistent `scripts/prepare_project.py`; repository search identified the actual project media entrypoint as `scripts/run_xpano_prepare_project.py`. No files changed; subsequent tracing uses the registered entrypoint.
+
+# Phase 61: implement per-video LUT restoration
+
+## Goal
+
+Implement the approved LUT restoration plan end to end while preserving the exact no-LUT extraction path, existing decoder fallback, preview/alignment consistency and project v3 compatibility. Do not package or publish a release.
+
+## Plan
+
+- [x] Add RED Rust contract, validation and track-invalidation tests.
+- [x] Add RED Python filter, safe-path snapshot, fallback and project-propagation tests.
+- [x] Implement the minimal Rust and Python data/extraction path and turn focused tests green.
+- [x] Add RED frontend helper tests, then implement video-only LUT selection/edit/clear controls.
+- [x] Run focused and full Python/Rust/frontend gates, build, diff hygiene and final code review.
+
+**Status:** complete; LUT restoration is implemented and verified across contracts, extraction, project preparation and media UI. Baseline source commit `6157b7e` remains the pre-feature checkpoint; no installer was built.
+
+# Phase 62: bundled camera LUT presets
+
+## Goal
+
+Extend the completed per-video LUT feature so a user can enable one simple color-restoration switch while importing an `.osv` panorama video. It selects an xPano-bundled DJI Osmo 360 D-Log M -> Rec.709 preset. `.insv` remains manual-LUT-only. Never store an installation-specific resource path in a project, and fail visibly if the selected bundled resource is absent or corrupt.
+
+## Plan
+
+- [x] Inspect the existing per-track LUT contract, import type detection, resource resolver, release staging and the upstream reference implementation.
+- [x] Obtain the user-supplied DJI D-Log M -> Rec.709 `.cube` asset and record its source/hash. Its header identifies Mavic 3 Pro rather than Osmo 360; retain that caveat in the bundled LUT documentation.
+- [x] Add a stable builtin preset identifier to the project contract alongside the existing manual path, with strict mutual-exclusion, old-project compatibility and stale/invalidation tests.
+- [x] Resolve builtin identifiers only at runtime through the packaged resource resolver; validate the selected resource hash before the media job becomes running.
+- [x] Update panorama import and track editing UI: restoration switch is available for `.osv` panorama tracks only and defaults off; enabling assigns the DJI builtin preset. `.insv` keeps the current manual selection control and no automatic preset.
+- [x] Stage the LUT assets into the release resources and add release-manifest coverage.
+- [x] Run full suites, production build and static packaging checks. A real FFmpeg extraction through the bundled LUT has passed.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Switch defaults off; automatic preset applies only to `.osv` | User explicitly scoped automatic restoration to DJI Osmo 360 D-Log M. `.insv` stays manual because Insta360's official download page ships distinct LUT archives by model. |
+| Persist `builtin:<id>` rather than a packaged path | Application resources move between development, NSIS installation and upgrades. A stable ID keeps projects portable and lets the runtime resolve the local installed asset. |
+| Builtin and custom selections are mutually exclusive | One effective LUT is easy to explain and prevents accidental LUT stacking. |
+| Missing/tampered builtin LUT fails the job | Continuing without selected restoration would silently create different pixels than the project configuration promises. |
+
+**Status:** complete. The supplied LUT is packaged exactly as provided and bound to the `.osv` switch by product decision; its non-Osmo 360 header remains disclosed in `luts/README.md`. No installer was built.
+
+## Errors Encountered
+
+- A read-only PowerShell size inventory used a host-incompatible `foreach (...) { ... } |` pipeline and failed without changing files. Commit scope was verified instead through Git status and explicit staging.
+- The first focused Cargo command passed two test filters even though Cargo accepts one; it changed nothing and was rerun with the shared `color_lut` filter, which produced the intended RED failure.
+- A repository search used Unix-style wildcard path arguments that Windows `rg` rejected. The retry used `-g '*.rs'` and found the complete Rust literal surface.
+- The first project-propagation test returned a mocked frame outside the project root, correctly triggering the existing artifact-containment guard. The fixture was moved under `work/frames`; product code was unchanged.
+- The first real special-path probe sent literal Chinese characters through a PowerShell stdin encoding boundary, turning them into Windows-invalid `?` characters before Python ran. The retry used ASCII `\u` escapes, created the intended Unicode path, and completed successfully.
+- Playwright's default Chrome channel exited during startup with code 13. The same CLI workflow was rerun with the installed Edge channel and completed desktop-width UI inspection and screenshots.
+- `cargo fmt --check` remains unavailable because `cargo-fmt.exe` is not installed for `stable-x86_64-pc-windows-gnu`. Rust compilation and all 104 Rust tests pass; no toolchain component was installed or repository formatting rewritten.
+
+# Phase 63: restoration and style LUT chain
+
+## Goal
+
+Allow every video track to apply one optional user-selected style LUT. An `.osv` panorama track may additionally apply the existing bundled restoration preset first. Non-Log video must be able to use only the style LUT. Preserve old projects that use `colorLutPath`, keep the no-LUT path unchanged, and limit the product to two ordered transforms rather than an arbitrary LUT graph.
+
+## Design
+
+| Layer | Stored setting | Applies to | Order |
+|-------|----------------|------------|-------|
+| Restoration | existing `colorLutPreset` | `.osv` panorama only | first |
+| Style | new `styleLutPath` | panorama and ordinary video | second |
+
+`colorLutPath` is the old single-manual-LUT key. It migrates to `styleLutPath` when an old project is read or next saved. `colorLutPreset` remains the existing stable packaged-resource identifier, avoiding a needless rename of the portable preset contract.
+
+The FFmpeg graph is conditional: `fps -> [restore lut3d] -> [style lut3d] -> yuvj420p`. A non-Log source with only a style LUT uses `fps -> style lut3d -> yuvj420p`; a source with neither LUT retains the current `fps`-only graph and no temporary LUT directory.
+
+## Plan
+
+- [ ] Add RED contract/migration tests: old `colorLutPath` becomes `styleLutPath`, serializes only the new key, and restoration may coexist with style.
+- [ ] Replace the single manual-path field across Rust, TypeScript and Python with `styleLutPath`, retaining old-key read compatibility and clearing both layers when a track becomes non-video.
+- [ ] Keep strict preflight: style must be an existing `.cube` on a video track; restoration remains `.osv`-only and hash-checked; failures occur before status/marker mutation.
+- [ ] Propagate separate restoration/style paths through project preparation and track builders.
+- [ ] Replace the one-file extractor staging with one safe temporary bundle (`restore.cube`, `style.cube`), validate each through FFmpeg, and reuse the ordered graph for both panorama eyes/streams and normal-video frames.
+- [ ] Redesign media controls: `.osv` gets a default-off restoration toggle plus style picker; `.insv` and ordinary video get only the style picker. Leaving eligible `.osv` clears restoration but preserves style.
+- [ ] Test direct style usage, restoration-plus-style order, legacy migration, special paths, no-LUT baseline, eye parity, and preflight non-mutation; then run all gates and a real two-stage FFmpeg smoke extraction.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Maximum two stages | Covers the real workflow without an unbounded, slow and hard-to-explain LUT graph. |
+| Fixed restoration-before-style order | Style LUTs are normally authored for display-referred Rec.709/sRGB imagery, not camera Log input. |
+| Style works without restoration | Required for Rec.709/non-Log footage; it does not impose a D-Log transform. |
+| Preserve the no-LUT fast path | LUT processing is CPU work; material without either option keeps current extraction cost and output behavior. |
+
+**Status:** planned only. No Phase 63 product code has been written and no release build is in scope.

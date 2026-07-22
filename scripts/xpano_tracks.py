@@ -192,6 +192,7 @@ def build_panorama_track(
     preview_cb=None,
     progress_cb=None,
     log_cb=None,
+    color_lut_path=None,
 ):
     frames_per_second = validate_frames_per_second(frames_per_second)
     video = Path(video_path).resolve()
@@ -214,6 +215,7 @@ def build_panorama_track(
         progress_cb=progress_cb,
         log_cb=log_cb,
         model_prefix=track_id,
+        color_lut_path=color_lut_path,
     )
     frames = []
     for frame_idx, (left_path, right_path) in enumerate(extracted, 1):
@@ -255,6 +257,7 @@ def build_ordinary_video_track(
     progress_cb=None,
     log_cb=None,
     camera_profile=DEFAULT_ORDINARY_CAMERA_PROFILE,
+    color_lut_path=None,
 ):
     frames_per_second = validate_frames_per_second(frames_per_second)
     video = Path(video_path).resolve()
@@ -277,6 +280,7 @@ def build_ordinary_video_track(
         progress_cb=progress_cb,
         log_cb=log_cb,
         model_prefix=track_id,
+        color_lut_path=color_lut_path,
     )
     photos = [str(Path(path).resolve()) for path in extracted]
     sensor_label = f"{track_id}_frame"

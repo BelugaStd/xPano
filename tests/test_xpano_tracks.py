@@ -57,7 +57,9 @@ class PhotoTrackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             video = root / "clip.mp4"
+            lut = root / "restore.cube"
             video.write_bytes(b"video")
+            lut.write_text("LUT_3D_SIZE 2\n", encoding="utf-8")
             frame = root / "frame.jpg"
             Image.new("RGB", (100, 80), (32, 64, 96)).save(frame, "JPEG")
 
@@ -68,9 +70,11 @@ class PhotoTrackTests(unittest.TestCase):
                     root / "work",
                     frames_per_second=2.0,
                     max_frames=0,
+                    color_lut_path=lut,
                 )
 
             self.assertEqual(extract.call_args.kwargs["fps"], 2.0)
+            self.assertEqual(extract.call_args.kwargs["color_lut_path"], lut)
             self.assertEqual(track["frames_per_second"], 2.0)
             self.assertNotIn("seconds_per_frame", track)
 

@@ -979,3 +979,34 @@
 - Confirmed the smallest stable ownership split: Rust validates and persists an optional per-video-track path; `run_xpano_prepare_project.py` propagates it; `xpano_extract.py` owns one copied, prevalidated temporary `lut.cube` snapshot across decoder fallback attempts.
 - Recorded the implementation plan in `docs/LUT_RESTORATION_INTEGRATION_PLAN.md`, including test-first order, special-path handling, explicit `yuvj420p`, failure semantics, performance limits and non-goals.
 - Phase 60 complete. Feasibility is confirmed; no product code, package, version, commit or external state was changed.
+
+# 2026-07-20 Phase 61 started
+
+- Created source baseline commit `6157b7e` (`feat: restore alignment and component workflows`) before LUT implementation.
+- The commit contains tracked source plus new Component/LUT design source files; `binaries/`, `runtime/`, `tools/offline-wheels/` and `tmp/` release/local payloads remain untracked.
+- Started test-first implementation of the optional per-video-track LUT contract, shared FFmpeg transform and media UI. No installer or external publication is in scope.
+- RED was confirmed independently in Rust (missing contract field), Python (missing extractor helpers) and frontend tests (missing pure LUT helper).
+- Implemented optional project-v3 `colorLutPath` persistence and validation, target-only stale invalidation, and pre-job missing-file rejection before marker/status mutation.
+- Implemented one copied `lut.cube` snapshot per extraction, FFmpeg parse preflight, `fps -> lut3d(tetrahedral) -> yuvj420p`, identical dual-eye filters and stable working-directory propagation across decoder fallback.
+- Added import/edit/clear UI for video tracks and made the existing ready-track settings button enter a real editable state. Photo tracks do not expose or retain LUT configuration.
+- Focused Rust, Python and frontend tests, frontend lint and production build pass.
+- A real FFmpeg probe extracted two frames from a generated MP4 using a `.CUBE` under a Unicode/space/comma/apostrophe path; ffprobe reported `yuvj420p`.
+- Full verification passed: 296 Python tests, 104 Rust tests, 52 frontend tests, frontend lint/build, Python compile-all and `git diff --check`.
+- Playwright/Edge verified the real media workspace at 1440x900 and 1024x768: the ready-track settings action opens the editor, the LUT row is visible without overlap, and console output contains no application error.
+- Final review found no product blocker. No-LUT commands retain `fps=<rate>` and no temporary working directory; LUT failures remain visible and cannot silently publish ungraded frames.
+- Phase 61 complete. The Vite development server remains available at `http://127.0.0.1:1420/`; no installer, tag, push or LUT implementation commit was created.
+
+# 2026-07-20 Phase 62 started
+
+- User approved bundled automatic LUT presets for panorama imports. Created Phase 62 plan: opening a color-restoration switch will select the extension-specific bundled preset, while custom LUT selection remains available as an advanced override.
+- Verified the upstream reference has no embedded LUT assets and local repository/Downloads inspection found no `.cube` resources. Do not package placeholder, identity or unverified LUT data as color restoration.
+- Official Insta360 I-Log download data shows several model-specific LUT archives rather than one universal `.insv` LUT. The Phase 62 plan was corrected to require exact model/profile resolution; extension-only automatic mapping is unsafe and is not being implemented as a false one-click feature.
+- User refined Phase 62: keep `.insv` manual-only and auto-select only DJI Osmo 360 D-Log M -> Rec.709 for `.osv` after the user enables restoration. Updated the plan accordingly.
+- User supplied `DJI Osmo 360 D-Log M to Rec.709 V1.cube`; copied it as `luts/dji-osmo360-dlogm-rec709-v1.cube` and recorded SHA-256 `b18162854ab47702068410c33afa98a8cb6eef159fc5a04ce0e65fad0fd8947e`.
+- Implemented the stable `builtin:dji-osmo360-dlogm-rec709` project setting. Rust rejects non-`.osv`, mutually exclusive manual/preset selections, missing resources and checksum mismatches before it writes the running media-job marker; Python resolves and revalidates the same packaged file before extraction.
+- The import/editor UI now presents a default-off restoration toggle for `.osv` tracks, while `.insv` retains only the custom `.cube` picker. Release staging and Tauri resources include `luts/`.
+- Fixed the final JSX parse error and the mocked panorama manifest's missing required alignment fields. Focused Python tests (29) and the production frontend build now pass.
+- Added a Rust preflight regression proving a valid `.osv` builtin preset is checked and then starts the job. The first FFmpeg smoke invocation lost Python string quotes through PowerShell command nesting and made no product change; the retry used a PowerShell double-quoted Python expression and successfully extracted a real JPEG through the packaged LUT.
+- Phase 62 verification complete: Python 299/299, Rust 106/106, frontend 53/53, frontend lint, TypeScript/Vite production build, Python `compileall`, and `git diff --check` all pass. No installer, release artifact, tag, commit or push was created.
+- External LUT acquisition is currently blocked: DJI pages did not expose a direct asset and GitHub/CDN retrieval failed across direct API, raw file, proxy and shallow-clone attempts. No code was written that would advertise an approximate or missing LUT as a real restoration preset.
+- Phase 63 planned at user request: add independent `styleLutPath` for every video, retain `.osv`-only restoration through `colorLutPreset`, migrate legacy `colorLutPath` to the style layer, and restrict extraction to a fixed restoration-then-style chain. No Phase 63 implementation has started.

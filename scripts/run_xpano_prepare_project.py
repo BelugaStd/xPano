@@ -15,6 +15,7 @@ if str(APP_ROOT) not in sys.path:
 from PIL import Image, ImageOps
 
 from scripts import xpano_tracks
+from scripts.xpano_lut_presets import resolve_color_lut_path
 from scripts.xpano_tracks import (
     build_ordinary_video_track,
     build_panorama_track,
@@ -260,6 +261,7 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
         trim = track.get("trim") or {}
         frames_per_second = _frames_per_second(extraction)
         frame_limit = int(extraction.get("frameLimit") or 0)
+        color_lut_path = resolve_color_lut_path(APP_ROOT, extraction)
         start_time = float(trim.get("start") or 0.0)
         end_time = float(trim.get("end") or 0.0)
         base_fraction = target_index / total_tracks
@@ -298,6 +300,7 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
                 preview_cb=preview_pair,
                 progress_cb=progress,
                 log_cb=emit_line,
+                color_lut_path=str(color_lut_path) if color_lut_path else None,
             )
             source_items = manifest_track["frames"]
             old_selection = {item["id"]: item.get("selected", True) for item in track.get("items", [])}
@@ -329,6 +332,7 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
                 progress_cb=progress,
                 log_cb=emit_line,
                 camera_profile=track.get("cameraProfile") or "wide",
+                color_lut_path=str(color_lut_path) if color_lut_path else None,
             )
             source_items = manifest_track["photos"]
             old_selection = {item["id"]: item.get("selected", True) for item in track.get("items", [])}

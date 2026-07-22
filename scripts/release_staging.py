@@ -244,6 +244,7 @@ def stage_release_resources(
             "plugin",
         )
         _copy_tree(root / "runtime", temporary / "runtime", "runtime")
+        _copy_tree(root / "luts", temporary / "luts", "luts")
         try:
             deploy_windows_runtime(
                 root,
@@ -297,6 +298,7 @@ def stage_release_resources(
             temporary / "runtime" / "THIRD_PARTY_NOTICES.txt",
             temporary / "runtime" / "lichtfeld-studio" / "bin" / "LichtFeld-Studio.exe",
             temporary / "runtime" / "lichtfeld-studio" / "LICENSE",
+            temporary / "luts" / "dji-osmo360-dlogm-rec709-v1.cube",
             temporary / "WebView2Loader.dll",
         ]
         missing = [str(path) for path in required if not path.is_file()]

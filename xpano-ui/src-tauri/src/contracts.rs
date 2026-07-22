@@ -5,6 +5,7 @@ use std::path::{Component, Path};
 pub const PROJECT_SCHEMA_VERSION: u32 = 3;
 pub const JOB_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const EXECUTION_PLAN_SCHEMA_VERSION: u32 = 1;
+pub const DJI_OSMO_360_DLOGM_REC709_PRESET: &str = "builtin:dji-osmo360-dlogm-rec709";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +138,10 @@ pub struct ProjectTrim {
 pub struct ExtractionSettings {
     pub frames_per_second: f64,
     pub frame_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_lut_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_lut_preset: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -279,6 +284,45 @@ impl XpanoProjectV2 {
             }
             if track.extraction.frames_per_second <= 0.0 || !track.extraction.frames_per_second.is_finite() {
                 return Err(format!("invalid extraction frame rate for track {}", track.id));
+            }
+            if let Some(color_lut_path) = track.extraction.color_lut_path.as_deref() {
+                if !matches!(
+                    track.track_type,
+                    ProjectTrackType::PanoramicVideo | ProjectTrackType::OrdinaryVideo
+                ) {
+                    return Err(format!(
+                        "color LUT is only valid for video track {}",
+                        track.id
+                    ));
+                }
+                let path = Path::new(color_lut_path.trim());
+                if color_lut_path.trim().is_empty()
+                    || !path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("cube"))
+                {
+                    return Err(format!("invalid color LUT path for track {}", track.id));
+                }
+            }
+            if let Some(color_lut_preset) = track.extraction.color_lut_preset.as_deref() {
+                if track.extraction.color_lut_path.is_some() {
+                    return Err(format!(
+                        "color LUT path and preset cannot both be set for track {}",
+                        track.id
+                    ));
+                }
+                let is_osv_panorama = track.track_type == ProjectTrackType::PanoramicVideo
+                    && Path::new(&track.source_path)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("osv"));
+                if color_lut_preset != DJI_OSMO_360_DLOGM_REC709_PRESET || !is_osv_panorama {
+                    return Err(format!(
+                        "color LUT preset is only valid for .osv panorama tracks: {}",
+                        track.id
+                    ));
+                }
             }
             if let Some(trim) = &track.trim {
                 if trim.start < 0.0 || trim.end <= trim.start || !trim.start.is_finite() || !trim.end.is_finite() {
@@ -541,10 +585,45 @@ mod tests {
             "../../../schemas/fixtures/xpano_project_v3.example.json"
         ))
         .unwrap();
+        assert_eq!(project.tracks[0].extraction.color_lut_path, None);
         project.validate().unwrap();
 
         project.geometry.variants[0].canonical_path = "D:/machine/points3D.bin".to_string();
         assert!(project.validate().unwrap_err().contains("project-relative"));
+    }
+
+    #[test]
+    fn color_lut_is_optional_and_only_valid_for_video_tracks() {
+        let mut project: XpanoProjectV2 = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/xpano_project_v3.example.json"
+        ))
+        .unwrap();
+        project.tracks[0].extraction.color_lut_path = Some("camera.CUBE".to_string());
+        project.validate().unwrap();
+
+        project.tracks[0].track_type = ProjectTrackType::StandardPhotos;
+        assert!(project
+            .validate()
+            .unwrap_err()
+            .contains("color LUT is only valid for video"));
+    }
+
+    #[test]
+    fn bundled_dji_lut_preset_is_valid_only_for_osv_panorama_tracks() {
+        let mut project: XpanoProjectV2 = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/xpano_project_v3.example.json"
+        ))
+        .unwrap();
+        project.tracks[0].source_path = "D:/captures/DJI_0001.OSV".to_string();
+        project.tracks[0].extraction.color_lut_preset =
+            Some("builtin:dji-osmo360-dlogm-rec709".to_string());
+        project.validate().unwrap();
+
+        project.tracks[0].source_path = "D:/captures/VID_0001_00_0.insv".to_string();
+        assert!(project
+            .validate()
+            .unwrap_err()
+            .contains("only valid for .osv panorama tracks"));
     }
 
     #[test]
