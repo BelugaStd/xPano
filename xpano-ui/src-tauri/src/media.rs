@@ -141,8 +141,8 @@ fn is_photo_extension(extension: &str) -> bool {
 }
 
 fn normalize_color_lut_settings(extraction: &mut ExtractionSettings) {
-    extraction.color_lut_path = extraction
-        .color_lut_path
+    extraction.style_lut_path = extraction
+        .style_lut_path
         .take()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -153,33 +153,21 @@ fn normalize_color_lut_settings(extraction: &mut ExtractionSettings) {
         .filter(|value| !value.is_empty());
 }
 
-fn validate_color_lut_file(
-    track_type: ProjectTrackType,
-    extraction: &ExtractionSettings,
-) -> Result<(), ProjectCommandError> {
-    let Some(value) = extraction.color_lut_path.as_deref() else {
+fn validate_style_lut_file(extraction: &ExtractionSettings) -> Result<(), ProjectCommandError> {
+    let Some(value) = extraction.style_lut_path.as_deref() else {
         return Ok(());
     };
-    if !matches!(
-        track_type,
-        ProjectTrackType::PanoramicVideo | ProjectTrackType::OrdinaryVideo
-    ) {
-        return Err(ProjectCommandError::new(
-            "invalid_media_type",
-            "color LUT is only valid for video tracks",
-        ));
-    }
     let path = Path::new(value);
     if file_extension(path) != "cube" {
         return Err(ProjectCommandError::new(
             "invalid_media_type",
-            "color LUT must be a .cube file",
+            "style LUT must be a .cube file",
         ));
     }
     if !path.is_file() {
         return Err(ProjectCommandError::new(
             "missing_source",
-            format!("color LUT does not exist or is not a file: {}", path.display()),
+            format!("style LUT does not exist or is not a file: {}", path.display()),
         ));
     }
     Ok(())
@@ -211,12 +199,6 @@ fn validate_color_lut_settings(
     source_path: &str,
     extraction: &ExtractionSettings,
 ) -> Result<(), ProjectCommandError> {
-    if extraction.color_lut_path.is_some() && extraction.color_lut_preset.is_some() {
-        return Err(ProjectCommandError::new(
-            "invalid_media_type",
-            "color LUT path and preset cannot both be set",
-        ));
-    }
     if let Some(preset) = extraction.color_lut_preset.as_deref() {
         let is_osv_panorama = track_type == ProjectTrackType::PanoramicVideo
             && file_extension(Path::new(source_path)) == "osv";
@@ -228,7 +210,7 @@ fn validate_color_lut_settings(
         }
         resolve_builtin_color_lut_preset(preset)?;
     }
-    validate_color_lut_file(track_type, extraction)
+    validate_style_lut_file(extraction)
 }
 
 fn source_fingerprint(path: &Path) -> Result<SourceFingerprint, ProjectCommandError> {
@@ -1399,7 +1381,7 @@ mod tests {
                 extraction: ExtractionSettings {
                     frames_per_second: 1.0,
                     frame_limit: 20,
-                    color_lut_path: Some(lut.to_string_lossy().to_string()),
+                    style_lut_path: Some(lut.to_string_lossy().to_string()),
                     color_lut_preset: None,
                 },
             }],
@@ -1411,7 +1393,7 @@ mod tests {
         assert_eq!(updated.tracks[0].status, ProjectTrackStatus::Draft);
         assert_eq!(updated.tracks[0].source_fingerprint.size, 7);
         assert_eq!(
-            updated.tracks[0].extraction.color_lut_path.as_deref(),
+            updated.tracks[0].extraction.style_lut_path.as_deref(),
             Some(lut.to_string_lossy().as_ref())
         );
         assert_eq!(updated.revisions.media, project.revisions.media + 1);
@@ -1444,7 +1426,7 @@ mod tests {
                 extraction: ExtractionSettings {
                     frames_per_second: 1.0,
                     frame_limit: 0,
-                    color_lut_path: None,
+                    style_lut_path: None,
                     color_lut_preset: None,
                 },
             }],
@@ -1501,7 +1483,7 @@ mod tests {
                 extraction: Some(ExtractionSettings {
                     frames_per_second: 2.0,
                     frame_limit: 10,
-                    color_lut_path: None,
+                    style_lut_path: None,
                     color_lut_preset: None,
                 }),
                 camera_profile: None,
@@ -1519,17 +1501,18 @@ mod tests {
     }
 
     #[test]
-    fn photo_import_rejects_color_lut_without_mutating_project() {
+    fn photo_import_accepts_style_lut_and_marks_project_stale() {
         let root = temp_case("photo-color-lut");
         let photos = root.join("photos");
         let lut = root.join("restore.cube");
         std::fs::create_dir_all(&photos).unwrap();
         std::fs::write(photos.join("capture.jpg"), b"photo").unwrap();
         std::fs::write(&lut, b"LUT_3D_SIZE 2").unwrap();
-        let project = fixture_project();
+        let mut project = fixture_project();
+        project.reconstruction.status = ReconstructionStatus::Complete;
         write_project_atomic(&root, &project).unwrap();
 
-        let error = commit_import_impl(
+        let updated = commit_import_impl(
             &root,
             project.revision,
             vec![MediaImportDraft {
@@ -1541,20 +1524,32 @@ mod tests {
                 extraction: ExtractionSettings {
                     frames_per_second: 1.0,
                     frame_limit: 0,
-                    color_lut_path: Some(lut.to_string_lossy().to_string()),
+                    style_lut_path: Some(lut.to_string_lossy().to_string()),
                     color_lut_preset: None,
                 },
             }],
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.code, "invalid_media_type");
-        assert_eq!(read_project(&root).unwrap(), project);
+        assert_eq!(updated.tracks.len(), project.tracks.len() + 1);
+        let imported = updated.tracks.last().unwrap();
+        assert_eq!(imported.track_type, ProjectTrackType::StandardPhotos);
+        assert_eq!(
+            imported.extraction.style_lut_path.as_deref(),
+            Some(lut.to_string_lossy().as_ref())
+        );
+        assert_eq!(updated.revisions.media, project.revisions.media + 1);
+        assert_eq!(
+            updated.revisions.alignment_input,
+            project.revisions.alignment_input + 1
+        );
+        assert_eq!(updated.reconstruction.status, ReconstructionStatus::Stale);
+        assert_eq!(read_project(&root).unwrap(), updated);
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn changing_color_lut_marks_only_the_target_track_stale() {
+    fn changing_style_lut_marks_only_the_target_track_stale() {
         let root = temp_case("color-lut-change");
         let lut = root.join("restore.cube");
         std::fs::write(&lut, b"LUT_3D_SIZE 2").unwrap();
@@ -1574,7 +1569,7 @@ mod tests {
                 extraction: Some(ExtractionSettings {
                     frames_per_second: project.tracks[0].extraction.frames_per_second,
                     frame_limit: project.tracks[0].extraction.frame_limit,
-                    color_lut_path: Some(lut.to_string_lossy().to_string()),
+                    style_lut_path: Some(lut.to_string_lossy().to_string()),
                     color_lut_preset: None,
                 }),
                 camera_profile: None,
@@ -1589,11 +1584,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_color_lut_rejects_media_job_before_state_mutation() {
+    fn missing_style_lut_rejects_media_job_before_state_mutation() {
         let root = temp_case("missing-color-lut");
         let mut project = fixture_project();
         project.tracks[0].status = ProjectTrackStatus::Draft;
-        project.tracks[0].extraction.color_lut_path = Some(
+        project.tracks[0].extraction.style_lut_path = Some(
             root.join("removed.cube").to_string_lossy().to_string(),
         );
         write_project_atomic(&root, &project).unwrap();
@@ -2058,7 +2053,7 @@ mod tests {
                 extraction: Some(ExtractionSettings {
                     frames_per_second: 2.0,
                     frame_limit: 10,
-                    color_lut_path: None,
+                    style_lut_path: None,
                     color_lut_preset: None,
                 }),
                 camera_profile: None,

@@ -32,7 +32,7 @@ function createDrafts(infos: ImportPathInfo[]): MediaImportDraft[] {
       sourcePath: normalizeDisplayPath(info.path),
       cameraProfile: trackType === 'ordinary_video' ? 'wide' : null,
       trim: null,
-      extraction: { framesPerSecond: 1, frameLimit: 0, colorLutPath: null, colorLutPreset: null },
+      extraction: { framesPerSecond: 1, frameLimit: 0, styleLutPath: null, colorLutPreset: null },
       duration: 0,
     }
   })

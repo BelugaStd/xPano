@@ -70,11 +70,11 @@ class PhotoTrackTests(unittest.TestCase):
                     root / "work",
                     frames_per_second=2.0,
                     max_frames=0,
-                    color_lut_path=lut,
+                    style_lut_path=lut,
                 )
 
             self.assertEqual(extract.call_args.kwargs["fps"], 2.0)
-            self.assertEqual(extract.call_args.kwargs["color_lut_path"], lut)
+            self.assertEqual(extract.call_args.kwargs["style_lut_path"], lut)
             self.assertEqual(track["frames_per_second"], 2.0)
             self.assertNotIn("seconds_per_frame", track)
 

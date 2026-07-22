@@ -5,7 +5,7 @@ from pathlib import Path
 
 from scripts.xpano_lut_presets import (
     DJI_OSMO_360_DLOGM_REC709_PRESET,
-    resolve_color_lut_path,
+    resolve_lut_paths,
 )
 
 
@@ -17,21 +17,42 @@ class XpanoLutPresetTests(unittest.TestCase):
             path = root / "luts" / "dji-osmo360-dlogm-rec709-v1.cube"
             path.parent.mkdir()
             path.write_bytes(payload)
+            style = root / "style.cube"
+            style.write_bytes(payload)
 
             self.assertEqual(
-                resolve_color_lut_path(
+                resolve_lut_paths(
                     root,
-                    {"colorLutPreset": DJI_OSMO_360_DLOGM_REC709_PRESET},
+                    {
+                        "colorLutPreset": DJI_OSMO_360_DLOGM_REC709_PRESET,
+                        "styleLutPath": str(style),
+                    },
+                    "panoramic_video",
+                    root / "DJI_0001.osv",
                     expected_sha256=hashlib.sha256(payload).hexdigest(),
-                ),
+                ).restoration,
                 path,
             )
 
+            resolved = resolve_lut_paths(
+                root,
+                {
+                    "colorLutPreset": DJI_OSMO_360_DLOGM_REC709_PRESET,
+                    "styleLutPath": str(style),
+                },
+                "panoramic_video",
+                root / "DJI_0001.osv",
+                expected_sha256=hashlib.sha256(payload).hexdigest(),
+            )
+            self.assertEqual(resolved.restoration, path)
+            self.assertEqual(resolved.style, style)
+
             path.write_bytes(b"tampered")
             with self.assertRaisesRegex(ValueError, "checksum"):
-                resolve_color_lut_path(
+                resolve_lut_paths(
                     root,
                     {"colorLutPreset": DJI_OSMO_360_DLOGM_REC709_PRESET},
+                    "panoramic_video",
+                    root / "DJI_0001.osv",
                     expected_sha256=hashlib.sha256(payload).hexdigest(),
                 )
-

@@ -54,7 +54,7 @@ export interface SourceFingerprint {
 export interface ExtractionSettings {
   framesPerSecond: number
   frameLimit: number
-  colorLutPath?: string | null
+  styleLutPath?: string | null
   colorLutPreset?: string | null
 }
 

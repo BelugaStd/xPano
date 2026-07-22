@@ -4,15 +4,20 @@ import {
   DJI_OSMO_360_DLOGM_REC709_PRESET,
   builtinColorLutPresetForSource,
   isCubeLutPath,
+  isStyleLutSupported,
   isVideoTrackType,
   normalizeColorLutPath,
 } from '../src/features/media/colorLut.ts'
 
-test('color LUT is available only to video tracks', () => {
+test('style LUT is available to video and photo tracks', () => {
   assert.equal(isVideoTrackType('panoramic_video'), true)
   assert.equal(isVideoTrackType('ordinary_video'), true)
   assert.equal(isVideoTrackType('standard_photos'), false)
   assert.equal(isVideoTrackType('aerial_photos'), false)
+  assert.equal(isStyleLutSupported('panoramic_video'), true)
+  assert.equal(isStyleLutSupported('ordinary_video'), true)
+  assert.equal(isStyleLutSupported('standard_photos'), true)
+  assert.equal(isStyleLutSupported('aerial_photos'), true)
 })
 
 test('color LUT paths normalize empty values and accept case-insensitive cube suffixes', () => {

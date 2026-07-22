@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import piexif
@@ -108,6 +109,16 @@ def _apply_exif(img_path: Path, model: str, make: str):
         pass
 
 
+def _copy_photo_exif(source: Path, destination: Path):
+    try:
+        exif = piexif.load(str(source))
+        exif["0th"][piexif.ImageIFD.Orientation] = 1
+        piexif.insert(piexif.dump(exif), str(destination))
+    except Exception:
+        # NOTE: Unsupported or malformed source metadata must not discard a valid styled image.
+        return
+
+
 def _frame_preview(left_path: Path, right_path: Path, preview_cb):
     if preview_cb is None:
         return
@@ -174,15 +185,40 @@ def _popen_creationflags():
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def _video_filter(fps, prepared_lut):
+@dataclass(frozen=True)
+class PreparedLutChain:
+    directory: Path
+    restoration: Path | None
+    style: Path | None
+
+
+def _lut_filters(prepared_luts):
+    if prepared_luts is None:
+        return []
+    filters = []
+    if prepared_luts.restoration is not None:
+        filters.append("lut3d=file=restore.cube:interp=tetrahedral")
+    if prepared_luts.style is not None:
+        filters.append("lut3d=file=style.cube:interp=tetrahedral")
+    return filters
+
+
+def _video_filter(fps, prepared_luts):
     filter_graph = f"fps={fps}"
-    if prepared_lut is not None:
-        filter_graph += ",lut3d=file=lut.cube:interp=tetrahedral,format=yuvj420p"
+    lut_filters = _lut_filters(prepared_luts)
+    if lut_filters:
+        filter_graph += "," + ",".join([*lut_filters, "format=yuvj420p"])
     return filter_graph
 
 
-def _validate_prepared_lut(prepared_lut):
-    prepared_lut = Path(prepared_lut)
+def _style_filter(prepared_luts):
+    filters = _lut_filters(prepared_luts)
+    if not filters:
+        raise ValueError("style LUT is required for image transformation")
+    return ",".join([*filters, "format=yuvj420p"])
+
+
+def _validate_prepared_luts(prepared_luts):
     command = [
         locate_ffmpeg(),
         "-hide_banner",
@@ -192,7 +228,7 @@ def _validate_prepared_lut(prepared_lut):
         "-i",
         "color=c=black:s=2x2:d=0.04",
         "-vf",
-        "lut3d=file=lut.cube:interp=tetrahedral,format=yuvj420p",
+        _style_filter(prepared_luts),
         "-frames:v",
         "1",
         "-f",
@@ -201,7 +237,7 @@ def _validate_prepared_lut(prepared_lut):
     ]
     result = subprocess.run(
         command,
-        cwd=str(prepared_lut.parent),
+        cwd=str(prepared_luts.directory),
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -216,23 +252,78 @@ def _validate_prepared_lut(prepared_lut):
 
 
 @contextmanager
-def _prepare_color_lut(color_lut_path):
-    if not color_lut_path:
+def prepare_lut_chain(restoration_lut_path=None, style_lut_path=None):
+    if not restoration_lut_path and not style_lut_path:
         yield None
         return
-    source = Path(color_lut_path)
-    if source.suffix.lower() != ".cube":
-        raise ValueError(f"color LUT must be a .cube file: {source}")
-    if not source.is_file():
-        raise FileNotFoundError(f"color LUT does not exist or is not a file: {source}")
     with tempfile.TemporaryDirectory(prefix="xpano-lut-") as temporary_directory:
-        prepared = Path(temporary_directory) / "lut.cube"
-        shutil.copyfile(source, prepared)
+        directory = Path(temporary_directory)
+        prepared = {}
+        for name, source_path in (("restore.cube", restoration_lut_path), ("style.cube", style_lut_path)):
+            if not source_path:
+                continue
+            source = Path(source_path)
+            if source.suffix.lower() != ".cube":
+                raise ValueError(f"color LUT must be a .cube file: {source}")
+            if not source.is_file():
+                raise FileNotFoundError(f"color LUT does not exist or is not a file: {source}")
+            destination = directory / name
+            shutil.copyfile(source, destination)
+            prepared[name] = destination
+        chain = PreparedLutChain(
+            directory=directory,
+            restoration=prepared.get("restore.cube"),
+            style=prepared.get("style.cube"),
+        )
         try:
-            _validate_prepared_lut(prepared)
+            _validate_prepared_luts(chain)
         except ValueError as error:
-            raise ValueError(f"invalid color LUT {source.name}: {error}") from error
-        yield prepared
+            raise ValueError(f"invalid color LUT: {error}") from error
+        yield chain
+
+
+def apply_style_lut_to_image(source, destination, prepared_luts):
+    source = Path(source)
+    destination = Path(destination)
+    if prepared_luts is None or prepared_luts.style is None:
+        raise ValueError("style LUT is required for image transformation")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"{destination.stem}.tmp{destination.suffix}")
+    temporary.unlink(missing_ok=True)
+    command = [
+        locate_ffmpeg(),
+        "-hide_banner",
+        "-y",
+        "-nostdin",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-vf",
+        _style_filter(prepared_luts),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(temporary),
+    ]
+    result = subprocess.run(
+        command,
+        cwd=str(prepared_luts.directory),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=_popen_creationflags(),
+    )
+    if result.returncode != 0:
+        temporary.unlink(missing_ok=True)
+        tail = "\n".join((result.stdout or "").splitlines()[-12:])
+        raise ValueError(f"failed to apply style LUT to {source.name}: {tail or 'FFmpeg failed'}")
+    _copy_photo_exif(source, temporary)
+    os.replace(temporary, destination)
 
 
 def _count_generated_pairs(out_root: Path, base_name: str):
@@ -410,7 +501,7 @@ def _run_ffmpeg(
 
 
 def _extract_one(args):
-    task, fps, out_root, max_frames, preview_cb, progress_cb, log_cb, model_prefix, start_time_seconds, end_time_seconds, prepared_lut = args
+    task, fps, out_root, max_frames, preview_cb, progress_cb, log_cb, model_prefix, start_time_seconds, end_time_seconds, prepared_luts = args
     left = task["left_file"]
     right = task["right_file"]
     base_name = task["clean_name"]
@@ -421,13 +512,13 @@ def _extract_one(args):
                 locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
                 *_ffmpeg_input_args(left, input_time_args, hardware_args),
                 *_ffmpeg_input_args(right, input_time_args, hardware_args),
-                "-map", "0:0", "-vf", _video_filter(fps, prepared_lut),
+                "-map", "0:0", "-vf", _video_filter(fps, prepared_luts),
             ]
             _append_frame_limit(cmd, max_frames)
             cmd.extend([
                 "-q:v", "2",
                 str(out_root / f"{base_name}_L_%05d.jpg"),
-                "-map", "1:0", "-vf", _video_filter(fps, prepared_lut),
+                "-map", "1:0", "-vf", _video_filter(fps, prepared_luts),
             ])
             _append_frame_limit(cmd, max_frames)
             cmd.extend([
@@ -438,13 +529,13 @@ def _extract_one(args):
         cmd = [
             locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
             *_ffmpeg_input_args(left, input_time_args, hardware_args),
-            "-map", "0:0", "-vf", _video_filter(fps, prepared_lut),
+            "-map", "0:0", "-vf", _video_filter(fps, prepared_luts),
         ]
         _append_frame_limit(cmd, max_frames)
         cmd.extend([
             "-q:v", "2",
             str(out_root / f"{base_name}_L_%05d.jpg"),
-            "-map", "0:1", "-vf", _video_filter(fps, prepared_lut),
+            "-map", "0:1", "-vf", _video_filter(fps, prepared_luts),
         ])
         _append_frame_limit(cmd, max_frames)
         cmd.extend([
@@ -469,7 +560,7 @@ def _extract_one(args):
         start_time_seconds=start_time_seconds,
         end_time_seconds=end_time_seconds,
         log_cb=log_cb,
-        cwd=prepared_lut.parent if prepared_lut else None,
+        cwd=prepared_luts.directory if prepared_luts else None,
     )
 
     left_files = sorted(out_root.glob(f"{base_name}_L_*.jpg"))
@@ -508,12 +599,13 @@ def extract_frames(
     progress_cb=None,
     log_cb=None,
     model_prefix=None,
-    color_lut_path=None,
+    restoration_lut_path=None,
+    style_lut_path=None,
 ):
     input_path = Path(input_path)
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
-    if color_lut_path:
+    if restoration_lut_path or style_lut_path:
         input_path = input_path.resolve()
         out_root = out_root.resolve()
     files = [input_path]
@@ -535,7 +627,7 @@ def extract_frames(
     }
     if progress_cb:
         progress_cb(0, max_frames if max_frames and max_frames > 0 else 1)
-    with _prepare_color_lut(color_lut_path) as prepared_lut:
+    with prepare_lut_chain(restoration_lut_path, style_lut_path) as prepared_luts:
         extracted = _extract_one(
             (
                 task,
@@ -548,7 +640,7 @@ def extract_frames(
                 model_prefix,
                 start_time_seconds,
                 end_time_seconds,
-                prepared_lut,
+                prepared_luts,
             )
         )
     if progress_cb:
@@ -567,12 +659,13 @@ def extract_single_video_frames(
     progress_cb=None,
     log_cb=None,
     model_prefix=None,
-    color_lut_path=None,
+    restoration_lut_path=None,
+    style_lut_path=None,
 ):
     input_path = Path(input_path)
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
-    if color_lut_path:
+    if restoration_lut_path or style_lut_path:
         input_path = input_path.resolve()
         out_root = out_root.resolve()
     base_name = model_prefix or input_path.stem
@@ -581,14 +674,14 @@ def extract_single_video_frames(
         cmd = [
             locate_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-nostats",
             *_ffmpeg_input_args(input_path, input_time_args, hardware_args),
-            "-map", "0:v:0", "-vf", _video_filter(fps, prepared_lut),
+            "-map", "0:v:0", "-vf", _video_filter(fps, prepared_luts),
         ]
         _append_frame_limit(cmd, max_frames)
         cmd.extend(["-q:v", "2", str(out_root / f"{base_name}_%05d.jpg")])
         return cmd
     if progress_cb:
         progress_cb(0, max_frames if max_frames and max_frames > 0 else 1)
-    with _prepare_color_lut(color_lut_path) as prepared_lut:
+    with prepare_lut_chain(restoration_lut_path, style_lut_path) as prepared_luts:
         _run_ffmpeg_with_hardware_fallback(
             command_factory,
             input_path,
@@ -603,7 +696,7 @@ def extract_single_video_frames(
             start_time_seconds=start_time_seconds,
             end_time_seconds=end_time_seconds,
             log_cb=log_cb,
-            cwd=prepared_lut.parent if prepared_lut else None,
+            cwd=prepared_luts.directory if prepared_luts else None,
         )
 
     frame_files = sorted(out_root.glob(f"{base_name}_*.jpg"))

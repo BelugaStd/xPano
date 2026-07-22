@@ -8,6 +8,7 @@ interface ColorLutFieldProps {
   builtinPreset?: string | null
   onChange: (path: string | null) => void
   onPresetChange?: (preset: string | null) => void
+  label?: string
   disabled?: boolean
 }
 
@@ -21,6 +22,7 @@ export function ColorLutField({
   builtinPreset,
   onChange,
   onPresetChange,
+  label = '风格 LUT',
   disabled = false,
 }: ColorLutFieldProps) {
   const selectLut = async () => {
@@ -55,7 +57,7 @@ export function ColorLutField({
 
   return (
     <div>
-      <p className="mb-1.5 text-[11px] font-medium text-muted">色彩还原 LUT</p>
+      <p className="mb-1.5 text-[11px] font-medium text-muted">{label}</p>
       <div className="theme-input flex h-10 min-w-0 items-center gap-2 rounded-comfortable border px-2">
         <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink" title={value || ''}>{fileName(value)}</span>
         {value && (

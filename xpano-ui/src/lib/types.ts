@@ -10,8 +10,8 @@ export interface MaterialTrack {
   path: string
   /** Optional time window (seconds) for video trimming. */
   trim?: { start: number; end: number }
-  /** Per-video extraction settings. */
-  extract?: { framesPerSecond: number; frameLimit: number; colorLutPath?: string | null; colorLutPreset?: string | null }
+  /** Per-track preparation settings. */
+  extract?: { framesPerSecond: number; frameLimit: number; styleLutPath?: string | null; colorLutPreset?: string | null }
   /** Ordinary-video view preset used to initialize flat camera intrinsics. */
   cameraProfile?: CameraProfile
   /** Counts restored from an existing xPano manifest. */

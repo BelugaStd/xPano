@@ -138,8 +138,12 @@ pub struct ProjectTrim {
 pub struct ExtractionSettings {
     pub frames_per_second: f64,
     pub frame_limit: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color_lut_path: Option<String>,
+    #[serde(
+        default,
+        alias = "colorLutPath",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub style_lut_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_lut_preset: Option<String>,
 }
@@ -285,33 +289,18 @@ impl XpanoProjectV2 {
             if track.extraction.frames_per_second <= 0.0 || !track.extraction.frames_per_second.is_finite() {
                 return Err(format!("invalid extraction frame rate for track {}", track.id));
             }
-            if let Some(color_lut_path) = track.extraction.color_lut_path.as_deref() {
-                if !matches!(
-                    track.track_type,
-                    ProjectTrackType::PanoramicVideo | ProjectTrackType::OrdinaryVideo
-                ) {
-                    return Err(format!(
-                        "color LUT is only valid for video track {}",
-                        track.id
-                    ));
-                }
-                let path = Path::new(color_lut_path.trim());
-                if color_lut_path.trim().is_empty()
+            if let Some(style_lut_path) = track.extraction.style_lut_path.as_deref() {
+                let path = Path::new(style_lut_path.trim());
+                if style_lut_path.trim().is_empty()
                     || !path
                         .extension()
                         .and_then(|value| value.to_str())
                         .is_some_and(|value| value.eq_ignore_ascii_case("cube"))
                 {
-                    return Err(format!("invalid color LUT path for track {}", track.id));
+                    return Err(format!("invalid style LUT path for track {}", track.id));
                 }
             }
             if let Some(color_lut_preset) = track.extraction.color_lut_preset.as_deref() {
-                if track.extraction.color_lut_path.is_some() {
-                    return Err(format!(
-                        "color LUT path and preset cannot both be set for track {}",
-                        track.id
-                    ));
-                }
                 let is_osv_panorama = track.track_type == ProjectTrackType::PanoramicVideo
                     && Path::new(&track.source_path)
                         .extension()
@@ -585,7 +574,7 @@ mod tests {
             "../../../schemas/fixtures/xpano_project_v3.example.json"
         ))
         .unwrap();
-        assert_eq!(project.tracks[0].extraction.color_lut_path, None);
+        assert_eq!(project.tracks[0].extraction.style_lut_path, None);
         project.validate().unwrap();
 
         project.geometry.variants[0].canonical_path = "D:/machine/points3D.bin".to_string();
@@ -593,19 +582,27 @@ mod tests {
     }
 
     #[test]
-    fn color_lut_is_optional_and_only_valid_for_video_tracks() {
+    fn style_lut_is_optional_for_every_imported_track_and_migrates_legacy_paths() {
         let mut project: XpanoProjectV2 = serde_json::from_str(include_str!(
             "../../../schemas/fixtures/xpano_project_v3.example.json"
         ))
         .unwrap();
-        project.tracks[0].extraction.color_lut_path = Some("camera.CUBE".to_string());
+        project.tracks[0].extraction.style_lut_path = Some("camera.CUBE".to_string());
         project.validate().unwrap();
 
         project.tracks[0].track_type = ProjectTrackType::StandardPhotos;
-        assert!(project
-            .validate()
-            .unwrap_err()
-            .contains("color LUT is only valid for video"));
+        project.validate().unwrap();
+
+        let mut legacy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/xpano_project_v3.example.json"
+        ))
+        .unwrap();
+        legacy["tracks"][0]["extraction"]["colorLutPath"] = serde_json::json!("legacy.cube");
+        let migrated: XpanoProjectV2 = serde_json::from_value(legacy).unwrap();
+        assert_eq!(migrated.tracks[0].extraction.style_lut_path.as_deref(), Some("legacy.cube"));
+        let serialized = serde_json::to_value(migrated).unwrap();
+        assert_eq!(serialized["tracks"][0]["extraction"]["styleLutPath"], "legacy.cube");
+        assert!(serialized["tracks"][0]["extraction"].get("colorLutPath").is_none());
     }
 
     #[test]

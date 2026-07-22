@@ -6,6 +6,13 @@ export function isVideoTrackType(trackType: ProjectTrackType) {
   return trackType === 'panoramic_video' || trackType === 'ordinary_video'
 }
 
+export function isStyleLutSupported(trackType: ProjectTrackType) {
+  return trackType === 'panoramic_video'
+    || trackType === 'ordinary_video'
+    || trackType === 'standard_photos'
+    || trackType === 'aerial_photos'
+}
+
 export function normalizeColorLutPath(path?: string | null) {
   const normalized = path?.trim() ?? ''
   return normalized || null

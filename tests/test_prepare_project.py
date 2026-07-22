@@ -1,8 +1,11 @@
 import tempfile
 import unittest
 import json
+import shutil
 import warnings
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
@@ -152,6 +155,65 @@ class PrepareProjectTests(unittest.TestCase):
                 self.assertTrue((root / item["image"]).is_file())
                 self.assertTrue((root / item["thumbnail"]).is_file())
 
+    def test_prepare_project_applies_style_lut_to_photos_and_exports_staged_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            photos = Path(tmp) / "photos"
+            style = Path(tmp) / "style.cube"
+            root.mkdir()
+            photos.mkdir()
+            Image.new("RGB", (640, 480), (180, 60, 80)).save(photos / "a.jpg")
+            Image.new("RGB", (640, 480), (80, 120, 180)).save(photos / "b.jpg")
+            style.write_text("LUT_3D_SIZE 2\n0 0 0\n1 1 1\n", encoding="utf-8")
+            project = json.loads(
+                (Path(__file__).parents[1] / "schemas" / "fixtures" / "xpano_project_v3.example.json").read_text(encoding="utf-8")
+            )
+            project["tracks"] = [{
+                "id": "photo-track",
+                "type": "standard_photos",
+                "label": "Styled photos",
+                "sourcePath": str(photos),
+                "sourceFingerprint": {"size": 0, "mtimeNs": 0},
+                "cameraProfile": None,
+                "trim": None,
+                "extraction": {"framesPerSecond": 1.0, "frameLimit": 0, "styleLutPath": str(style)},
+                "status": "draft",
+                "items": [],
+            }]
+            (root / "xpano_project.json").write_text(json.dumps(project), encoding="utf-8")
+
+            emitted = []
+            transformed = []
+
+            def transform(source, destination, _prepared_luts):
+                if transformed:
+                    self.assertTrue(
+                        any(line.startswith("MEDIA_ITEM:") for line in emitted),
+                        "the first styled photo must be visible before transforming the second photo",
+                    )
+                Path(destination).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                transformed.append(destination)
+
+            with patch(
+                "scripts.run_xpano_prepare_project.prepare_lut_chain",
+                return_value=nullcontext(SimpleNamespace(style=object())),
+            ), patch(
+                "scripts.run_xpano_prepare_project.apply_style_lut_to_image", side_effect=transform
+            ) as apply, patch(
+                "builtins.print", side_effect=lambda *args, **_kwargs: emitted.append(str(args[0]))
+            ):
+                prepare_project(root, project["revision"], ["photo-track"])
+
+            manifest = json.loads((root / "work" / "manifests" / "media_full.json").read_text(encoding="utf-8"))
+            staged = [
+                root / "work" / "media" / "photo-track" / "photo_00001.jpg",
+                root / "work" / "media" / "photo-track" / "photo_00002.jpg",
+            ]
+            self.assertEqual(manifest["tracks"][0]["photos"], [str(path) for path in staged])
+            self.assertEqual(manifest["tracks"][0]["photo_sensors"][0]["photos"], [str(path) for path in staged])
+            self.assertEqual(apply.call_count, 2)
+
     def test_prepare_project_propagates_video_color_lut(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "project"
@@ -177,7 +239,7 @@ class PrepareProjectTests(unittest.TestCase):
                 "extraction": {
                     "framesPerSecond": 1.0,
                     "frameLimit": 0,
-                    "colorLutPath": str(lut),
+                    "styleLutPath": str(lut),
                 },
                 "status": "draft",
                 "items": [],
@@ -211,7 +273,7 @@ class PrepareProjectTests(unittest.TestCase):
             ) as build:
                 prepare_project(root, project["revision"], ["video-track"])
 
-            self.assertEqual(build.call_args.kwargs["color_lut_path"], str(lut))
+            self.assertEqual(build.call_args.kwargs["style_lut_path"], str(lut))
 
     def test_prepare_project_resolves_the_bundled_dji_lut_for_osv_preset(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -265,7 +327,7 @@ class PrepareProjectTests(unittest.TestCase):
                 prepare_project(root, project["revision"], ["pano-track"])
 
             self.assertEqual(
-                build.call_args.kwargs["color_lut_path"],
+                build.call_args.kwargs["restoration_lut_path"],
                 str(Path(__file__).parents[1] / "luts" / "dji-osmo360-dlogm-rec709-v1.cube"),
             )
 

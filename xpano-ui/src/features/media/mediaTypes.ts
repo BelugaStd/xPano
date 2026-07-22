@@ -1,5 +1,5 @@
 import type { MediaImportDraftInput, ProjectTrackType } from '../../lib/contracts'
-import { builtinColorLutPresetForSource, isCubeLutPath } from './colorLut'
+import { builtinColorLutPresetForSource, isCubeLutPath, isStyleLutSupported } from './colorLut'
 
 export interface ImportPathInfo {
   path: string
@@ -39,7 +39,7 @@ export function isDraftValid(draft: MediaImportDraft) {
     && Boolean(draft.label.trim())
     && Number.isFinite(draft.extraction.framesPerSecond)
     && draft.extraction.framesPerSecond > 0
-    && (!draft.extraction.colorLutPath || isCubeLutPath(draft.extraction.colorLutPath))
+    && (!draft.extraction.styleLutPath || isCubeLutPath(draft.extraction.styleLutPath))
     && (!draft.extraction.colorLutPreset || draft.extraction.colorLutPreset === allowedPreset)
-    && !(draft.extraction.colorLutPath && draft.extraction.colorLutPreset)
+    && (!draft.extraction.styleLutPath || isStyleLutSupported(draft.trackType))
 }

@@ -7,7 +7,6 @@ import { framesPerSecondForLimit } from '../../lib/extractionRate'
 import { allowedTrackTypes, isDraftValid, type MediaImportDraft } from './mediaTypes'
 import { ColorLutField } from './ColorLutField'
 import { builtinColorLutPresetForSource } from './colorLut'
-import { isVideoTrackType } from './colorLut'
 import { PhotoFolderPreview } from './PhotoFolderPreview'
 
 interface MaterialImportDialogProps {
@@ -127,9 +126,12 @@ export function MaterialImportDialog({ drafts, onChange, onCancel, onConfirm, bu
                         <button key={option.type} type="button" disabled={!enabled} onClick={() => update(selected.id, {
                           trackType: option.type,
                           cameraProfile: option.type === 'ordinary_video' ? 'wide' : null,
-                          extraction: isVideoTrackType(option.type)
-                            ? selected.extraction
-                            : { ...selected.extraction, colorLutPath: null, colorLutPreset: null },
+                          extraction: {
+                            ...selected.extraction,
+                            colorLutPreset: builtinColorLutPresetForSource(option.type, selected.sourcePath)
+                              ? selected.extraction.colorLutPreset
+                              : null,
+                          },
                         })} className={`motion-press flex h-10 items-center justify-center gap-1.5 rounded-comfortable border text-[11px] font-medium ${selected.trackType === option.type ? 'border-brand bg-brand text-white' : 'border-[var(--xp-line)] text-muted hover:text-ink'} disabled:cursor-not-allowed disabled:opacity-35`}>
                           <Icon className="h-3.5 w-3.5" /> {option.label}
                         </button>
@@ -166,15 +168,22 @@ export function MaterialImportDialog({ drafts, onChange, onCancel, onConfirm, bu
                         <input type="number" min="0" step="1" value={selected.extraction.frameLimit} onChange={(event) => updateFrameLimit(Number(event.target.value))} className="theme-input mt-1.5 h-10 w-full rounded-comfortable border px-3 font-mono text-[12px] text-ink outline-none" />
                       </label>
                     </div>
+                    {builtinColorLutPresetForSource(selected.trackType, selected.sourcePath) && (
+                      <ColorLutField
+                        value={null}
+                        preset={selected.extraction.colorLutPreset}
+                        builtinPreset={builtinColorLutPresetForSource(selected.trackType, selected.sourcePath)}
+                        onChange={() => {}}
+                        onPresetChange={(colorLutPreset) => update(selected.id, {
+                          extraction: { ...selected.extraction, colorLutPreset },
+                        })}
+                        disabled={busy}
+                      />
+                    )}
                     <ColorLutField
-                      value={selected.extraction.colorLutPath}
-                      preset={selected.extraction.colorLutPreset}
-                      builtinPreset={builtinColorLutPresetForSource(selected.trackType, selected.sourcePath)}
-                      onChange={(colorLutPath) => update(selected.id, {
-                        extraction: { ...selected.extraction, colorLutPath, colorLutPreset: null },
-                      })}
-                      onPresetChange={(colorLutPreset) => update(selected.id, {
-                        extraction: { ...selected.extraction, colorLutPath: null, colorLutPreset },
+                      value={selected.extraction.styleLutPath}
+                      onChange={(styleLutPath) => update(selected.id, {
+                        extraction: { ...selected.extraction, styleLutPath },
                       })}
                       disabled={busy}
                     />
@@ -195,7 +204,16 @@ export function MaterialImportDialog({ drafts, onChange, onCancel, onConfirm, bu
                 )}
 
                 {(selected.trackType === 'standard_photos' || selected.trackType === 'aerial_photos') && (
-                  <PhotoFolderPreview path={selected.sourcePath} compact initialPaths={selected.info.previewPaths} initialTotal={selected.info.photoCount} />
+                  <>
+                    <PhotoFolderPreview path={selected.sourcePath} compact initialPaths={selected.info.previewPaths} initialTotal={selected.info.photoCount} />
+                    <ColorLutField
+                      value={selected.extraction.styleLutPath}
+                      onChange={(styleLutPath) => update(selected.id, {
+                        extraction: { ...selected.extraction, styleLutPath },
+                      })}
+                      disabled={busy}
+                    />
+                  </>
                 )}
 
                 {!selected.info.valid && (
