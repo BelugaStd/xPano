@@ -205,6 +205,56 @@ pub fn resolve_script_path(script: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(script))
 }
 
+fn bundled_resource_candidates(
+    relative: &Path,
+    resource_base: Option<&Path>,
+    executable_dir: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut add = |path: PathBuf| {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    };
+    if let Some(base) = resource_base {
+        add(base.join(relative));
+        add(base.join("_up_").join(relative));
+        add(base.join("_up_").join("_up_").join(relative));
+    }
+    for base in executable_dir.into_iter().chain(current_dir) {
+        for root in base.ancestors().take(8) {
+            add(root.join(relative));
+        }
+    }
+    candidates
+}
+
+/// Resolve an application-owned resource without development environment overrides.
+pub fn resolve_bundled_resource_path(relative: &str) -> PathBuf {
+    let relative = Path::new(relative);
+    if relative.is_absolute() || relative.components().any(|component| component.as_os_str() == "..") {
+        return relative.to_path_buf();
+    }
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let current_dir = std::env::current_dir().ok();
+    bundled_resource_candidates(
+        relative,
+        resource_base(),
+        executable_dir.as_deref(),
+        current_dir.as_deref(),
+    )
+    .into_iter()
+    .find(|path| path.exists())
+    .unwrap_or_else(|| relative.to_path_buf())
+}
+
+pub fn resolve_bundled_python() -> PathBuf {
+    resolve_bundled_resource_path("binaries/python/python.exe")
+}
+
 pub fn resolve_resource_path(relative: &str) -> PathBuf {
     let relative = Path::new(relative);
     if relative.is_absolute() {
@@ -350,5 +400,22 @@ mod tests {
     fn invalid_explicit_python_path_is_not_silently_replaced() {
         let missing = r"Z:\missing xpano python\python.exe";
         assert_eq!(resolve_python(missing), missing);
+    }
+
+    #[test]
+    fn bundled_resource_candidates_start_with_tauri_resources_and_ignore_development_overrides() {
+        let relative = Path::new("runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe");
+        let candidates = bundled_resource_candidates(
+            relative,
+            Some(Path::new(r"E:\xPano\resources")),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            candidates.first(),
+            Some(&PathBuf::from(r"E:\xPano\resources\runtime\lichtfeld-studio\bin\LichtFeld-Studio.exe"))
+        );
+        assert!(!candidates.iter().any(|path| path.to_string_lossy().contains("XPANO_ROOT")));
     }
 }

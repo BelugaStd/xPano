@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from scripts.lichtfeld_training import (
     LichtfeldLogTracker,
     LichtfeldTrainingConfig,
+    build_lichtfeld_environment,
     parse_runtime_state_result,
     build_runtime_override_code,
     build_lichtfeld_training_command,
@@ -139,6 +141,49 @@ class LichtfeldTrainingCommandTests(unittest.TestCase):
             self.assertIn("p.use_bilateral_grid = True", code)
             self.assertIn("('mip_filter', p.mip_filter, True)", code)
             self.assertIn("d.max_width = 2048", code)
+
+    def test_launch_environment_uses_an_xpano_owned_home_and_removes_host_python_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / "LichtFeld/bin/LichtFeld-Studio.exe"
+            executable.parent.mkdir(parents=True)
+            profile = root / "xpano-local-data/lfs-profile"
+            inherited = {
+                "PATH": r"C:\\HostPython;C:\\HostQt",
+                "SystemRoot": r"C:\\Windows",
+                "PYTHONHOME": r"C:\\HostPython",
+                "PYTHONPATH": r"C:\\HostPython\\Lib",
+                "PYTHONUSERBASE": r"C:\\Users\\Person\\Python",
+                "VIRTUAL_ENV": r"C:\\venv",
+                "CONDA_PREFIX": r"C:\\conda",
+                "XPANO_ROOT": r"C:\\old-xpano",
+                "XPANO_PYTHON": r"C:\\old-xpano\\python.exe",
+                "QT_PLUGIN_PATH": r"C:\\HostQt\\plugins",
+                "USERPROFILE": r"C:\\Users\\Person",
+                "HOMEDRIVE": "C:",
+                "HOMEPATH": "\\Users\\Person",
+            }
+
+            environment = build_lichtfeld_environment(executable, profile, inherited)
+
+            self.assertEqual(environment["USERPROFILE"], str(profile))
+            self.assertEqual(environment["HOME"], str(profile))
+            self.assertEqual(environment["APPDATA"], str(profile / "AppData" / "Roaming"))
+            self.assertEqual(environment["LOCALAPPDATA"], str(profile / "AppData" / "Local"))
+            self.assertTrue(environment["PATH"].startswith(str(executable.parent) + os.pathsep))
+            for name in (
+                "PYTHONHOME",
+                "PYTHONPATH",
+                "PYTHONUSERBASE",
+                "VIRTUAL_ENV",
+                "CONDA_PREFIX",
+                "XPANO_ROOT",
+                "XPANO_PYTHON",
+                "QT_PLUGIN_PATH",
+                "HOMEDRIVE",
+                "HOMEPATH",
+            ):
+                self.assertNotIn(name, environment)
 
 
 class LichtfeldTrainingProgressTests(unittest.TestCase):

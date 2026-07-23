@@ -2169,6 +2169,18 @@ fn append_training_flag(args: &mut Vec<String>, enabled: bool, flag: &str) {
     }
 }
 
+fn lichtfeld_profile_root(app: &AppHandle) -> Result<std::path::PathBuf, project::ProjectCommandError> {
+    app.path()
+        .app_local_data_dir()
+        .map(|root| root.join("lichtfeld-studio").join("profile"))
+        .map_err(|error| {
+            project::ProjectCommandError::new(
+                "backend_unavailable",
+                format!("failed to resolve LichtFeld profile directory: {error}"),
+            )
+        })
+}
+
 fn start_training_job_blocking(
     app: tauri::AppHandle,
     project_root: String,
@@ -2193,13 +2205,16 @@ fn start_training_job_blocking(
         ));
     }
     let dataset = training::resolve_training_dataset(root, &current)?;
-    let executable = tool_resolver::resolve_resource_path(
+    let executable = tool_resolver::resolve_bundled_resource_path(
         "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
     );
-    let script = tool_resolver::resolve_script_path("scripts/lichtfeld_training.py");
+    let script = tool_resolver::resolve_bundled_resource_path("scripts/lichtfeld_training.py");
+    let python = tool_resolver::resolve_bundled_python();
+    let profile_root = lichtfeld_profile_root(&app)?;
     for (path, label) in [
         (&executable, "LichtFeld Studio runtime"),
         (&script, "LichtFeld training supervisor"),
+        (&python, "bundled xPano Python"),
     ] {
         if !path.is_file() {
             return Err(project::ProjectCommandError::new(
@@ -2240,6 +2255,8 @@ fn start_training_job_blocking(
         dataset.to_string_lossy().to_string(),
         "--output-path".to_string(),
         output.to_string_lossy().to_string(),
+        "--profile-root".to_string(),
+        tool_resolver::plain_windows_path(&profile_root),
         "--iterations".to_string(),
         config.iterations.to_string(),
         "--strategy".to_string(),
@@ -2282,7 +2299,7 @@ fn start_training_job_blocking(
     })?;
     if let Err(error) = pipeline.start_registered_job(
         app.clone(),
-        "",
+        tool_resolver::plain_windows_path(&python).as_str(),
         script.to_string_lossy().as_ref(),
         &args,
         job_context.clone(),

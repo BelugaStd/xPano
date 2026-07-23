@@ -25,6 +25,23 @@ fn configure_metashape_runtime(command: &mut Command, site_packages: Option<&str
     }
 }
 
+fn configure_training_supervisor_environment(command: &mut Command) {
+    for name in [
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PREFIX",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONUSERBASE",
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "VIRTUAL_ENV",
+        "XPANO_PYTHON",
+        "XPANO_ROOT",
+    ] {
+        command.env_remove(name);
+    }
+}
+
 fn find_media_project_root(args: &[String]) -> Option<String> {
     args.windows(2).find_map(|pair| {
         (pair[0] == "--project-root").then(|| pair[1].clone())
@@ -521,12 +538,19 @@ impl PipelineState {
 
         let python = crate::tool_resolver::resolve_python(python_exe);
         let script_path = crate::tool_resolver::resolve_script_path(script);
+        let is_training_supervisor = script_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("lichtfeld_training.py"));
         let ffmpeg = crate::tool_resolver::locate_ffmpeg();
         let ffprobe = crate::tool_resolver::locate_ffprobe();
 
         let mut cmd = Command::new(&python);
         configure_python_io(&mut cmd);
         cmd.env_remove("PYTHONPATH");
+        if is_training_supervisor {
+            configure_training_supervisor_environment(&mut cmd);
+        }
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         if let Some(root) = script_path.parent().and_then(|path| path.parent()) {
@@ -1154,6 +1178,37 @@ mod tests {
         assert_eq!(env.get("PYTHONUTF8").map(String::as_str), Some("1"));
         assert_eq!(env.get("PYTHONDONTWRITEBYTECODE").map(String::as_str), Some("1"));
         assert_eq!(env.get("PYTHONNOUSERSITE").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn training_supervisor_removes_development_python_and_qt_overrides() {
+        let mut command = Command::new("python");
+
+        configure_training_supervisor_environment(&mut command);
+
+        let env = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.map(|value| value.to_string_lossy().to_string()),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for name in [
+            "CONDA_DEFAULT_ENV",
+            "CONDA_PREFIX",
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONUSERBASE",
+            "QT_PLUGIN_PATH",
+            "QT_QPA_PLATFORM_PLUGIN_PATH",
+            "VIRTUAL_ENV",
+            "XPANO_PYTHON",
+            "XPANO_ROOT",
+        ] {
+            assert_eq!(env.get(name), Some(&None), "{name} must not reach LFS");
+        }
     }
 
     #[test]

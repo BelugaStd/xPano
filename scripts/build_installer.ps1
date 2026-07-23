@@ -1,6 +1,7 @@
 param(
     [string]$FfmpegExe = "",
     [string]$FfprobeExe = "",
+    [string]$LichtfeldArchive = "",
     [switch]$SkipVerification,
     [switch]$DevelopmentBuild,
     [switch]$FullOffline
@@ -39,6 +40,28 @@ function Resolve-RealExecutable {
     return $resolved
 }
 
+function Resolve-PinnedLichtfeldArchive {
+    param([string]$Requested)
+    $candidate = $Requested
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $candidate = $env:XPANO_LICHTFELD_ARCHIVE
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        if ($DevelopmentBuild) {
+            return ""
+        }
+        throw "-LichtfeldArchive is required for a production installer build. Set XPANO_LICHTFELD_ARCHIVE or pass the pinned v0.5.3 archive explicitly."
+    }
+    if (-not (Test-Path -LiteralPath $candidate)) {
+        throw "Pinned LichtFeld archive was not found: $candidate"
+    }
+    $resolved = (Resolve-Path -LiteralPath $candidate).Path
+    if ((Get-Item -LiteralPath $resolved).Length -le 0) {
+        throw "Pinned LichtFeld archive is empty: $resolved"
+    }
+    return $resolved
+}
+
 function Assert-ReleaseDllClosure {
     param(
         [string]$Entry = "",
@@ -72,6 +95,7 @@ if ($Config.version -ne $Version) {
 
 $Ffmpeg = Resolve-RealExecutable $FfmpegExe "ffmpeg"
 $Ffprobe = Resolve-RealExecutable $FfprobeExe "ffprobe"
+$PinnedLichtfeldArchive = Resolve-PinnedLichtfeldArchive $LichtfeldArchive
 
 Assert-InWorkspace $Stage
 if (Test-Path -LiteralPath $Stage) {
@@ -124,6 +148,9 @@ try {
             "--full-offline-artifacts",
             (Join-Path $Root "tools\offline-densify-artifacts\sha256")
         )
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PinnedLichtfeldArchive)) {
+        $StagingArgs += @("--lichtfeld-archive", $PinnedLichtfeldArchive)
     }
     python @StagingArgs
     if ($LASTEXITCODE -ne 0) { throw "Release staging failed." }

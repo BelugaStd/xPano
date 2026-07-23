@@ -31,12 +31,26 @@ _FATAL_ERROR_MARKERS = (
     "unhandled exception",
 )
 
+_LFS_ENVIRONMENT_REMOVALS = (
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "QT_PLUGIN_PATH",
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "VIRTUAL_ENV",
+    "XPANO_PYTHON",
+    "XPANO_ROOT",
+)
+
 
 @dataclass(frozen=True)
 class LichtfeldTrainingConfig:
     executable: Path
     data_path: Path
     output_path: Path
+    profile_root: Path | None = None
     output_name: str = "xpano_gaussian"
     iterations: int = 30000
     strategy: str = "mrnf"
@@ -56,6 +70,32 @@ class LichtfeldTrainingConfig:
     background_color: str = "#000000"
     gui: bool = True
     close_on_finish: bool = True
+
+
+def build_lichtfeld_environment(executable, profile_root, inherited=None):
+    executable = Path(executable).resolve(strict=False)
+    profile_root = Path(profile_root).resolve(strict=False)
+    roaming = profile_root / "AppData" / "Roaming"
+    local = profile_root / "AppData" / "Local"
+    for directory in (profile_root, roaming, local):
+        directory.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ if inherited is None else inherited)
+    for name in _LFS_ENVIRONMENT_REMOVALS:
+        environment.pop(name, None)
+    for name in ("HOMEDRIVE", "HOMEPATH"):
+        environment.pop(name, None)
+    system_root = Path(environment.get("SystemRoot", r"C:\\Windows"))
+    environment["PATH"] = os.pathsep.join(
+        [str(executable.parent), str(system_root / "System32"), str(system_root)]
+    )
+    environment["HOME"] = str(profile_root)
+    environment["USERPROFILE"] = str(profile_root)
+    environment["APPDATA"] = str(roaming)
+    environment["LOCALAPPDATA"] = str(local)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8:replace"
+    return environment
 
 
 def _append_value(command, flag, value):
@@ -417,10 +457,8 @@ def run_lichtfeld_training(config):
     log_path = output_path / "lichtfeld.log"
     log_path.unlink(missing_ok=True)
     command = build_lichtfeld_training_command(config)
-    environment = os.environ.copy()
-    environment["PATH"] = str(executable.parent) + os.pathsep + environment.get("PATH", "")
-    environment["PYTHONUTF8"] = "1"
-    environment["PYTHONIOENCODING"] = "utf-8:replace"
+    profile_root = config.profile_root or output_path.parent / ".xpano-lfs-profile"
+    environment = build_lichtfeld_environment(executable, profile_root)
     _emit_pipeline_event({
         "phase": "train",
         "stage": "training.launch",
@@ -576,6 +614,7 @@ def build_arg_parser():
     parser.add_argument("--executable", required=True)
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-path", required=True)
+    parser.add_argument("--profile-root")
     parser.add_argument("--project-root")
     parser.add_argument("--output-name", default="xpano_gaussian")
     parser.add_argument("--iterations", type=int, default=30000)
@@ -605,6 +644,7 @@ def main(argv=None):
         executable=Path(args.executable),
         data_path=Path(args.data_path),
         output_path=Path(args.output_path),
+        profile_root=Path(args.profile_root) if args.profile_root else None,
         output_name=args.output_name,
         iterations=args.iterations,
         strategy=args.strategy,

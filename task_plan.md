@@ -1239,10 +1239,10 @@ Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnos
 
 ## Plan
 
-- [ ] Baseline the exact v0.5.3 archive, upstream commit, license, complete portable layout, and current installer behavior; preserve current parameter/progress behavior as regression fixtures.
-- [ ] Replace the untracked-directory build input with a pinned, content-addressed LFS artifact and tracked manifest containing source/version/archive hash plus a filtered per-file inventory.
-- [ ] Make `build_installer.ps1` the sole release assembly path. Retire or redirect `build_release.ps1` through the same staging contract so no package flavor can omit `runtime/lichtfeld-studio`.
-- [ ] Strengthen staging validation: verify the full LFS inventory, resource sentinels, static DLL closure, licenses, architecture, and relocated-path layout before Tauri/NSIS packaging.
+- [x] Baseline the exact v0.5.3 archive, upstream commit, license, complete portable layout, and current installer behavior; preserve current parameter/progress behavior as regression fixtures.
+- [x] Replace the untracked-directory build input with a pinned, content-addressed LFS artifact and tracked manifest containing source/version/archive hash plus a filtered per-file inventory.
+- [x] Make `build_installer.ps1` the sole release assembly path. Retire or redirect `build_release.ps1` through the same staging contract so no package flavor can omit `runtime/lichtfeld-studio`.
+- [x] Strengthen staging validation: verify the full LFS inventory, resource sentinels, static DLL closure, licenses, architecture, and relocated-path layout before Tauri/NSIS packaging.
 - [ ] Add production signing support and make unsigned production releases fail closed; development builds remain explicitly marked and cannot be promoted as release artifacts.
 - [ ] Centralize packaged LFS resolution, fast integrity checks, working directory, child environment, config/profile isolation, and Windows path normalization behind one Rust runtime boundary.
 - [ ] Stop production launches from honoring development overrides or arbitrary Python environments; invoke the bundled supervisor Python explicitly and remove Python/DLL pollution variables while retaining required Windows/GPU environment.

@@ -1032,3 +1032,13 @@
 - Completed a read-only audit of the React -> Tauri -> Python supervisor -> LichtFeld process chain and both installer/staging paths.
 - Verified the current local LFS source, release stage, and installed critical files are hash-identical; recursive DLL closure passed for 227 PE files.
 - Recorded a phased implementation and acceptance plan. No product code, runtime payload, package, or release artifact was changed.
+
+# 2026-07-23 Phase 67 implementation started
+
+- Baseline source commit is `170d1a7`; the active worktree contains only pre-existing untracked runtime/binary payloads, which remain outside source commits.
+- The first RED/GREEN boundary is confirmed: `release_staging.py` copies the LFS tree but validates only the executable and license. Add a pinned LFS runtime manifest and stage-time inventory validation before changing launch behavior.
+- The existing Rust launch boundary retains the required normal Windows path conversion. Isolation changes must preserve `plain_windows_path` rather than alter third-party LFS resource lookup.
+- Added the tracked `runtime/lichtfeld-studio-manifest.json`: v0.5.3 / `d8c50c6a`, archive name/size/SHA-256, eight GUI/DLL resource sentinels, and hashes for all 1,450 upstream files.
+- `release_staging.py` now rejects missing, corrupt, unexpected, or incomplete LFS source/staged trees. A production staging request can rehydrate LFS solely from the pinned ZIP; extracted cache files are discarded before the portable inventory check.
+- `build_installer.ps1` now requires `-LichtfeldArchive` or `XPANO_LICHTFELD_ARCHIVE` outside an explicit development build. The former portable assembler is retired and delegates to that installer path.
+- Focused packaging tests passed (28). A real archive-driven stage produced 2,205 manifest entries; LFS contains 1,245 portable files, required RML/locale resources, the expected executable SHA-256, and a passing 227-PE DLL closure check.

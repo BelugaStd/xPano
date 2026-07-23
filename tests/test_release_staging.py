@@ -1,9 +1,11 @@
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from scripts.release_staging import ReleaseStagingError, stage_release_resources
@@ -78,7 +80,10 @@ class ReleaseStagingTests(unittest.TestCase):
             "runtime/pip.pyz": b"pip",
             "runtime/THIRD_PARTY_NOTICES.txt": b"NumPy BSD-3-Clause\nOpenCV Apache-2.0\n",
             "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe": b"lichtfeld",
+            "runtime/lichtfeld-studio/bin/__pycache__/runtime.cpython-312.pyc": b"cache",
             "runtime/lichtfeld-studio/LICENSE": b"GPL-3.0",
+            "runtime/lichtfeld-studio/share/LichtFeld-Studio/locales/en.json": b'{"language":"en"}',
+            "runtime/lichtfeld-studio/share/LichtFeld-Studio/assets/rmlui/rendering.rml": b"<rml/>",
             "luts/dji-osmo360-dlogm-rec709-v1.cube": b"dji-lut",
             **{
                 f"runtime/windows-x64/{name}": content
@@ -164,6 +169,58 @@ class ReleaseStagingTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        lichtfeld_root = root / "runtime" / "lichtfeld-studio"
+        lichtfeld_files = []
+        for path in sorted(lichtfeld_root.rglob("*")):
+            if not path.is_file():
+                continue
+            content = path.read_bytes()
+            lichtfeld_files.append(
+                {
+                    "path": path.relative_to(lichtfeld_root).as_posix(),
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            )
+        (root / "runtime/lichtfeld-studio-manifest.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "runtime": "lichtfeld-studio",
+                    "version": "0.5.3",
+                    "upstreamCommit": "d8c50c6a",
+                    "archive": {
+                        "filename": "LichtFeld-Studio-windows-v0.5.3.zip",
+                        "size": 1,
+                        "sha256": "0" * 64,
+                    },
+                    "sentinels": [
+                        "LICENSE",
+                        "bin/LichtFeld-Studio.exe",
+                        "share/LichtFeld-Studio/locales/en.json",
+                        "share/LichtFeld-Studio/assets/rmlui/rendering.rml",
+                    ],
+                    "files": lichtfeld_files,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def make_lichtfeld_archive(self, root, archive):
+        runtime = root / "runtime/lichtfeld-studio"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
+            for path in sorted(runtime.rglob("*")):
+                if path.is_file():
+                    package.write(path, path.relative_to(runtime).as_posix())
+        manifest_path = root / "runtime/lichtfeld-studio-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        content = archive.read_bytes()
+        manifest["archive"] = {
+            "filename": archive.name,
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     def test_stage_uses_allowlist_and_writes_sorted_hash_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,6 +308,90 @@ class ReleaseStagingTests(unittest.TestCase):
                     webview2_loader,
                     version="1.2.3",
                 )
+
+    def test_stage_rejects_missing_lichtfeld_runtime_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            stage = Path(tmp) / "stage"
+            root.mkdir()
+            self.make_fixture(root)
+            (root / "runtime/lichtfeld-studio-manifest.json").unlink()
+            ffmpeg = Path(tmp) / "ffmpeg.exe"
+            ffprobe = Path(tmp) / "ffprobe.exe"
+            webview2_loader = Path(tmp) / "WebView2Loader.dll"
+            ffmpeg.write_bytes(b"ffmpeg-real")
+            ffprobe.write_bytes(b"ffprobe-real")
+            webview2_loader.write_bytes(b"webview-loader-real")
+
+            with self.assertRaisesRegex(ReleaseStagingError, "LichtFeld runtime manifest"):
+                stage_release_resources(
+                    root,
+                    stage,
+                    ffmpeg,
+                    ffprobe,
+                    webview2_loader,
+                    version="1.2.3",
+                )
+
+    def test_stage_rejects_corrupt_lichtfeld_dynamic_resource(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            stage = Path(tmp) / "stage"
+            root.mkdir()
+            self.make_fixture(root)
+            (root / "runtime/lichtfeld-studio/share/LichtFeld-Studio/locales/en.json").write_bytes(
+                b"corrupt"
+            )
+            ffmpeg = Path(tmp) / "ffmpeg.exe"
+            ffprobe = Path(tmp) / "ffprobe.exe"
+            webview2_loader = Path(tmp) / "WebView2Loader.dll"
+            ffmpeg.write_bytes(b"ffmpeg-real")
+            ffprobe.write_bytes(b"ffprobe-real")
+            webview2_loader.write_bytes(b"webview-loader-real")
+
+            with self.assertRaisesRegex(ReleaseStagingError, "source tree differs.*corrupt"):
+                stage_release_resources(
+                    root,
+                    stage,
+                    ffmpeg,
+                    ffprobe,
+                    webview2_loader,
+                    version="1.2.3",
+                )
+
+    def test_stage_rehydrates_lichtfeld_from_the_pinned_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            stage = Path(tmp) / "stage"
+            archive = Path(tmp) / "LichtFeld-Studio-windows-v0.5.3.zip"
+            root.mkdir()
+            self.make_fixture(root)
+            self.make_lichtfeld_archive(root, archive)
+            shutil.rmtree(root / "runtime/lichtfeld-studio")
+            ffmpeg = Path(tmp) / "ffmpeg.exe"
+            ffprobe = Path(tmp) / "ffprobe.exe"
+            webview2_loader = Path(tmp) / "WebView2Loader.dll"
+            ffmpeg.write_bytes(b"ffmpeg-real")
+            ffprobe.write_bytes(b"ffprobe-real")
+            webview2_loader.write_bytes(b"webview-loader-real")
+
+            stage_release_resources(
+                root,
+                stage,
+                ffmpeg,
+                ffprobe,
+                webview2_loader,
+                version="1.2.3",
+                lichtfeld_archive=archive,
+            )
+
+            self.assertEqual(
+                (stage / "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe").read_bytes(),
+                b"lichtfeld",
+            )
+            self.assertFalse(
+                (stage / "runtime/lichtfeld-studio/bin/__pycache__/runtime.cpython-312.pyc").exists()
+            )
 
     def test_stage_rejects_missing_metashape_runner_probe(self):
         with tempfile.TemporaryDirectory() as tmp:

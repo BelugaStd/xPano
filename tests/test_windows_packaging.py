@@ -64,6 +64,23 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn('"runtime\\lichtfeld-studio"', build_script)
         self.assertGreaterEqual(build_script.count("Assert-ReleaseDllClosure"), 3)
 
+    def test_formal_installer_requires_the_pinned_lichtfeld_archive(self):
+        root = Path(__file__).parents[1]
+        build_script = (root / "scripts" / "build_installer.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[string]$LichtfeldArchive", build_script)
+        self.assertIn("XPANO_LICHTFELD_ARCHIVE", build_script)
+        self.assertIn("-LichtfeldArchive is required", build_script)
+        self.assertIn("--lichtfeld-archive", build_script)
+
+    def test_legacy_portable_builder_is_retired_in_favor_of_the_installer(self):
+        root = Path(__file__).parents[1]
+        legacy = (root / "scripts" / "build_release.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("build_installer.ps1", legacy)
+        self.assertIn("retired", legacy)
+        self.assertNotIn("Copy-PortableDirectory", legacy)
+
     def test_vc_redistributables_are_never_treated_as_windows_inbox_dlls(self):
         self.assertTrue(is_windows_inbox_dll("kernel32.dll"))
         self.assertTrue(is_windows_inbox_dll("api-ms-win-crt-runtime-l1-1-0.dll"))
