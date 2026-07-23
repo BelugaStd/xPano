@@ -37,9 +37,15 @@ export interface TrainingConfig {
 export interface TrainingReadiness {
   runtimeAvailable: boolean
   runtimePath?: string
+  runtimeCode?: string
+  runtimeMessage?: string
+  cudaAvailable?: boolean
+  vulkanAvailable?: boolean
   datasetAvailable: boolean
-  datasetPath?: string
+  datasetMessage?: string
   geometryAvailable: boolean
+  outputAvailable?: boolean
+  outputMessage?: string
 }
 
 export const DEFAULT_TRAINING_CONFIG: TrainingConfig = {
@@ -88,19 +94,20 @@ export function trainingWorkspaceMode(status: TrainingStatus, live: boolean): Tr
 
 export function trainingStartBlocker(
   hasProject: boolean,
-  readiness: Pick<TrainingReadiness, 'runtimeAvailable' | 'datasetAvailable' | 'geometryAvailable'>,
+  readiness: Pick<TrainingReadiness, 'runtimeAvailable' | 'runtimeMessage' | 'datasetAvailable' | 'datasetMessage' | 'geometryAvailable' | 'outputAvailable' | 'outputMessage'>,
   running: boolean,
 ): TrainingStartBlocker | null {
   if (!hasProject) return { reason: '请先打开并准备一个工程', action: 'media' }
   if (running) return { reason: '当前有任务正在运行', action: null }
-  if (!readiness.runtimeAvailable) return { reason: 'LichtFeld 运行环境不可用', action: 'recheck' }
-  if (!readiness.datasetAvailable) return { reason: '训练数据尚未导出', action: 'reconstruction' }
+  if (!readiness.runtimeAvailable) return { reason: readiness.runtimeMessage || 'LichtFeld 运行环境不可用', action: 'recheck' }
+  if (!readiness.datasetAvailable) return { reason: readiness.datasetMessage || '训练数据尚未导出', action: 'reconstruction' }
   if (!readiness.geometryAvailable) return { reason: '尚未选择有效训练点云', action: 'results' }
+  if (readiness.outputAvailable === false) return { reason: readiness.outputMessage || '训练输出位置不可写入', action: 'recheck' }
   return null
 }
 
-export function trainingCanStart(readiness: Pick<TrainingReadiness, 'runtimeAvailable' | 'datasetAvailable' | 'geometryAvailable'>, running: boolean) {
-  return readiness.runtimeAvailable && readiness.datasetAvailable && readiness.geometryAvailable && !running
+export function trainingCanStart(readiness: Pick<TrainingReadiness, 'runtimeAvailable' | 'datasetAvailable' | 'geometryAvailable' | 'outputAvailable'>, running: boolean) {
+  return readiness.runtimeAvailable && readiness.datasetAvailable && readiness.geometryAvailable && readiness.outputAvailable !== false && !running
 }
 
 export function trainingDisplayPercent(

@@ -31,7 +31,7 @@ export function TrainingWorkspace() {
   const [config, setConfig] = useState<TrainingConfig>(DEFAULT_TRAINING_CONFIG)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [configureNext, setConfigureNext] = useState(false)
-  const [readiness, setReadiness] = useState<TrainingReadiness>({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false })
+  const [readiness, setReadiness] = useState<TrainingReadiness>({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false, outputAvailable: false })
   const [checking, setChecking] = useState(true)
   const [readinessRevision, setReadinessRevision] = useState(0)
 
@@ -43,7 +43,7 @@ export function TrainingWorkspace() {
   useEffect(() => {
     if (!projectRoot || !isTauriRuntime()) {
       const available = Boolean(project)
-      setReadiness({ runtimeAvailable: available, datasetAvailable: available, geometryAvailable: available })
+      setReadiness({ runtimeAvailable: available, datasetAvailable: available, geometryAvailable: available, outputAvailable: available, cudaAvailable: available, vulkanAvailable: available })
       setChecking(false)
       return
     }
@@ -51,7 +51,7 @@ export function TrainingWorkspace() {
     setChecking(true)
     invoke<TrainingReadiness>('get_training_readiness', { projectRoot })
       .then((value) => { if (!disposed) setReadiness(value) })
-      .catch(() => { if (!disposed) setReadiness({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false }) })
+      .catch(() => { if (!disposed) setReadiness({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false, outputAvailable: false }) })
       .finally(() => { if (!disposed) setChecking(false) })
     return () => { disposed = true }
   }, [project, projectRoot, readinessRevision])

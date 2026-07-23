@@ -18,6 +18,7 @@ from scripts.runtime_readiness import (
     main,
     metashape_python,
     metashape_profile,
+    probe_lichtfeld_training,
     probe_bundled_resources,
 )
 
@@ -27,6 +28,121 @@ def digest(data):
 
 
 class RuntimeReadinessTests(unittest.TestCase):
+    def write_lichtfeld_runtime(self, root):
+        runtime = root / "runtime" / "lichtfeld-studio"
+        files = {
+            "LICENSE": b"GPL-3.0",
+            "bin/LichtFeld-Studio.exe": b"lichtfeld",
+            "bin/lfs_core.dll": b"core",
+            "bin/lfs_visualizer.dll": b"visualizer",
+            "bin/vulkan-1.dll": b"vulkan",
+            "share/LichtFeld-Studio/locales/en.json": b'{"language":"en"}',
+            "share/LichtFeld-Studio/assets/rmlui/rendering.rml": b"<rml />",
+            "share/LichtFeld-Studio/assets/rmlui/scene_tree.rml": b"<rml />",
+        }
+        records = []
+        for relative, content in files.items():
+            path = runtime / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            records.append({"path": relative, "size": len(content), "sha256": digest(content)})
+        manifest = {
+            "schemaVersion": 1,
+            "runtime": "lichtfeld-studio",
+            "version": "0.5.3",
+            "sentinels": sorted(files),
+            "files": records,
+        }
+        manifest_path = root / "runtime" / "lichtfeld-studio-manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return runtime / "bin" / "LichtFeld-Studio.exe"
+
+    def test_lichtfeld_training_probe_checks_sentinels_gpu_dataset_and_output_before_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = self.write_lichtfeld_runtime(root)
+            dataset = root / "dataset"
+            (dataset / "images").mkdir(parents=True)
+            for name in ("cameras.bin", "images.bin", "points3D.bin"):
+                path = dataset / "sparse" / "0" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"colmap")
+            output = root / "project" / "work" / "training" / "runs"
+
+            with patch("scripts.runtime_readiness._probe_lfs_version", return_value="LichtFeld Studio v0.5.3"), patch(
+                "scripts.runtime_readiness.probe_cuda_device", return_value={"status": "ready", "deviceCount": 1}
+            ), patch(
+                "scripts.runtime_readiness.probe_vulkan_device", return_value={"status": "ready", "deviceCount": 1}
+            ):
+                result = probe_lichtfeld_training(root, executable, root / "profile", dataset, output)
+
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["version"], "0.5.3")
+            self.assertEqual(result["cuda"]["deviceCount"], 1)
+            self.assertEqual(result["vulkan"]["deviceCount"], 1)
+            self.assertTrue(output.is_dir())
+
+    def test_lichtfeld_training_probe_fails_with_a_stable_code_when_a_gui_resource_is_tampered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = self.write_lichtfeld_runtime(root)
+            (root / "runtime" / "lichtfeld-studio" / "share" / "LichtFeld-Studio" / "assets" / "rmlui" / "rendering.rml").write_bytes(b"tampered")
+
+            with self.assertRaises(RuntimeReadinessError) as raised:
+                probe_lichtfeld_training(root, executable, root / "profile", root / "dataset", root / "output")
+
+            self.assertEqual(raised.exception.code, "LFS_RUNTIME_CORRUPT")
+
+    def test_lichtfeld_training_probe_reports_invalid_dataset_without_hiding_a_ready_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = self.write_lichtfeld_runtime(root)
+
+            with patch("scripts.runtime_readiness._probe_lfs_version", return_value="LichtFeld Studio v0.5.3"), patch(
+                "scripts.runtime_readiness.probe_cuda_device", return_value={"status": "ready", "deviceCount": 1}
+            ), patch(
+                "scripts.runtime_readiness.probe_vulkan_device", return_value={"status": "ready", "deviceCount": 1}
+            ):
+                result = probe_lichtfeld_training(root, executable, root / "profile", root / "missing-dataset", root / "output")
+
+            self.assertEqual(result["status"], "not_ready")
+            self.assertEqual(result["dataset"]["code"], "TRAINING_DATASET_INVALID")
+            self.assertEqual(result["cuda"]["status"], "ready")
+
+    def test_lichtfeld_probe_command_emits_a_structured_result(self):
+        emitted = []
+        with patch(
+            "scripts.runtime_readiness.probe_lichtfeld_training",
+            return_value={
+                "status": "ready",
+                "version": "0.5.3",
+                "cuda": {"status": "ready", "deviceCount": 1},
+                "vulkan": {"status": "ready", "deviceCount": 1},
+            },
+        ) as probe, patch("scripts.runtime_readiness._emit", side_effect=lambda prefix, payload: emitted.append((prefix, payload))):
+            result = main([
+                "lichtfeld-probe",
+                "--root",
+                "C:/xPano",
+                "--state-root",
+                "C:/state",
+                "--backend",
+                "colmap",
+                "--lfs-executable",
+                "C:/xPano/runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
+                "--profile-root",
+                "C:/xPano-profile",
+                "--dataset",
+                "C:/project/dataset",
+                "--output",
+                "C:/project/work/training/runs",
+            ])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(emitted[-1][0], "LFS_READINESS_RESULT:")
+        self.assertEqual(emitted[-1][1]["version"], "0.5.3")
+        probe.assert_called_once()
+
     def test_bare_metashape_command_is_resolved_from_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1515,6 +1515,50 @@ struct RuntimeReadinessFailure {
     message: String,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LichtfeldDeviceReadiness {
+    status: String,
+    device_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LichtfeldInputReadiness {
+    status: String,
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LichtfeldRuntimeReadiness {
+    status: String,
+    version: String,
+    cuda: LichtfeldDeviceReadiness,
+    vulkan: LichtfeldDeviceReadiness,
+    #[serde(default)]
+    dataset: LichtfeldInputReadiness,
+    #[serde(default)]
+    output: LichtfeldInputReadiness,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrainingReadinessStatus {
+    runtime_available: bool,
+    runtime_path: String,
+    runtime_code: String,
+    runtime_message: String,
+    cuda_available: bool,
+    vulkan_available: bool,
+    dataset_available: bool,
+    dataset_message: String,
+    geometry_available: bool,
+    output_available: bool,
+    output_message: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeReadinessStatus {
@@ -2169,16 +2213,269 @@ fn append_training_flag(args: &mut Vec<String>, enabled: bool, flag: &str) {
     }
 }
 
+fn parse_lichtfeld_readiness_result(
+    text: &str,
+) -> Result<LichtfeldRuntimeReadiness, project::ProjectCommandError> {
+    let mut result = None;
+    let mut failure = None;
+    for line in text.lines() {
+        if let Some(payload) = line.strip_prefix("LFS_READINESS_RESULT:") {
+            result = serde_json::from_str(payload).ok();
+        } else if let Some(payload) = line.strip_prefix("LFS_READINESS_ERROR:") {
+            failure = serde_json::from_str::<RuntimeReadinessFailure>(payload).ok();
+        }
+    }
+    if let Some(result) = result {
+        return Ok(result);
+    }
+    if let Some(failure) = failure {
+        return Err(project::ProjectCommandError::new(failure.code.as_str(), failure.message));
+    }
+    Err(project::ProjectCommandError::new(
+        "LFS_READINESS_FAILED",
+        "LichtFeld readiness probe returned no structured result",
+    ))
+}
+
+fn ensure_lichtfeld_training_ready(
+    readiness: &LichtfeldRuntimeReadiness,
+) -> Result<(), project::ProjectCommandError> {
+    if readiness.status == "ready" {
+        return Ok(());
+    }
+    for check in [&readiness.dataset, &readiness.output] {
+        if check.status != "ready" {
+            return Err(project::ProjectCommandError::new(
+                if check.code.is_empty() {
+                    "LFS_READINESS_FAILED"
+                } else {
+                    check.code.as_str()
+                },
+                if check.message.is_empty() {
+                    "LichtFeld training preflight did not complete"
+                } else {
+                    check.message.as_str()
+                },
+            ));
+        }
+    }
+    Err(project::ProjectCommandError::new(
+        "LFS_READINESS_FAILED",
+        "LichtFeld training preflight did not complete",
+    ))
+}
+
+fn lichtfeld_runtime_version() -> Result<String, project::ProjectCommandError> {
+    let manifest = tool_resolver::resolve_bundled_resource_path("runtime/lichtfeld-studio-manifest.json");
+    let content = std::fs::read_to_string(&manifest).map_err(|error| {
+        project::ProjectCommandError::new(
+            "LFS_RUNTIME_CORRUPT",
+            format!("failed to read LichtFeld runtime manifest: {error}"),
+        )
+    })?;
+    let version = serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|value| value.get("version").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .filter(|value| !value.is_empty() && value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')))
+        .ok_or_else(|| {
+            project::ProjectCommandError::new(
+                "LFS_RUNTIME_CORRUPT",
+                "LichtFeld runtime manifest has an invalid version",
+            )
+        })?;
+    Ok(version)
+}
+
 fn lichtfeld_profile_root(app: &AppHandle) -> Result<std::path::PathBuf, project::ProjectCommandError> {
+    let version = lichtfeld_runtime_version()?;
     app.path()
         .app_local_data_dir()
-        .map(|root| root.join("lichtfeld-studio").join("profile"))
+        .map(|root| root.join("lichtfeld-studio").join(version).join("profile"))
         .map_err(|error| {
             project::ProjectCommandError::new(
                 "backend_unavailable",
                 format!("failed to resolve LichtFeld profile directory: {error}"),
             )
         })
+}
+
+fn lichtfeld_runtime_paths(
+    app: &AppHandle,
+) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), project::ProjectCommandError> {
+    let executable = tool_resolver::resolve_bundled_resource_path(
+        "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
+    );
+    let script = tool_resolver::resolve_bundled_resource_path("scripts/runtime_readiness.py");
+    let python = tool_resolver::resolve_bundled_python();
+    let profile_root = lichtfeld_profile_root(app)?;
+    for (path, label) in [
+        (&executable, "LichtFeld Studio runtime"),
+        (&script, "LichtFeld readiness supervisor"),
+        (&python, "bundled xPano Python"),
+    ] {
+        if !path.is_file() {
+            return Err(project::ProjectCommandError::new(
+                "LFS_RUNTIME_CORRUPT",
+                format!("{} is missing: {}", label, path.display()),
+            ));
+        }
+    }
+    Ok((executable, script, python, profile_root))
+}
+
+fn run_lichtfeld_preflight(
+    app: &AppHandle,
+    dataset: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<LichtfeldRuntimeReadiness, project::ProjectCommandError> {
+    let (executable, script, python, profile_root) = lichtfeld_runtime_paths(app)?;
+    let resource_root = script
+        .parent()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| {
+            project::ProjectCommandError::new(
+                "LFS_RUNTIME_CORRUPT",
+                "LichtFeld readiness script has no resource root",
+            )
+        })?;
+    let state_root = app.path().app_local_data_dir().map_err(|error| {
+        project::ProjectCommandError::new(
+            "backend_unavailable",
+            format!("failed to resolve LichtFeld state directory: {error}"),
+        )
+    })?;
+    let mut command = Command::new(tool_resolver::plain_windows_path(&python));
+    command
+        .env("PYTHONIOENCODING", "utf-8:replace")
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONNOUSERSITE", "1");
+    for variable in [
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PREFIX",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONUSERBASE",
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "VIRTUAL_ENV",
+        "XPANO_PYTHON",
+        "XPANO_ROOT",
+    ] {
+        command.env_remove(variable);
+    }
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+    command
+        .arg(&script)
+        .arg("lichtfeld-probe")
+        .arg("--root")
+        .arg(resource_root)
+        .arg("--state-root")
+        .arg(state_root)
+        .arg("--backend")
+        .arg("colmap")
+        .arg("--lfs-executable")
+        .arg(tool_resolver::plain_windows_path(&executable))
+        .arg("--profile-root")
+        .arg(tool_resolver::plain_windows_path(&profile_root))
+        .arg("--dataset")
+        .arg(dataset)
+        .arg("--output")
+        .arg(output);
+    let process = command.output().map_err(|error| {
+        project::ProjectCommandError::new(
+            "LFS_READINESS_FAILED",
+            format!("failed to start LichtFeld readiness probe: {error}"),
+        )
+    })?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&process.stdout),
+        String::from_utf8_lossy(&process.stderr)
+    );
+    if process.status.success() {
+        parse_lichtfeld_readiness_result(&text)
+    } else {
+        match parse_lichtfeld_readiness_result(&text) {
+            Err(error) => Err(error),
+            Ok(_) => Err(project::ProjectCommandError::new(
+                "LFS_READINESS_FAILED",
+                format!("LichtFeld readiness probe exited with {}", process.status),
+            )),
+        }
+    }
+}
+
+fn training_output_root(project_root: &std::path::Path) -> std::path::PathBuf {
+    project_root.join("work").join("training").join("runs")
+}
+
+fn geometry_is_ready(project: &contracts::XpanoProjectV2) -> bool {
+    matches!(
+        project.reconstruction.status,
+        contracts::ReconstructionStatus::Complete | contracts::ReconstructionStatus::Stale
+    ) && project.geometry.variants.iter().any(|variant| {
+        variant.id == project.geometry.active_variant_id
+            && variant.status == contracts::PointVariantStatus::Ready
+    })
+}
+
+fn training_readiness_blocking(
+    app: &AppHandle,
+    project_root: &std::path::Path,
+) -> Result<TrainingReadinessStatus, project::ProjectCommandError> {
+    let project = project::read_project(project_root)?;
+    let dataset = training::resolve_training_dataset(project_root, &project);
+    let dataset_path = dataset
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|_| project_root.join(".xpano-missing-training-dataset"));
+    let output = training_output_root(project_root);
+    let runtime_path = tool_resolver::resolve_bundled_resource_path(
+        "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
+    )
+    .to_string_lossy()
+    .into_owned();
+    let geometry_available = geometry_is_ready(&project);
+    match run_lichtfeld_preflight(app, &dataset_path, &output) {
+        Ok(runtime) => {
+            let dataset_available = dataset.is_ok() && runtime.dataset.status == "ready";
+            Ok(TrainingReadinessStatus {
+                runtime_available: runtime.cuda.status == "ready" && runtime.vulkan.status == "ready",
+                runtime_path,
+                runtime_code: String::new(),
+                runtime_message: String::new(),
+                cuda_available: runtime.cuda.status == "ready",
+                vulkan_available: runtime.vulkan.status == "ready",
+                dataset_available,
+                dataset_message: if dataset_available {
+                    String::new()
+                } else if !runtime.dataset.message.is_empty() {
+                    runtime.dataset.message
+                } else {
+                    dataset.err().map(|error| error.message).unwrap_or_default()
+                },
+                geometry_available,
+                output_available: runtime.output.status == "ready",
+                output_message: runtime.output.message,
+            })
+        }
+        Err(error) => Ok(TrainingReadinessStatus {
+            runtime_available: false,
+            runtime_path,
+            runtime_code: error.code,
+            runtime_message: error.message,
+            cuda_available: false,
+            vulkan_available: false,
+            dataset_available: dataset.is_ok(),
+            dataset_message: dataset.err().map(|value| value.message).unwrap_or_default(),
+            geometry_available,
+            output_available: false,
+            output_message: String::new(),
+        }),
+    }
 }
 
 fn start_training_job_blocking(
@@ -2204,7 +2501,7 @@ fn start_training_job_blocking(
             current.revision,
         ));
     }
-    let dataset = training::resolve_training_dataset(root, &current)?;
+    let dataset = training::validate_training_start_inputs(root, &current, &config)?;
     let executable = tool_resolver::resolve_bundled_resource_path(
         "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
     );
@@ -2223,6 +2520,8 @@ fn start_training_job_blocking(
             ));
         }
     }
+    let preflight = run_lichtfeld_preflight(&app, &dataset, &training_output_root(root))?;
+    ensure_lichtfeld_training_ready(&preflight)?;
     let (job_context, _) = job::begin_job_impl(root, contracts::ProjectWorkspace::Training)?;
     let project_after_job = project::read_project(root)?;
     let project = match training::begin_training_impl(
@@ -2335,29 +2634,20 @@ async fn start_training_job(
 }
 
 #[tauri::command]
-fn get_training_readiness(
+async fn get_training_readiness(
+    app: tauri::AppHandle,
     project_root: String,
-) -> Result<serde_json::Value, project::ProjectCommandError> {
-    let root = std::path::Path::new(&project_root);
-    let project = project::read_project(root)?;
-    let runtime = tool_resolver::resolve_resource_path(
-        "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
-    );
-    let dataset = training::resolve_training_dataset(root, &project).ok();
-    let geometry_available = matches!(
-        project.reconstruction.status,
-        contracts::ReconstructionStatus::Complete | contracts::ReconstructionStatus::Stale
-    ) && project.geometry.variants.iter().any(|variant| {
-        variant.id == project.geometry.active_variant_id
-            && variant.status == contracts::PointVariantStatus::Ready
-    });
-    Ok(serde_json::json!({
-        "runtimeAvailable": runtime.is_file(),
-        "runtimePath": runtime,
-        "datasetAvailable": dataset.is_some(),
-        "datasetPath": dataset,
-        "geometryAvailable": geometry_available,
-    }))
+) -> Result<TrainingReadinessStatus, project::ProjectCommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        training_readiness_blocking(&app, std::path::Path::new(&project_root))
+    })
+    .await
+    .map_err(|error| {
+        project::ProjectCommandError::new(
+            "LFS_READINESS_FAILED",
+            format!("LichtFeld readiness task stopped unexpectedly: {error}"),
+        )
+    })?
 }
 
 #[tauri::command]
@@ -3516,6 +3806,35 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "UNSUPPORTED_ABI: cp38 is unsupported");
+    }
+
+    #[test]
+    fn lichtfeld_readiness_result_keeps_gpu_status_and_stable_failures() {
+        let result = parse_lichtfeld_readiness_result(
+            r#"LFS_READINESS_RESULT:{"status":"ready","version":"0.5.3","cuda":{"status":"ready","deviceCount":1},"vulkan":{"status":"ready","deviceCount":1}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.version, "0.5.3");
+        assert_eq!(result.cuda.device_count, 1);
+        let error = parse_lichtfeld_readiness_result(
+            r#"LFS_READINESS_ERROR:{"code":"LFS_VULKAN_NO_DEVICE","message":"No Vulkan device"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "LFS_VULKAN_NO_DEVICE");
+    }
+
+    #[test]
+    fn lichtfeld_not_ready_result_rejects_training_with_the_input_failure_code() {
+        let result = parse_lichtfeld_readiness_result(
+            r#"LFS_READINESS_RESULT:{"status":"not_ready","version":"0.5.3","cuda":{"status":"ready","deviceCount":1},"vulkan":{"status":"ready","deviceCount":1},"dataset":{"status":"unavailable","code":"TRAINING_DATASET_INVALID","message":"dataset is incomplete"},"output":{"status":"ready","code":"","message":""}}"#,
+        )
+        .unwrap();
+
+        let error = ensure_lichtfeld_training_ready(&result).unwrap_err();
+
+        assert_eq!(error.code, "TRAINING_DATASET_INVALID");
+        assert_eq!(error.message, "dataset is incomplete");
     }
 
     #[test]

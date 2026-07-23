@@ -103,6 +103,29 @@ pub fn resolve_training_dataset(project_root: &Path, project: &XpanoProjectV2) -
     ))
 }
 
+pub fn validate_training_start_inputs(
+    project_root: &Path,
+    project: &XpanoProjectV2,
+    config: &TrainingConfig,
+) -> Result<PathBuf, ProjectCommandError> {
+    validate_config(config)?;
+    let dataset = resolve_training_dataset(project_root, project)?;
+    let geometry_ready = matches!(
+        project.reconstruction.status,
+        crate::contracts::ReconstructionStatus::Complete | crate::contracts::ReconstructionStatus::Stale
+    ) && project.geometry.variants.iter().any(|variant| {
+        variant.id == project.geometry.active_variant_id
+            && variant.status == crate::contracts::PointVariantStatus::Ready
+    });
+    if !geometry_ready {
+        return Err(ProjectCommandError::new(
+            "training_not_ready",
+            "reconstruction geometry is not ready",
+        ));
+    }
+    Ok(dataset)
+}
+
 fn normalized_relative(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -138,20 +161,11 @@ pub fn begin_training_impl(
     job_id: &str,
     config: &TrainingConfig,
 ) -> Result<XpanoProjectV2, ProjectCommandError> {
-    validate_config(config)?;
     let mut project = crate::project::read_project(project_root)?;
     if project.revision != expected_revision {
         return Err(ProjectCommandError::revision_conflict(expected_revision, project.revision));
     }
-    resolve_training_dataset(project_root, &project)?;
-    if !matches!(project.reconstruction.status, crate::contracts::ReconstructionStatus::Complete | crate::contracts::ReconstructionStatus::Stale)
-        || !project.geometry.variants.iter().any(|variant| {
-            variant.id == project.geometry.active_variant_id
-                && variant.status == crate::contracts::PointVariantStatus::Ready
-        })
-    {
-        return Err(ProjectCommandError::new("training_not_ready", "reconstruction geometry is not ready"));
-    }
+    validate_training_start_inputs(project_root, &project, config)?;
     let output_relative = PathBuf::from("work")
         .join("training")
         .join("runs")
@@ -265,6 +279,21 @@ mod tests {
         assert_eq!(updated.training.source_job_id.as_deref(), Some("training-job-1"));
         assert_eq!(updated.training.total_iterations, 30_000);
         assert!(updated.training.output_path.as_deref().unwrap().contains("training-job-1"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(root.with_extension("jpg"));
+    }
+
+    #[test]
+    fn validates_training_inputs_without_marking_the_project_running() {
+        let root = training_project("preflight-inputs");
+        let before = crate::project::read_project(&root).unwrap();
+
+        let dataset = validate_training_start_inputs(&root, &before, &TrainingConfig::default()).unwrap();
+        let after = crate::project::read_project(&root).unwrap();
+
+        assert_eq!(dataset, root.canonicalize().unwrap());
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.training.status, TrainingStatus::Idle);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(root.with_extension("jpg"));
     }

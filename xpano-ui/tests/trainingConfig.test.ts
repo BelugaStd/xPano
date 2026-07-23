@@ -40,6 +40,20 @@ test('requires both the bundled runtime and a reconstructed COLMAP dataset', () 
   assert.equal(trainingCanStart({ runtimeAvailable: true, datasetAvailable: true, geometryAvailable: true }, true), false)
 })
 
+test('blocks training when the dedicated output location is not writable and preserves the runtime failure category', () => {
+  const ready = { runtimeAvailable: true, datasetAvailable: true, geometryAvailable: true, outputAvailable: true }
+
+  assert.equal(trainingCanStart({ ...ready, outputAvailable: false }, false), false)
+  assert.deepEqual(
+    trainingStartBlocker(true, { ...ready, runtimeAvailable: false, runtimeMessage: 'NVIDIA display driver is unavailable' }, false),
+    { reason: 'NVIDIA display driver is unavailable', action: 'recheck' },
+  )
+  assert.deepEqual(
+    trainingStartBlocker(true, { ...ready, outputAvailable: false, outputMessage: 'Training output directory is not writable' }, false),
+    { reason: 'Training output directory is not writable', action: 'recheck' },
+  )
+})
+
 test('does not display another workspace completion as training progress', () => {
   assert.equal(trainingDisplayPercent('idle', 0, 30000, false, 100), 0)
   assert.equal(trainingDisplayPercent('running', 120, 30000, true, 25), 25)

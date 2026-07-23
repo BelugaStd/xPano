@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,10 @@ from pathlib import Path
 from scripts.lichtfeld_training import (
     LichtfeldLogTracker,
     LichtfeldTrainingConfig,
+    LichtfeldStartupWatchdog,
+    build_lichtfeld_diagnostic,
     build_lichtfeld_environment,
+    classify_lichtfeld_failure,
     parse_runtime_state_result,
     build_runtime_override_code,
     build_lichtfeld_training_command,
@@ -187,6 +191,34 @@ class LichtfeldTrainingCommandTests(unittest.TestCase):
 
 
 class LichtfeldTrainingProgressTests(unittest.TestCase):
+    def test_startup_watchdog_uses_inactivity_instead_of_a_fixed_total_deadline(self):
+        watchdog = LichtfeldStartupWatchdog(timeout_seconds=120, started_at=0)
+
+        self.assertFalse(watchdog.expired(now=119))
+        watchdog.touch("LichtFeld log is growing", now=119)
+        self.assertFalse(watchdog.expired(now=238))
+        self.assertTrue(watchdog.expired(now=239))
+        self.assertIn("LichtFeld log is growing", watchdog.failure_message(now=239))
+
+    def test_training_diagnostic_uses_stable_failure_codes_and_scrubs_user_paths(self):
+        config = LichtfeldTrainingConfig(
+            executable=Path(r"C:\xPano\runtime\lichtfeld-studio\bin\LichtFeld-Studio.exe"),
+            data_path=Path(r"C:\Users\Alice\Project\images"),
+            output_path=Path(r"C:\Users\Alice\Project\work\training\runs\job-1"),
+            profile_root=Path(r"C:\Users\Alice\AppData\Local\xPano\lichtfeld-studio\0.5.3\profile"),
+        )
+
+        payload = build_lichtfeld_diagnostic(
+            config,
+            "LFS_PROCESS_EXITED:139: Vulkan loader failed at C:\\Users\\Alice\\Project\\images",
+            ["[error] C:\\Users\\Alice\\Project\\images\\frame.jpg"],
+        )
+
+        self.assertEqual(classify_lichtfeld_failure("CUDA out of memory"), "LFS_GPU_OUT_OF_MEMORY")
+        self.assertEqual(payload["failure"]["code"], "LFS_VULKAN_RUNTIME_FAILED")
+        self.assertNotIn("Alice", json.dumps(payload))
+        self.assertEqual(payload["launch"]["iterations"], 30000)
+
     def test_parses_authoritative_runtime_state_from_editor_output(self):
         result = {
             "structuredContent": {

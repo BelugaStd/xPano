@@ -1042,3 +1042,8 @@
 - `release_staging.py` now rejects missing, corrupt, unexpected, or incomplete LFS source/staged trees. A production staging request can rehydrate LFS solely from the pinned ZIP; extracted cache files are discarded before the portable inventory check.
 - `build_installer.ps1` now requires `-LichtfeldArchive` or `XPANO_LICHTFELD_ARCHIVE` outside an explicit development build. The former portable assembler is retired and delegates to that installer path.
 - Focused packaging tests passed (28). A real archive-driven stage produced 2,205 manifest entries; LFS contains 1,245 portable files, required RML/locale resources, the expected executable SHA-256, and a passing 227-PE DLL closure check.
+
+# 2026-07-23 Phase 67 detailed implementation plan refreshed
+
+- User requested a detailed plan before further product changes. The active plan now separates completed supply-chain/staging work from the remaining runtime-boundary, profile isolation, readiness, lifecycle, diagnostics, densification-isolation, and installed-product acceptance phases.
+- No application behavior, runtime payload, installer, or release artifact was changed while preparing this plan.

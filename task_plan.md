@@ -1237,23 +1237,58 @@ Replace the repository README with a concise Chinese guide written from the pers
 
 Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnosable, and release-gated on Windows x64. Keep Gaussian training and on-demand densification as separate runtime chains. Do not change LFS training semantics or upgrade the upstream runtime during this phase.
 
-## Plan
+## Detailed Plan
 
-- [x] Baseline the exact v0.5.3 archive, upstream commit, license, complete portable layout, and current installer behavior; preserve current parameter/progress behavior as regression fixtures.
-- [x] Replace the untracked-directory build input with a pinned, content-addressed LFS artifact and tracked manifest containing source/version/archive hash plus a filtered per-file inventory.
-- [x] Make `build_installer.ps1` the sole release assembly path. Retire or redirect `build_release.ps1` through the same staging contract so no package flavor can omit `runtime/lichtfeld-studio`.
-- [x] Strengthen staging validation: verify the full LFS inventory, resource sentinels, static DLL closure, licenses, architecture, and relocated-path layout before Tauri/NSIS packaging.
-- [ ] Add production signing support and make unsigned production releases fail closed; development builds remain explicitly marked and cannot be promoted as release artifacts.
-- [ ] Centralize packaged LFS resolution, fast integrity checks, working directory, child environment, config/profile isolation, and Windows path normalization behind one Rust runtime boundary.
-- [ ] Stop production launches from honoring development overrides or arbitrary Python environments; invoke the bundled supervisor Python explicitly and remove Python/DLL pollution variables while retaining required Windows/GPU environment.
-- [ ] Isolate xPano's LFS config and plugins from pre-existing user-level LichtFeld state using an upstream-supported profile/config boundary, proven by native tests before adoption.
-- [ ] Replace file-existence readiness with one structured training preflight covering critical file hashes, resource layout, `--version`, NVIDIA/CUDA driver availability, Vulkan device availability, output writability, and stable error categories.
-- [ ] Make AppShell and the training workspace consume the same readiness result; runtime corruption or unsupported hardware must disable training with a specific recovery action.
-- [ ] Change the supervisor's fixed 120-second startup deadline into an inactivity timeout refreshed by valid LFS startup activity, so large datasets are not killed while making progress.
-- [ ] Preserve native child exit status and startup diagnostics, map common Windows loader/GPU failures, and write a user-exportable diagnostic bundle without recording sensitive environment values.
-- [ ] Keep densification independent; revalidate its installed CPU/CUDA profile against the current driver and perform a CUDA probe when the active profile is CUDA.
-- [ ] Add source tests, staged-layout tests, relocated installer smoke tests, Unicode/space path tests, upgrade tests, stale-plugin tests, and clean-machine GPU/driver acceptance before release.
-- [ ] Roll out as a preview to a small user cohort, review diagnostic bundles, then promote only when all release gates pass; retain the prior installer and manifest as rollback artifacts.
+### A. Freeze the LFS supply chain and release boundary
+
+- [x] Baseline the exact v0.5.3 archive, upstream commit, license, complete portable layout, and current parameter/progress behavior as regression fixtures.
+- [x] Replace the untracked-directory build input with a pinned, content-addressed archive and tracked manifest. The manifest records the upstream commit, archive name/size/SHA-256, sentinels, and the filtered per-file inventory.
+- [x] Route installer assembly through one staging contract. The former portable assembler delegates to the installer path so no package variant can silently omit `runtime/lichtfeld-studio`.
+- [x] Make staging fail closed for missing, modified, extra, non-portable, or incomplete LFS files; retain PE import-closure, architecture, license, resource-layout, and relocated-tree checks.
+- [ ] Add an explicit release-signing gate. A production release must either carry the configured signing identity or fail; an unsigned development build must be visibly marked and excluded from promotion.
+
+### B. Establish one production runtime boundary
+
+- [ ] Introduce a small Rust `LichtfeldRuntime` resolver used by readiness, start-training, and diagnostics. It returns only the packaged executable, bundled supervisor Python/scripts, resource root, profile root, normal Windows executable path, and the manifest version.
+- [ ] Move duplicated path/file checks out of `run_lichtfeld_preflight`, `training_readiness_blocking`, and `start_training_job_blocking` into that resolver. Keep `plain_windows_path` on the third-party executable and its working directory; do not reintroduce `\\?\\` paths.
+- [ ] Make production resolution package-first and non-overridable. Development overrides remain available only behind an explicit development-build switch, never through ordinary environment variables or the user PATH.
+- [ ] Launch the bundled Python supervisor with an allowlisted child environment: remove Conda/venv/Python/plugin/DLL-injection variables, keep Windows system variables and GPU-driver discovery, set only the required UTF-8 and user-site controls, and record the sanitized launch contract in diagnostics without serializing the environment itself.
+
+### C. Isolate persistent LFS state without breaking normal GUI use
+
+- [ ] Verify the upstream-supported config/profile controls with a native LFS launch before changing ownership. Do not invent unsupported command-line flags or modify the bundled LFS tree at runtime.
+- [ ] Keep xPano-owned LFS state under `%LOCALAPPDATA%\\xPano\\lichtfeld-studio\\<manifest-version>`, separate from any globally installed LichtFeld profile. Split stable GUI preferences from per-run temporary state so a stale training session cannot affect the next run.
+- [ ] Allocate per-job launch metadata and log directories under the existing project training run. Clean only xPano-created stale lock/process metadata after proving the owning process has exited; never erase a user LFS profile or previous training artifacts.
+- [ ] Add an upgrade rule: a manifest-version change creates a fresh xPano profile, preserves the prior one for rollback, and gives a deterministic migration/cleanup notice rather than sharing incompatible state.
+
+### D. Make readiness one authoritative, bounded protocol
+
+- [ ] Keep full hashing in staging; at runtime hash only the manifest sentinels and verify the executable's normal-path resource layout. Cache a successful check by manifest version plus sentinel metadata, then invalidate it if the install changes.
+- [ ] Expand `runtime_readiness.py lichtfeld-probe` into the sole structured preflight: manifest/resource mismatch, executable `--version`, CUDA driver load/device count, Vulkan loader/device count, valid COLMAP input, writable output, profile creation, and child startability.
+- [ ] Give every terminal preflight failure a stable public code, a concise recovery action, and raw technical detail for the diagnostic bundle. Distinguish runtime corruption, missing VC/DLL dependency, driver missing, unsupported GPU, Vulkan failure, bad dataset, and unwritable output.
+- [ ] Have AppShell and the training workspace consume the same cached result. The start action must rerun the fast critical checks immediately before writing job state, then fail before `begin_job_impl` on a non-ready runtime.
+
+### E. Make launch, progress, cancellation, and restart robust
+
+- [ ] Preserve the current GUI-first command and MCP-based parameter application. Do not retry or restart a native LFS process automatically after a crash or user close.
+- [ ] Replace the absolute 120-second start limit with an inactivity watchdog. Valid stdout, log growth, MCP listener availability, dataset-load completion, parameter acknowledgement, and runtime progress refresh activity; a live but slow large dataset is allowed to continue.
+- [ ] Retain a separate hard upper bound for a completely silent child and configurable short graceful-shutdown/kill bounds for cancel. A timeout always records the last meaningful activity, elapsed idle time, process ID, and native exit code.
+- [ ] Treat manual LFS-window closure and child exit as one terminal state. Drain final stdout/log bytes, capture exit code, mark the project job failed or interrupted exactly once, release the pipeline lock, and leave the next Start action enabled.
+- [ ] Keep progress polling non-fatal. MCP failures remain visible diagnostics while stdout/log progress continues; training only fails on explicit LFS fatal output, native exit, inactivity timeout, or missing completed artifact.
+
+### F. Add actionable diagnostics and support artifacts
+
+- [ ] Write a per-run structured launch record before spawning: app/LFS/manifest versions, resolved normal paths, selected GPU probe result, command flags with data paths redacted to project-relative form, profile generation, timestamps, and preflight result.
+- [ ] On failure, collect bounded stdout/stderr tail, LFS log tail, exit status, watchdog history, sentinel outcomes, GPU/Vulkan diagnostics, and process-tree information. Do not collect user environment variables, unrelated file names, or complete media paths.
+- [ ] Provide one UI action to open/export this diagnostic bundle, and map public failure codes to recovery text that never claims a DLL is missing when the true fault is a driver, asset, stale state, or process crash.
+
+### G. Keep densification isolated and validate the installed product
+
+- [ ] Do not merge LFS GUI training with the on-demand Torch/Open3D densification runtime. The two have independent manifests, Python activators, logs, cache roots, and recovery messages.
+- [ ] On densification startup, revalidate the selected CPU/CUDA profile and issue a CUDA probe only for the CUDA profile; retain CPU fallback semantics where the task remains meaningful.
+- [ ] Add regression tests before each implementation boundary, then run unit/integration tests for Python, Rust, and frontend contracts; use staged-layout tests rather than source-only tests for packaging claims.
+- [ ] Run installed/relocated smoke tests from paths containing spaces and Chinese characters, with a polluted host Python/PATH and pre-existing user LFS state; cover a missing sentinel, DLL/driver failure, invalid Vulkan, manual close, silent timeout, slow-progress startup, rerun after failure, and upgrade/profile-version separation.
+- [ ] Only after all gates pass: construct a signed preview installer, verify the staged and installed manifests, retain the previous installer plus hashes for rollback, collect a small preview cohort's diagnostic bundles, and promote only if no runtime-class failure remains unexplained.
 
 ## Decisions
 
@@ -1266,4 +1301,4 @@ Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnos
 | Do not bundle `nvcuda.dll` or install a CUDA toolkit | `nvcuda.dll` belongs to the NVIDIA display driver. Copying it app-local would hide the real driver incompatibility and is not a valid repair. |
 | No automatic training retry | Retrying native crashes can duplicate GPU allocations or create competing output writers without correcting the cause. |
 
-**Status:** planned only. No product code, runtime payload, installer, or release artifact has been changed.
+**Status:** supply-chain/staging work is implemented in the active worktree and has focused packaging acceptance. Runtime-boundary, isolation, watchdog, diagnostics, release signing, and installed-product acceptance remain planned; no new installer may be produced before those items pass.
