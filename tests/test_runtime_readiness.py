@@ -36,6 +36,7 @@ class RuntimeReadinessTests(unittest.TestCase):
             "bin/lfs_core.dll": b"core",
             "bin/lfs_visualizer.dll": b"visualizer",
             "bin/vulkan-1.dll": b"vulkan",
+            "bin/lichtfeld/py.typed": b"",
             "share/LichtFeld-Studio/locales/en.json": b'{"language":"en"}',
             "share/LichtFeld-Studio/assets/rmlui/rendering.rml": b"<rml />",
             "share/LichtFeld-Studio/assets/rmlui/scene_tree.rml": b"<rml />",

@@ -1054,3 +1054,9 @@
 - Replaced version-specific CUDA/Vulkan variable removal with category-based removal in both Rust and Python. This now removes future CUDA Toolkit variables and Vulkan loader overrides while retaining Windows and NVIDIA driver discovery.
 - Python (319), Rust (117), frontend unit (54), frontend lint/build, PowerShell parser, Python compileall, and diff-whitespace gates pass. `cargo fmt --check` remains unavailable because the installed Windows GNU toolchain has no rustfmt component.
 - A development NSIS build remains in progress; it has not emitted an artifact and is not an acceptance or release result.
+
+# 2026-07-23 Phase 67 installed-runtime correction
+
+- Installed/relocated acceptance exposed a real preflight defect: the LFS inventory contains six legitimate zero-byte marker files, but runtime validation rejected every zero-byte record as corrupt.
+- Updated runtime manifest validation to allow zero-byte files while continuing to validate their safe relative path, existence, exact size, and SHA-256. The LFS fixture now includes a zero-byte `py.typed` marker.
+- Source manifest parsing confirms all 1,450 LFS entries, including zero-byte markers, are accepted. The complete Python suite passes; a fresh installer is required before repeating installed acceptance.

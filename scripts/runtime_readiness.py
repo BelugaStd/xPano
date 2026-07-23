@@ -76,7 +76,7 @@ def _load_lichtfeld_manifest(resource_root):
         if (
             key in records
             or not isinstance(record.get("size"), int)
-            or record["size"] <= 0
+            or record["size"] < 0
             or not re.fullmatch(r"[0-9a-f]{64}", digest)
         ):
             _fail("LFS_RUNTIME_CORRUPT", f"LichtFeld runtime manifest record is invalid: {key}")
