@@ -73,6 +73,18 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("-LichtfeldArchive is required", build_script)
         self.assertIn("--lichtfeld-archive", build_script)
 
+    def test_production_installer_requires_and_verifies_authenticode_signing(self):
+        root = Path(__file__).parents[1]
+        build_script = (root / "scripts" / "build_installer.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[string]$SigningCertificateThumbprint", build_script)
+        self.assertIn("[string]$TimestampUrl", build_script)
+        self.assertIn("Resolve-ReleaseSigning", build_script)
+        self.assertIn("certificateThumbprint", build_script)
+        self.assertIn("timestampUrl", build_script)
+        self.assertIn("Get-AuthenticodeSignature", build_script)
+        self.assertIn("UNSIGNED DEVELOPMENT BUILD", build_script)
+
     def test_legacy_portable_builder_is_retired_in_favor_of_the_installer(self):
         root = Path(__file__).parents[1]
         legacy = (root / "scripts" / "build_release.ps1").read_text(encoding="utf-8")
@@ -80,6 +92,16 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("build_installer.ps1", legacy)
         self.assertIn("retired", legacy)
         self.assertNotIn("Copy-PortableDirectory", legacy)
+
+    def test_light_installer_delegates_all_release_contract_arguments(self):
+        root = Path(__file__).parents[1]
+        light = (root / "scripts" / "build_light_installer.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[string]$LichtfeldArchive", light)
+        self.assertIn("[string]$SigningCertificateThumbprint", light)
+        self.assertIn("[string]$TimestampUrl", light)
+        self.assertIn("[switch]$FullOffline", light)
+        self.assertIn("@PSBoundParameters", light)
 
     def test_vc_redistributables_are_never_treated_as_windows_inbox_dlls(self):
         self.assertTrue(is_windows_inbox_dll("kernel32.dll"))

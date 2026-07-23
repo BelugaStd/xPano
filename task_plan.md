@@ -1301,4 +1301,4 @@ Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnos
 | Do not bundle `nvcuda.dll` or install a CUDA toolkit | `nvcuda.dll` belongs to the NVIDIA display driver. Copying it app-local would hide the real driver incompatibility and is not a valid repair. |
 | No automatic training retry | Retrying native crashes can duplicate GPU allocations or create competing output writers without correcting the cause. |
 
-**Status:** supply-chain/staging work is implemented in the active worktree and has focused packaging acceptance. Runtime-boundary, isolation, watchdog, diagnostics, release signing, and installed-product acceptance remain planned; no new installer may be produced before those items pass.
+**Status:** supply-chain/staging, runtime-boundary, supervisor isolation, readiness caching, terminal-error retention, and production-signing gates are implemented in the reviewed worktree. Installed/relocated product acceptance remains required; production release remains blocked until a real signing certificate and timestamp service are configured.

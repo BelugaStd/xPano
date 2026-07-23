@@ -47,6 +47,17 @@ _LFS_ENVIRONMENT_REMOVALS = (
 _LFS_STARTUP_INACTIVITY_SECONDS = 300
 
 
+def _is_lfs_environment_override(name):
+    normalized = str(name).upper()
+    return (
+        normalized in _LFS_ENVIRONMENT_REMOVALS
+        or normalized in {"CUDA_HOME", "CUDA_ROOT"}
+        or normalized.startswith("CUDA_PATH")
+        or normalized.startswith("VULKAN_")
+        or normalized.startswith("VK_")
+    )
+
+
 @dataclass(frozen=True)
 class LichtfeldTrainingConfig:
     executable: Path
@@ -82,8 +93,9 @@ def build_lichtfeld_environment(executable, profile_root, inherited=None):
     for directory in (profile_root, roaming, local):
         directory.mkdir(parents=True, exist_ok=True)
     environment = dict(os.environ if inherited is None else inherited)
-    for name in _LFS_ENVIRONMENT_REMOVALS:
-        environment.pop(name, None)
+    for name in list(environment):
+        if _is_lfs_environment_override(name):
+            environment.pop(name, None)
     for name in ("HOMEDRIVE", "HOMEPATH"):
         environment.pop(name, None)
     system_root = Path(environment.get("SystemRoot", r"C:\\Windows"))

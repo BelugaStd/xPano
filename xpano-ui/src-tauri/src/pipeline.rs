@@ -25,7 +25,28 @@ fn configure_metashape_runtime(command: &mut Command, site_packages: Option<&str
     }
 }
 
-fn configure_training_supervisor_environment(command: &mut Command) {
+fn is_training_supervisor_environment_override(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "CONDA_DEFAULT_ENV"
+            | "CONDA_PREFIX"
+            | "PYTHONHOME"
+            | "PYTHONPATH"
+            | "PYTHONUSERBASE"
+            | "QT_PLUGIN_PATH"
+            | "QT_QPA_PLATFORM_PLUGIN_PATH"
+            | "VIRTUAL_ENV"
+            | "XPANO_PYTHON"
+            | "XPANO_ROOT"
+            | "CUDA_HOME"
+            | "CUDA_ROOT"
+    ) || name.starts_with("CUDA_PATH")
+        || name.starts_with("VULKAN_")
+        || name.starts_with("VK_")
+}
+
+pub(crate) fn configure_training_supervisor_environment(command: &mut Command, python: &Path) {
     for name in [
         "CONDA_DEFAULT_ENV",
         "CONDA_PREFIX",
@@ -37,9 +58,38 @@ fn configure_training_supervisor_environment(command: &mut Command) {
         "VIRTUAL_ENV",
         "XPANO_PYTHON",
         "XPANO_ROOT",
+        "CUDA_PATH",
+        "VULKAN_SDK",
+        "VK_ADD_DRIVER_FILES",
+        "VK_ADD_LAYER_PATH",
+        "VK_DRIVER_FILES",
+        "VK_ICD_FILENAMES",
+        "VK_LAYER_PATH",
     ] {
         command.env_remove(name);
     }
+    for (name, _) in std::env::vars_os() {
+        if is_training_supervisor_environment_override(&name) {
+            command.env_remove(name);
+        }
+    }
+    let system_root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let python_dir = python.parent().unwrap_or_else(|| Path::new("."));
+    let system32 = system_root.join("System32");
+    let path_separator = if cfg!(windows) { ";" } else { ":" };
+    let search_path = [python_dir, system32.as_path(), system_root.as_path()]
+    .iter()
+    .map(|path| path.to_string_lossy())
+    .collect::<Vec<_>>()
+    .join(path_separator);
+    command
+        .env("PATH", search_path)
+        .env("SystemRoot", &system_root)
+        .env("WINDIR", &system_root)
+        .env("ComSpec", system_root.join("System32").join("cmd.exe"));
 }
 
 fn find_media_project_root(args: &[String]) -> Option<String> {
@@ -381,6 +431,13 @@ fn configure_python_io(command: &mut Command) {
     command.env("PYTHONNOUSERSITE", "1");
 }
 
+fn training_exit_message(exit_code: &str, supervisor_error: Option<&str>) -> String {
+    supervisor_error
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("LichtFeld exited with code {exit_code}"))
+}
+
 fn emit_job_event(app: &AppHandle, event: crate::contracts::JobEvent) {
     let _ = app.emit("job:event", event);
 }
@@ -542,34 +599,37 @@ impl PipelineState {
             .file_name()
             .and_then(|value| value.to_str())
             .is_some_and(|value| value.eq_ignore_ascii_case("lichtfeld_training.py"));
-        let ffmpeg = crate::tool_resolver::locate_ffmpeg();
-        let ffprobe = crate::tool_resolver::locate_ffprobe();
-
         let mut cmd = Command::new(&python);
-        configure_python_io(&mut cmd);
-        cmd.env_remove("PYTHONPATH");
         if is_training_supervisor {
-            configure_training_supervisor_environment(&mut cmd);
+            configure_python_io(&mut cmd);
+            configure_training_supervisor_environment(&mut cmd, Path::new(&python));
+        } else {
+            configure_python_io(&mut cmd);
+            cmd.env_remove("PYTHONPATH");
         }
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         if let Some(root) = script_path.parent().and_then(|path| path.parent()) {
             cmd.current_dir(root);
         }
-        cmd.env("XPANO_FFMPEG", &ffmpeg);
-        cmd.env("XPANO_FFPROBE", &ffprobe);
-        if let Some(ffmpeg_dir) = std::path::Path::new(&ffmpeg).parent() {
-            let current_path = std::env::var("PATH").unwrap_or_default();
-            let separator = if cfg!(windows) { ";" } else { ":" };
-            cmd.env(
-                "PATH",
-                format!(
-                    "{}{}{}",
-                    ffmpeg_dir.to_string_lossy(),
-                    separator,
-                    current_path
-                ),
-            );
+        if !is_training_supervisor {
+            let ffmpeg = crate::tool_resolver::locate_ffmpeg();
+            let ffprobe = crate::tool_resolver::locate_ffprobe();
+            cmd.env("XPANO_FFMPEG", &ffmpeg);
+            cmd.env("XPANO_FFPROBE", &ffprobe);
+            if let Some(ffmpeg_dir) = std::path::Path::new(&ffmpeg).parent() {
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                let separator = if cfg!(windows) { ";" } else { ":" };
+                cmd.env(
+                    "PATH",
+                    format!(
+                        "{}{}{}",
+                        ffmpeg_dir.to_string_lossy(),
+                        separator,
+                        current_path
+                    ),
+                );
+            }
         }
         cmd.arg(script_path.to_str().unwrap_or(script));
         for arg in args {
@@ -665,12 +725,16 @@ impl PipelineState {
 
         let start_time = Arc::new(Mutex::new(std::time::Instant::now()));
         let latest_progress = Arc::new(Mutex::new(None::<PipelineProgressEvent>));
+        let latest_supervisor_error = Arc::new(Mutex::new(None::<String>));
+        let (reader_done_sender, reader_done_receiver) = std::sync::mpsc::channel::<()>();
 
         // Spawn stdout reader
         {
             let app = app.clone();
             let start = start_time.clone();
             let latest = latest_progress.clone();
+            let supervisor_error = latest_supervisor_error.clone();
+            let reader_done = reader_done_sender.clone();
             let stdout_job_kind = job_kind.clone();
             let stdout_job_context = job_context.clone();
             std::thread::spawn(move || {
@@ -751,6 +815,11 @@ impl PipelineState {
 
                     // ERROR: prefix
                     if let Some(err) = trimmed.strip_prefix("ERROR:") {
+                        if stdout_job_kind == "training" {
+                            if let Ok(mut latest) = supervisor_error.lock() {
+                                *latest = Some(err.trim().to_string());
+                            }
+                        }
                         let _ = app.emit(
                             "pipeline:error",
                             PipelineErrorEvent {
@@ -798,6 +867,7 @@ impl PipelineState {
                         );
                     }
                 }
+                let _ = reader_done.send(());
             });
         }
 
@@ -805,6 +875,8 @@ impl PipelineState {
         {
             let app = app.clone();
             let start = start_time.clone();
+            let supervisor_error = latest_supervisor_error.clone();
+            let reader_done = reader_done_sender;
             let stderr_job_kind = job_kind.clone();
             let stderr_job_context = job_context.clone();
             std::thread::spawn(move || {
@@ -816,6 +888,11 @@ impl PipelineState {
                             break;
                         }
                         if let Some(err) = trimmed.strip_prefix("ERROR:") {
+                            if stderr_job_kind == "training" {
+                                if let Ok(mut latest) = supervisor_error.lock() {
+                                    *latest = Some(err.trim().to_string());
+                                }
+                            }
                             let _ = app.emit(
                                 "pipeline:error",
                                 PipelineErrorEvent {
@@ -854,6 +931,7 @@ impl PipelineState {
                         }
                     }
                 }
+                let _ = reader_done.send(());
             });
         }
 
@@ -890,9 +968,17 @@ impl PipelineState {
             let app = app.clone();
             let cancelled = cancelled.clone();
             let watcher_job_context = job_context.clone();
+            let supervisor_error = latest_supervisor_error.clone();
             std::thread::spawn(move || {
                 let status = child.wait();
+                for _ in 0..2 {
+                    let _ = reader_done_receiver.recv_timeout(std::time::Duration::from_millis(250));
+                }
                 let was_cancelled = cancelled.load(Ordering::SeqCst);
+                let last_supervisor_error = supervisor_error
+                    .lock()
+                    .ok()
+                    .and_then(|value| value.clone());
 
                 let is_current = is_current_pipeline(&app, pid);
 
@@ -978,6 +1064,9 @@ impl PipelineState {
                                 .code()
                                 .map(|value| value.to_string())
                                 .unwrap_or_else(|| "unknown".to_string());
+                            let training_error = (job_kind == "training").then(|| {
+                                training_exit_message(&code, last_supervisor_error.as_deref())
+                            });
                             if job_kind == "media" {
                                 let _ = settle_media_project(
                                     &app,
@@ -989,7 +1078,7 @@ impl PipelineState {
                                     &app,
                                     &output_path,
                                     Some(false),
-                                    Some(&format!("LichtFeld exited with code {code}")),
+                                    training_error.as_deref(),
                                 );
                             } else {
                                 let _ = update_reconstruction_project(
@@ -1183,8 +1272,12 @@ mod tests {
     #[test]
     fn training_supervisor_removes_development_python_and_qt_overrides() {
         let mut command = Command::new("python");
+        command.env("PATH", r"C:\\HostPython;C:\\HostQt");
 
-        configure_training_supervisor_environment(&mut command);
+        configure_training_supervisor_environment(
+            &mut command,
+            Path::new(r"C:\\xPano\\binaries\\python\\python.exe"),
+        );
 
         let env = command
             .get_envs()
@@ -1206,9 +1299,44 @@ mod tests {
             "VIRTUAL_ENV",
             "XPANO_PYTHON",
             "XPANO_ROOT",
+            "CUDA_PATH",
+            "VK_ICD_FILENAMES",
+            "VK_LAYER_PATH",
         ] {
             assert_eq!(env.get(name), Some(&None), "{name} must not reach LFS");
         }
+        let path = env.get("PATH").and_then(|value| value.as_deref()).unwrap();
+        assert!(path.starts_with(r"C:\\xPano\\binaries\\python"));
+        assert!(!path.contains("HostPython"));
+    }
+
+    #[test]
+    fn training_supervisor_rejects_future_cuda_and_vulkan_toolkit_overrides() {
+        for name in [
+            "CUDA_PATH_V13_0",
+            "cuda_home",
+            "VULKAN_SDK",
+            "VK_INSTANCE_LAYERS",
+        ] {
+            assert!(is_training_supervisor_environment_override(
+                std::ffi::OsStr::new(name)
+            ));
+        }
+    }
+
+    #[test]
+    fn training_exit_preserves_the_supervisor_failure_for_project_recovery() {
+        assert_eq!(
+            training_exit_message(
+                "120",
+                Some("LFS_VULKAN_RUNTIME_FAILED: Vulkan device initialization failed"),
+            ),
+            "LFS_VULKAN_RUNTIME_FAILED: Vulkan device initialization failed",
+        );
+        assert_eq!(
+            training_exit_message("120", None),
+            "LichtFeld exited with code 120",
+        );
     }
 
     #[test]

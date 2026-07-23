@@ -251,10 +251,6 @@ pub fn resolve_bundled_resource_path(relative: &str) -> PathBuf {
     .unwrap_or_else(|| relative.to_path_buf())
 }
 
-pub fn resolve_bundled_python() -> PathBuf {
-    resolve_bundled_resource_path("binaries/python/python.exe")
-}
-
 pub fn resolve_resource_path(relative: &str) -> PathBuf {
     let relative = Path::new(relative);
     if relative.is_absolute() {

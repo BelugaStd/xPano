@@ -1,15 +1,15 @@
 param(
     [string]$FfmpegExe = "",
     [string]$FfprobeExe = "",
+    [string]$LichtfeldArchive = "",
+    [string]$SigningCertificateThumbprint = "",
+    [string]$TimestampUrl = "",
     [switch]$SkipVerification,
-    [switch]$DevelopmentBuild
+    [switch]$DevelopmentBuild,
+    [switch]$FullOffline
 )
 
 $ErrorActionPreference = "Stop"
 $builder = Join-Path $PSScriptRoot "build_installer.ps1"
-& powershell -NoProfile -ExecutionPolicy Bypass -File $builder `
-    -FfmpegExe $FfmpegExe `
-    -FfprobeExe $FfprobeExe `
-    -SkipVerification:$SkipVerification `
-    -DevelopmentBuild:$DevelopmentBuild
+& $builder @PSBoundParameters
 exit $LASTEXITCODE
