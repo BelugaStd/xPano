@@ -4,7 +4,7 @@
 在保留现有用户改动的前提下，完整实现 `docs/UI_WORKSPACE_REDESIGN_SPEC.md` 的阶段 3（对齐工作区）和阶段 4（成果与后处理），使用 `D:\3DRegistration\test` 的真实素材打通抽帧、对齐、点云预览和致密化；随后实现可重复、可诊断、安装即用的 Windows 安装器。CUDA、torch、Open3D 等致密化大依赖不随包发布，缺失时按受控镜像源自动配置；本任务期间禁止实际下载大包，使用下载计划、假源和小型探针验收。
 
 ## Current Phase
-Phase 62 in progress
+Phase 66 complete
 
 ## Phases
 
@@ -1208,3 +1208,62 @@ The FFmpeg graph is conditional: `fps -> [restore lut3d] -> [style lut3d] -> yuv
 | Preserve the no-LUT fast path | LUT processing is CPU work; material without either option keeps current extraction cost and output behavior. |
 
 **Status:** planned only. No Phase 63 product code has been written and no release build is in scope.
+
+# Phase 66: user-facing README
+
+## Goal
+
+Replace the repository README with a concise Chinese guide written from the perspective of an xPano user. It must explain the normal workflow, major capabilities, project/output layout, supported inputs, external-tool requirements, and safety/quality limits without documenting developer implementation details.
+
+## Plan
+
+- [x] Inventory current user-visible workflows from UI, Tauri commands, scripts, packaging resources, and existing product documents.
+- [x] Cross-check import types, processing stages, project artifacts, environment dependencies, and recovery boundaries against source code.
+- [x] Draft the root README with task-oriented sections: prerequisites, quick start, feature map, project files, and important notes.
+- [x] Review every factual statement against source, then run Markdown and repository-status checks.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Write for end users, not developers | The requested document should help a new user complete a project instead of exposing internal architecture. |
+| Document current limitations explicitly | Alignment quality, external Metashape ownership, and on-demand densification setup affect whether a user can finish safely. |
+| Keep the guide concise | The README should be a first-use guide; advanced implementation detail belongs in `docs/`. |
+
+**Status:** complete. The root README is now a concise source-backed Chinese user guide. No application code, package, or release artifact changed.
+# Phase 67: LFS launch and packaging reliability hardening
+
+## Goal
+
+Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnosable, and release-gated on Windows x64. Keep Gaussian training and on-demand densification as separate runtime chains. Do not change LFS training semantics or upgrade the upstream runtime during this phase.
+
+## Plan
+
+- [ ] Baseline the exact v0.5.3 archive, upstream commit, license, complete portable layout, and current installer behavior; preserve current parameter/progress behavior as regression fixtures.
+- [ ] Replace the untracked-directory build input with a pinned, content-addressed LFS artifact and tracked manifest containing source/version/archive hash plus a filtered per-file inventory.
+- [ ] Make `build_installer.ps1` the sole release assembly path. Retire or redirect `build_release.ps1` through the same staging contract so no package flavor can omit `runtime/lichtfeld-studio`.
+- [ ] Strengthen staging validation: verify the full LFS inventory, resource sentinels, static DLL closure, licenses, architecture, and relocated-path layout before Tauri/NSIS packaging.
+- [ ] Add production signing support and make unsigned production releases fail closed; development builds remain explicitly marked and cannot be promoted as release artifacts.
+- [ ] Centralize packaged LFS resolution, fast integrity checks, working directory, child environment, config/profile isolation, and Windows path normalization behind one Rust runtime boundary.
+- [ ] Stop production launches from honoring development overrides or arbitrary Python environments; invoke the bundled supervisor Python explicitly and remove Python/DLL pollution variables while retaining required Windows/GPU environment.
+- [ ] Isolate xPano's LFS config and plugins from pre-existing user-level LichtFeld state using an upstream-supported profile/config boundary, proven by native tests before adoption.
+- [ ] Replace file-existence readiness with one structured training preflight covering critical file hashes, resource layout, `--version`, NVIDIA/CUDA driver availability, Vulkan device availability, output writability, and stable error categories.
+- [ ] Make AppShell and the training workspace consume the same readiness result; runtime corruption or unsupported hardware must disable training with a specific recovery action.
+- [ ] Change the supervisor's fixed 120-second startup deadline into an inactivity timeout refreshed by valid LFS startup activity, so large datasets are not killed while making progress.
+- [ ] Preserve native child exit status and startup diagnostics, map common Windows loader/GPU failures, and write a user-exportable diagnostic bundle without recording sensitive environment values.
+- [ ] Keep densification independent; revalidate its installed CPU/CUDA profile against the current driver and perform a CUDA probe when the active profile is CUDA.
+- [ ] Add source tests, staged-layout tests, relocated installer smoke tests, Unicode/space path tests, upgrade tests, stale-plugin tests, and clean-machine GPU/driver acceptance before release.
+- [ ] Roll out as a preview to a small user cohort, review diagnostic bundles, then promote only when all release gates pass; retain the prior installer and manifest as rollback artifacts.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Pin v0.5.3 instead of upgrading LFS | The observed defects are packaging, isolation, readiness, and diagnostics failures. An upstream upgrade would add an unrelated compatibility variable. |
+| One staging implementation for installer and portable outputs | Duplicate packagers already produce different LFS capabilities and are a direct release risk. |
+| Full validation at build time, fast sentinel validation at startup | Hashing the entire 576 MB runtime on every page visit is unnecessary; build-time closure plus cached critical-file verification gives reliability without startup regressions. |
+| Fail fast on corrupt bundled files or unsupported GPU | Continuing can only crash or produce an invalid training run; there is no semantically equivalent fallback for GUI LFS training. |
+| Do not bundle `nvcuda.dll` or install a CUDA toolkit | `nvcuda.dll` belongs to the NVIDIA display driver. Copying it app-local would hide the real driver incompatibility and is not a valid repair. |
+| No automatic training retry | Retrying native crashes can duplicate GPU allocations or create competing output writers without correcting the cause. |
+
+**Status:** planned only. No product code, runtime payload, installer, or release artifact has been changed.

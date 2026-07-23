@@ -1010,3 +1010,25 @@
 - Phase 62 verification complete: Python 299/299, Rust 106/106, frontend 53/53, frontend lint, TypeScript/Vite production build, Python `compileall`, and `git diff --check` all pass. No installer, release artifact, tag, commit or push was created.
 - External LUT acquisition is currently blocked: DJI pages did not expose a direct asset and GitHub/CDN retrieval failed across direct API, raw file, proxy and shallow-clone attempts. No code was written that would advertise an approximate or missing LUT as a real restoration preset.
 - Phase 63 planned at user request: add independent `styleLutPath` for every video, retain `.osv`-only restoration through `colorLutPreset`, migrate legacy `colorLutPath` to the style layer, and restrict extraction to a fixed restoration-then-style chain. No Phase 63 implementation has started.
+
+# 2026-07-22 Phase 66 started
+
+- User requested a concise end-user README after a source-backed review of the whole product workflow.
+- Scope is documentation only. The guide will cover normal use, supported inputs, feature highlights, project artifacts, external dependencies and important limitations; no application behavior, package or release will change.
+- Prior release investigation is relevant to wording: Metashape remains external, while densification downloads its large runtime on demand in the standard installer.
+- Reviewed the existing README, documentation index, packaging configuration, and repository layout. The current README contains obsolete distribution and alignment claims, so the new document will be a concise replacement.
+- A root-level `package.json` lookup was invalid because the frontend package lives under `xpano-ui/`; no files were changed and subsequent inspection will use that location.
+- Reviewed the user quickstart, verified Metashape workflow, multi-track behavior, COLMAP/densification documentation, training integration notes, and current frontend feature inventory. The README outline is now grounded in the actual workflow and must avoid obsolete developer-only material.
+- Cross-checked current UI code for workspace navigation, material types, LUT behavior, reconstruction controls, results, densification, and Gaussian training. The code confirms a newer restoration/style-LUT chain that the stale planning documents do not yet describe.
+- Cross-checked the source contracts, project/reconstruction command surfaces, and current UI guards. The README will explicitly distinguish supported mixed-material reconstruction (Metashape) from the presently blocked COLMAP mixed-material route, and will include the manual PSX re-export recovery path.
+- Confirmed the release support boundary and external dependencies from packaging/source. The old README's light/full package, manual system-Python and deprecated workflow sections will not survive the rewrite.
+- Confirmed `xpano_project.json` as the native project file and the compatible reopen markers for older/generated project folders. Confirmed the automatic project-location behavior and default LichtFeld GUI launch.
+- A search included nonexistent `scripts/run_lichtfeld_training.py`; it made no changes. The actual training entrypoint is `scripts/lichtfeld_training.py`.
+- Replaced the obsolete root README with a concise Chinese end-user guide. The draft covers Windows support, bundled/external dependencies, current material types, LUT behavior, the supported reconstruction matrix, non-destructive point-cloud versions, Gaussian training, project reopening, and practical limits.
+- README verification passed: UTF-8 decoding, required section/content checks, and internal-link checks all succeeded. `git diff --check` passed; Git only reported existing CRLF normalization warnings. Phase 66 is complete.
+- Verified the packaging support boundary and project-relative artifact model. The final document will specify Windows 10/11 x64, external Metashape licensing, and the need to preserve the full selected output directory.
+# Phase 67 LFS reliability planning
+
+- Completed a read-only audit of the React -> Tauri -> Python supervisor -> LichtFeld process chain and both installer/staging paths.
+- Verified the current local LFS source, release stage, and installed critical files are hash-identical; recursive DLL closure passed for 227 PE files.
+- Recorded a phased implementation and acceptance plan. No product code, runtime payload, package, or release artifact was changed.

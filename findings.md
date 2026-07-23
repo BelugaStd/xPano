@@ -841,6 +841,37 @@
 - The xPano launch chain is the affected boundary: Tauri resolves `runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe` to a `PathBuf`, Python then calls `config.executable.resolve(strict=False)`, and the child inherits the verbatim extended executable path. The source/manual launch uses a normal drive path and therefore does not trigger the LFS/MinGW mixed-separator bug.
 - The minimal repair boundary is xPano's Windows child-process launch: convert bundled executable, script and working-directory paths from the `\\?\` form to normal drive/UNC syntax before invoking Python/LFS, while retaining extended paths for user data where needed. Patching the third-party LFS resource code would be broader and would not fix other bundled tools that receive the same path form.
 
+# Phase 66 README research
+
+- The README must describe the product as an xPano project workflow, not as a standalone Metashape or LichtFeld wrapper.
+- Current source and release evidence confirm that core application, FFmpeg, COLMAP, bundled Python, LFS, and Metashape helper wheels ship with the application; Metashape itself remains an external licensed installation.
+- Densification is a separate on-demand runtime. The standard package does not include its large Torch/RoMa payload, so the guide must say that first use requires a network connection and free space instead of claiming offline availability.
+- The current root `README.md` is a long, stale technical/release document. It still refers to retired light/full packages and an old one-pass mixed workflow, so it must be replaced rather than incrementally edited.
+- Product-facing reference material is concentrated in `GUI_QUICKSTART.md`, `docs/VERIFIED_WORKFLOW.md`, `docs/MULTI_TRACK_BACKEND.md`, `docs/COLMAP_DENSIFICATION.md`, and the current UI/source implementation.
+- The normal GUI path is: import materials -> prepare frames/photos -> align and export -> inspect point cloud/results -> optionally densify or train. A finished xPano project retains the Metashape `.psx`, manifest, generated images, COLMAP `sparse/0`, and run summary under the selected output folder.
+- Panorama material is processed as original dual-fisheye imagery, not ERP/cubemap during alignment. Mixed projects use a panorama-first incremental Metashape workflow; ordinary photos/videos are added afterward as Frame cameras.
+- The old documentation contains developer CLI, test fixture, and release-build instructions. The replacement README should link to the GUI workflow and omit those details.
+- Current UI confirms four material categories: panoramic `.osv`/`.insv`, ordinary video, standard photos, and aerial photos. Ordinary video exposes a wide/standard initial-view choice; all imported visual tracks can use a style `.cube` LUT, while the bundled restoration LUT is only for `.osv` panorama material.
+- The product has four user workspaces: materials, reconstruction, results/point-cloud management, and Gaussian training. The default route is the materials workspace.
+- Densification is explicitly non-destructive: it first loads a candidate preview, then the user may save it as a version. Gaussian training is separately gated by runtime, prepared dataset, and a selected usable point-cloud version.
+- Source confirms the user path for manual Metashape correction: open the generated PSX, save edits in Metashape, then use the reconstruction workspace's PSX re-export action. When more than one usable Component exists, xPano asks the user to choose one and defaults to the largest.
+- The COLMAP backend is intentionally blocked for mixed material in the current UI. README wording must present Metashape as the supported choice for panorama-plus-photo/video projects and COLMAP as the bundled panorama-only alternative.
+- The style-LUT chain is active in the source: restoration is applied first, then the user style LUT. The bundled DJI restoration preset is valid only for `.osv` panorama material.
+- Packaging/source configuration sets the supported release boundary to Windows 10/11 x64. The application bundles its base Python, FFmpeg, COLMAP and WebView2; it does not require system Python, FFmpeg, COLMAP, CUDA Toolkit, Git, or administrator rights for the core workflow.
+- Metashape itself is intentionally external and licensed by the user. The package has the helper wheels needed by the Metashape script chain; xPano should be documented as automatically checking/configuring this support rather than asking the user to manually install Python packages into Metashape.
+- Project design keeps artifacts relative to the selected project root and preserves job snapshots/logs under `work/`. The user guide should advise retaining the complete project directory and using the built-in project-open path rather than moving isolated output files.
+- An xPano project persists its state in `xpano_project.json`; it also exposes compatible previously generated projects through `xpano_manifest.json`, `xpano_run_summary.json`, `work/xpano_manifest.json`, or `work/xpano.psx`. The standard reopen instruction can therefore be "open or drag the project root folder".
+- Source creation currently places a new project directory beside the first material unless it is explicitly created/opened elsewhere. README must tell users to plan a dedicated project/output location before importing a large job.
+- Gaussian training defaults to the LichtFeld Studio GUI (`gui: true`) and its normal presets are 10k / 30k / 60k iterations. The README should mention the GUI launch and progress display, not imply that xPano provides an embedded training viewer.
+
+## Phase 66 README verification
+
+- The rewritten README has 124 UTF-8 lines. It contains the required user-facing workflow, input categories, backend boundary, project persistence, LUT, densification, and training guidance.
+- All three internal reference links exist. Required terminology and sections were programmatically checked; `git diff --check` passed.
+- No application source, package configuration, installer artifact, or untracked runtime payload was changed.
+- Windows 10/11 x64 is the supported product boundary. The packaged app includes its basic Python, FFmpeg, COLMAP, LFS, and Metashape helper wheels; it does not include Metashape itself or the large densification runtime.
+- Source contracts treat project artifacts as relative paths beneath the chosen project directory, including reconstruction output, training output, and point-cloud variants. The README should instruct users to keep the entire output directory intact and move/copy it as one unit.
+
 # Phase 59 release findings
 
 - The standard `scripts/build_installer.ps1` path produces the dependency-complete release used for `1.0.0-preview`; `-FullOffline` only adds the optional densification payload and is not required for this release request.
@@ -987,3 +1018,15 @@
 - A MinGW C++ probe matches the failure exactly: `std::filesystem::exists` returns true for the normal path and for an extended path using backslashes, but returns false (without an error code) for the mixed form produced by LFS (`\\?\E:\...\\locales/en.json` and `\\?\E:\...\\assets\\rmlui/rendering.rml`). LFS creates that mixed form because `getAssetPath()` appends slash-bearing asset names and `LocalizationManager` builds `locales_dir + "/" + language + ".json"`.
 - The xPano launch chain is the affected boundary: Tauri resolves `runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe` to a `PathBuf`, Python then calls `config.executable.resolve(strict=False)`, and the child inherits the verbatim extended executable path. The source/manual launch uses a normal drive path and therefore does not trigger the LFS/MinGW mixed-separator bug.
 - The minimal repair boundary is xPano's Windows child-process launch: convert bundled executable, script and working-directory paths from the `\\?\` form to normal drive/UNC syntax before invoking Python/LFS, while retaining extended paths for user data where needed. Patching the third-party LFS resource code would be broader and would not fix other bundled tools that receive the same path form.
+# Phase 67 LFS reliability planning findings
+
+- The formal installer currently stages a complete local LFS tree and the present source/stage/installed critical hashes match, so the reliability work must not be framed as one known missing DLL.
+- The runtime input is nevertheless an untracked, manually hydrated directory with no LFS-specific immutable artifact manifest; builds are not reproducible from the tracked repository.
+- `release_staging.py` checks only the LFS executable and license as required resources. Recursive PE import closure passes for the current tree but cannot validate dynamically loaded DLLs, RML/shader/locale assets, GPU drivers, or Vulkan devices.
+- `build_installer.ps1` copies the complete runtime, while the legacy portable `build_release.ps1` does not copy the LFS GUI runtime. The release process therefore has two incompatible assembly contracts.
+- General startup readiness runs `LichtFeld-Studio.exe --version`, but training readiness only checks that the executable exists. Neither proves GUI resources, CUDA/Vulkan initialization, or dataset loading.
+- Production process resolution can inherit `XPANO_ROOT`, `XPANO_PYTHON`, the host `PATH`, and user-level `~/.lichtfeld/plugins`, creating machine-specific script, Python, DLL, and plugin behavior.
+- The training supervisor has an absolute 120-second startup deadline. A healthy large dataset that has not yet reached the dataset-ready marker can be terminated solely for taking longer than two minutes.
+- The release manifest is generated but never verified after installation. The unsigned installer and executables leave antivirus quarantine or partial installation indistinguishable from a source packaging defect.
+- LFS GUI training directly imports the NVIDIA driver API and Vulkan loader. Driver/hardware incompatibility must be reported separately from bundled-file corruption; `nvcuda.dll` must not be copied from another machine.
+- The on-demand densification runtime is a separate versioned Python/Torch chain and should remain separate. Its follow-up gap is CUDA-profile revalidation, not the LFS GUI resource layout.

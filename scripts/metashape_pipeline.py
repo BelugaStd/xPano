@@ -304,14 +304,11 @@ def normalized_photo_path(path):
     return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
-def add_photos_get_new(chunk, paths, group_key=None):
+def add_photos_get_new(chunk, paths, group=None):
     requested_paths = [str(path) for path in paths]
     existing_keys = {camera_key(camera) for camera in chunk.cameras}
-    kwargs = {"load_xmp_accuracy": True}
-    if group_key is not None:
-        kwargs["group"] = group_key
     # WARN: Metashape may reorder chunk.cameras during addPhotos; camera identity must come from stable keys.
-    chunk.addPhotos(requested_paths, **kwargs)
+    chunk.addPhotos(requested_paths, load_xmp_accuracy=True)
     imported = [camera for camera in chunk.cameras if camera_key(camera) not in existing_keys]
     if len(imported) != len(requested_paths):
         raise RuntimeError(
@@ -332,6 +329,10 @@ def add_photos_get_new(chunk, paths, group_key=None):
             f"missing={[Path(path).name for path in missing[:5]]} "
             f"unexpected={[Path(path).name for path in unexpected[:5]]}"
         )
+    # NOTE: Assign groups after import because CameraGroup.key was added in Metashape 2.1.1.
+    if group is not None:
+        for camera in imported:
+            camera.group = group
     return imported
 
 
@@ -350,7 +351,7 @@ def import_panorama_track(chunk, track):
         station_groups.append(group)
 
         paths = [frame["left"], frame["right"]]
-        new_cameras = add_photos_get_new(chunk, paths, group_key=group.key)
+        new_cameras = add_photos_get_new(chunk, paths, group=group)
         imported.extend(new_cameras)
         for camera in new_cameras:
             name = camera_path_name(camera)
@@ -378,7 +379,7 @@ def import_photo_track(chunk, track):
             photos = sensor_group.get("photos", [])
             if not photos:
                 continue
-            new_cameras = add_photos_get_new(chunk, photos, group_key=group.key)
+            new_cameras = add_photos_get_new(chunk, photos, group=group)
             if not new_cameras:
                 continue
             cameras_by_geometry = {}
@@ -427,7 +428,7 @@ def import_photo_track(chunk, track):
     photos = track.get("photos", [])
     if not photos:
         return []
-    new_cameras = add_photos_get_new(chunk, photos, group_key=group.key)
+    new_cameras = add_photos_get_new(chunk, photos, group=group)
     sensors_by_size = {}
     base_label = track.get("sensor_label", f"{track['track_id']}_frame")
     for camera in new_cameras:
@@ -650,7 +651,7 @@ def import_legacy_frames(chunk, input_root, max_frames):
         group.label = frame_dir.name
         group.type = Metashape.CameraGroup.Type.Folder
         station_groups.append(group)
-        chunk.addPhotos(image_paths[:2], group=group.key, load_xmp_accuracy=True)
+        add_photos_get_new(chunk, image_paths[:2], group=group)
 
     for sensor in chunk.sensors:
         configure_fisheye_sensor(sensor)
