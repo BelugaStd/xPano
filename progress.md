@@ -1060,3 +1060,12 @@
 - Installed/relocated acceptance exposed a real preflight defect: the LFS inventory contains six legitimate zero-byte marker files, but runtime validation rejected every zero-byte record as corrupt.
 - Updated runtime manifest validation to allow zero-byte files while continuing to validate their safe relative path, existence, exact size, and SHA-256. The LFS fixture now includes a zero-byte `py.typed` marker.
 - Source manifest parsing confirms all 1,450 LFS entries, including zero-byte markers, are accepted. The complete Python suite passes; a fresh installer is required before repeating installed acceptance.
+
+# 2026-07-23 Phase 67 development installer acceptance
+
+- Built a fresh `xPano-2.0.0-stable-unsigned-dev-windows-x64-setup.exe`. Its SHA-256 sidecar matches, the explicit unsigned marker exists, and Authenticode status is `NotSigned` as required for a development artifact.
+- The fresh release stage has 2,205 records with zero invalid, missing, or unexpected files. LFS has 1,450 manifest entries, eight sentinels, and a successful 227-PE DLL dependency closure.
+- Installed resources under `E:\FastProgram\xPano` match the corrected runtime-readiness script. A sanitized installed preflight reports LFS v0.5.3, one CUDA device, three Vulkan devices, and only the intentionally empty dataset as `TRAINING_DATASET_INVALID`.
+- A complete relocated resource tree under a path containing Chinese characters and spaces produces the same structured preflight result. This proves the packaged LFS resource lookup and normal Windows child path behavior in that path class.
+- The first transcripted rebuild overlapped an already-running NSIS compression job and returned a collision failure. The resulting fresh artifact came from the first completed build; all subsequent acceptance uses its new timestamp and verified hash. Do not run installer builds concurrently.
+- Final source gates pass: Python 319, Rust 117, frontend unit 54, frontend lint/build, Python compileall, PowerShell parser, and `git diff --check`. `cargo fmt --check` remains unavailable because `stable-x86_64-pc-windows-gnu` lacks rustfmt.
