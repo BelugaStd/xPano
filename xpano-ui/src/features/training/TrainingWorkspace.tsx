@@ -4,6 +4,7 @@ import { FolderOpen } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useJob } from '../../app/useJob'
 import { useProject } from '../../app/useProject'
+import { useBatch } from '../../app/BatchProvider'
 import { joinDisplayPath } from '../../lib/paths'
 import { TrainingSetupView } from './TrainingSetupView'
 import { TrainingTaskView } from './TrainingTaskView'
@@ -25,6 +26,8 @@ function isTauriRuntime() {
 }
 
 export function TrainingWorkspace() {
+  const { queue: batchQueue } = useBatch()
+  const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
   const navigate = useNavigate()
   const { project, projectRoot } = useProject()
   const { progress, running, logs, startTraining, cancel } = useJob()
@@ -61,7 +64,9 @@ export function TrainingWorkspace() {
   const persistedMode = trainingWorkspaceMode(trainingStatus, trainingRunning)
   const mode = configureNext && !trainingRunning ? 'setup' : persistedMode
   const preset = deriveTrainingPreset(config)
-  const blocker = trainingStartBlocker(Boolean(project && projectRoot), readiness, running)
+  const blocker = batchActive
+    ? { reason: '批量队列正在运行，请先停止队列', action: null }
+    : trainingStartBlocker(Boolean(project && projectRoot), readiness, running)
   const percent = trainingDisplayPercent(trainingStatus, project?.training.lastIteration ?? 0, project?.training.totalIterations ?? 0, trainingRunning, progress.percent)
   const iteration = progress.current ?? project?.training.lastIteration ?? 0
   const total = progress.total ?? project?.training.totalIterations ?? config.iterations

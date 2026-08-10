@@ -235,8 +235,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         if (disposed || normalizeDisplayPath(event.payload.projectRoot) !== normalizeDisplayPath(state.projectRoot)) return
         dispatch({ type: 'saved', project: event.payload.project })
       }))
-      register(await listen<{ jobKind?: string }>('pipeline:complete', async (event) => {
+      register(await listen<{ jobKind?: string; projectRoot?: string | null }>('pipeline:complete', async (event) => {
         if (disposed || !state.projectRoot) return
+        if (event.payload.projectRoot && normalizeDisplayPath(event.payload.projectRoot) !== normalizeDisplayPath(state.projectRoot)) return
         try {
           const command = event.payload.jobKind === 'media'
             ? 'sync_media_job_result'
@@ -254,8 +255,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           if (!disposed) dispatch({ type: 'error', message: commandErrorMessage(error) })
         }
       }))
-      register(await listen<{ jobKind?: string }>('pipeline:error', async (event) => {
+      register(await listen<{ jobKind?: string; projectRoot?: string | null }>('pipeline:error', async (event) => {
         if (disposed || !state.projectRoot) return
+        if (event.payload.projectRoot && normalizeDisplayPath(event.payload.projectRoot) !== normalizeDisplayPath(state.projectRoot)) return
         try {
           if (event.payload.jobKind === 'media') {
             const project = await invoke<XpanoProjectV2>('sync_media_job_result', { projectRoot: state.projectRoot })

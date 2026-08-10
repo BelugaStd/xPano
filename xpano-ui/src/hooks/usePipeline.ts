@@ -9,6 +9,7 @@ import { sanitizeProgress } from '../lib/pipelineProgress'
 import type { MaterialTrack, PipelineComplete, PipelineConfig, PipelineError, PipelineProgress, ProjectRunOptions } from '../lib/types'
 import type { TrainingConfig } from '../features/training/trainingConfig'
 import { commandErrorMessage } from '../lib/commandError'
+import { jobIdentityMatchesProject } from '../lib/jobIdentity'
 
 function detectPython(): string {
   // Empty string lets the backend resolve bundled Python first
@@ -235,6 +236,7 @@ export function usePipeline(projectRoot = '') {
       }
 
       const progressUnlisten = await listen<PipelineProgress>('pipeline:progress', (event) => {
+        if (!jobIdentityMatchesProject(event.payload.projectRoot, projectRoot)) return
         // Only update progress for genuine progress events (with phase); log lines have empty phase
         if (event.payload.phase) {
           if (!runningRef.current) return
@@ -274,6 +276,7 @@ export function usePipeline(projectRoot = '') {
       if (!track(progressUnlisten)) return
 
       const completeUnlisten = await listen<PipelineComplete>('pipeline:complete', (event) => {
+        if (!jobIdentityMatchesProject(event.payload.projectRoot, projectRoot)) return
         if (!runningRef.current) return
         flushMediaItems()
         const finalElapsed = startTimeRef.current ? Math.floor((Date.now() - startTimeRef.current) / 1000) : 0
@@ -286,6 +289,7 @@ export function usePipeline(projectRoot = '') {
       if (!track(completeUnlisten)) return
 
       const errorUnlisten = await listen<PipelineError>('pipeline:error', (event) => {
+        if (!jobIdentityMatchesProject(event.payload.projectRoot, projectRoot)) return
         if (!runningRef.current && event.payload.error !== '任务已取消') return
         flushMediaItems()
         const finalElapsed = startTimeRef.current ? Math.floor((Date.now() - startTimeRef.current) / 1000) : 0
@@ -297,12 +301,14 @@ export function usePipeline(projectRoot = '') {
 
       if (!track(errorUnlisten)) return
 
-      const previewUnlisten = await listen<{ left: string; right: string }>('pipeline:preview', (event) => {
+      const previewUnlisten = await listen<{ left: string; right: string; projectRoot?: string | null }>('pipeline:preview', (event) => {
+        if (!jobIdentityMatchesProject(event.payload.projectRoot, projectRoot)) return
         setPreview(event.payload)
       })
       if (!track(previewUnlisten)) return
 
-      const mediaItemUnlisten = await listen<{ trackId: string; item: ProjectMediaItem }>('pipeline:media-item', (event) => {
+      const mediaItemUnlisten = await listen<{ trackId: string; item: ProjectMediaItem; projectRoot?: string | null }>('pipeline:media-item', (event) => {
+        if (!jobIdentityMatchesProject(event.payload.projectRoot, projectRoot)) return
         const { trackId, item } = event.payload
         if (!trackId || !item?.id) return
         enqueueMediaItem(trackId, item)
@@ -310,6 +316,7 @@ export function usePipeline(projectRoot = '') {
       if (!track(mediaItemUnlisten)) return
 
       const jobEventUnlisten = await listen<JobEvent>('job:event', (event) => {
+        if (!jobIdentityMatchesProject(event.payload.projectRoot, projectRoot)) return
         if (event.payload.sequence <= activeJobSequenceRef.current) return
         activeJobSequenceRef.current = event.payload.sequence
         if (event.payload.state === 'running' || event.payload.state === 'queued' || event.payload.state === 'cancelling') {
@@ -319,6 +326,8 @@ export function usePipeline(projectRoot = '') {
       if (!track(jobEventUnlisten)) return
 
       const jobSnapshotUnlisten = await listen<JobSnapshot>('job:snapshot', (event) => {
+        if (!jobIdentityMatchesProject(event.payload.projectRoot, projectRoot)) return
+        if (activeJobIdRef.current && event.payload.jobId !== activeJobIdRef.current) return
         if (event.payload.sequence < activeJobSequenceRef.current) return
         activeJobSequenceRef.current = event.payload.sequence
         activeJobIdRef.current = ['queued', 'running', 'cancelling'].includes(event.payload.state)
@@ -346,7 +355,7 @@ export function usePipeline(projectRoot = '') {
         }
       }
 
-      if (!disposed && backendRunning && !runningRef.current) {
+      if (!disposed && backendRunning && !runningRef.current && (!projectRoot || Boolean(activeJobIdRef.current))) {
         startTimeRef.current = Date.now()
         setPipelineRunning(true)
         setProgress((prev) => ({ ...prev, phase: 'extract', message: '正在恢复后台任务状态' }))

@@ -2057,6 +2057,7 @@ pub(crate) fn start_reconstruction_job_blocking(
     python_exe: String,
     script: String,
     args: Vec<String>,
+    task_id: Option<String>,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
     let state = app.state::<AppState>();
     {
@@ -2074,9 +2075,10 @@ pub(crate) fn start_reconstruction_job_blocking(
         expected_revision,
         &plan_id,
     )?;
-    let (job_context, _) = match job::begin_job_impl(
+    let (job_context, _) = match job::begin_job_with_task_impl(
         root,
         contracts::ProjectWorkspace::Reconstruction,
+        task_id,
     ) {
         Ok(started) => started,
         Err(error) => {
@@ -2201,6 +2203,7 @@ async fn start_reconstruction_job(
             python_exe,
             script,
             args,
+            None,
         )
     })
     .await
@@ -2638,6 +2641,7 @@ pub(crate) fn start_training_job_blocking(
     project_root: String,
     expected_revision: u64,
     config: training::TrainingConfig,
+    task_id: Option<String>,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
     let state = app.state::<AppState>();
     {
@@ -2660,7 +2664,7 @@ pub(crate) fn start_training_job_blocking(
     let runtime = LichtfeldRuntime::resolve(&app)?;
     let preflight = run_lichtfeld_preflight(&runtime, &dataset, &training_output_root(root))?;
     ensure_lichtfeld_training_ready(&preflight)?;
-    let (job_context, _) = job::begin_job_impl(root, contracts::ProjectWorkspace::Training)?;
+    let (job_context, _) = job::begin_job_with_task_impl(root, contracts::ProjectWorkspace::Training, task_id)?;
     let project_after_job = project::read_project(root)?;
     let project = match training::begin_training_impl(
         root,
@@ -2761,7 +2765,7 @@ async fn start_training_job(
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
     batch::ensure_manual_startable(&app, app.state::<AppState>().inner())?;
     tauri::async_runtime::spawn_blocking(move || {
-        start_training_job_blocking(app, project_root, expected_revision, config)
+        start_training_job_blocking(app, project_root, expected_revision, config, None)
     })
     .await
     .map_err(|error| {
@@ -2787,6 +2791,15 @@ async fn get_training_readiness(
             format!("LichtFeld readiness task stopped unexpectedly: {error}"),
         )
     })?
+}
+
+#[tauri::command]
+fn save_training_config(
+    project_root: String,
+    expected_revision: u64,
+    config: training::TrainingConfig,
+) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
+    training::save_training_config_impl(std::path::Path::new(&project_root), expected_revision, &config)
 }
 
 #[tauri::command]
@@ -4215,6 +4228,7 @@ pub fn run() {
                 if window.label() == "main" {
                     // Kill running pipeline and its entire process tree
                     if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        batch::interrupt_for_shutdown(window.app_handle(), state.inner());
                         let _ = state.pipeline.lock().map(|mut p| p.cancel());
                         if let Ok(mut pid) = state.densify_pid.lock() {
                             if let Some(pid) = pid.take() {
@@ -4234,6 +4248,7 @@ pub fn run() {
             start_pipeline,
             start_reconstruction_job,
             start_training_job,
+            save_training_config,
             get_training_readiness,
             get_job_snapshot,
             read_job_events,

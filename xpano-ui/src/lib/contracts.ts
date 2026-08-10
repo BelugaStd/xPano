@@ -133,6 +133,8 @@ export interface GeometryState {
 
 export interface JobSnapshot {
   jobId: string
+  projectRoot?: string | null
+  taskId?: string | null
   workspace: ProjectWorkspace
   state: JobState
   stageId: string | null
@@ -177,7 +179,9 @@ export interface JobEvent {
   sequence: number
   timestamp: string
   projectId: string
+  projectRoot?: string | null
   jobId: string
+  taskId?: string | null
   workspace: ProjectWorkspace
   kind: JobEventKind
   stageId: string | null

@@ -4,6 +4,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { ChevronRight, Clock3, FilePlus2, FolderPlus, Gauge, Images, Play } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useProject } from '../../app/useProject'
+import { useBatch } from '../../app/BatchProvider'
 import { useJob } from '../../app/useJob'
 import { ConfirmDialog } from '../../components/shared/ConfirmDialog'
 import { ToastContainer } from '../../components/shared/Toast'
@@ -50,6 +51,8 @@ function previewSource(path?: string) {
 }
 
 export function MediaWorkspace() {
+  const { queue: batchQueue } = useBatch()
+  const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
   const navigate = useNavigate()
   const {
     project,
@@ -253,7 +256,7 @@ export function MediaWorkspace() {
             {!running && pendingTrackIds.length === 0 && !readiness.canContinue && <p className="mb-2 text-[10px] leading-4 text-danger">{readiness.blockReason}</p>}
             {readiness.canContinue && !running
               ? <button type="button" onClick={continueToReconstruction} className="motion-press flex h-10 w-full items-center justify-center gap-2 rounded-comfortable bg-brand px-4 text-[12px] font-semibold text-white shadow-sm shadow-brand/20">下一步：对齐与重建 <ChevronRight className="h-4 w-4" /></button>
-              : <button type="button" onClick={startPreparation} disabled={running || pendingTrackIds.length === 0} className="motion-press flex h-10 w-full items-center justify-center gap-2 rounded-comfortable bg-brand px-4 text-[12px] font-semibold text-white shadow-sm shadow-brand/20 disabled:cursor-not-allowed disabled:opacity-45"><Play className="h-4 w-4 fill-current" /> {running ? progress.message : pendingTrackIds.length ? '开始抽帧' : '素材状态需处理'}</button>}
+              : <button type="button" onClick={startPreparation} disabled={batchActive || running || pendingTrackIds.length === 0} title={batchActive ? '批量队列运行中，请先停止队列' : undefined} className="motion-press flex h-10 w-full items-center justify-center gap-2 rounded-comfortable bg-brand px-4 text-[12px] font-semibold text-white shadow-sm shadow-brand/20 disabled:cursor-not-allowed disabled:opacity-45"><Play className="h-4 w-4 fill-current" /> {batchActive ? '批量队列运行中' : running ? progress.message : pendingTrackIds.length ? '开始抽帧' : '素材状态需处理'}</button>}
           </div>
         </aside>
       </div>

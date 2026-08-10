@@ -148,6 +148,9 @@ pub struct BatchStages {
 
 impl BatchStages {
     pub fn validate_prefix(&self) -> Result<(), String> {
+        if !self.media && !self.reconstruction && !self.training {
+            return Err("batch task must enable at least the media stage".to_string());
+        }
         if self.reconstruction && !self.media {
             return Err("batch stages must enable media before reconstruction".to_string());
         }
@@ -391,6 +394,10 @@ pub struct GeometryState {
 #[serde(rename_all = "camelCase")]
 pub struct JobSnapshot {
     pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub workspace: ProjectWorkspace,
     pub state: JobState,
     pub stage_id: Option<String>,
@@ -579,7 +586,11 @@ pub struct JobEvent {
     pub sequence: u64,
     pub timestamp: String,
     pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
     pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub workspace: ProjectWorkspace,
     pub kind: JobEventKind,
     pub stage_id: Option<String>,

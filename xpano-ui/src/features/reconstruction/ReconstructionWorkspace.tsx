@@ -4,6 +4,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { useNavigate } from 'react-router-dom'
 import { FolderOpen, Images } from 'lucide-react'
 import { useProject } from '../../app/useProject'
+import { useBatch } from '../../app/BatchProvider'
 import { useJob } from '../../app/useJob'
 import { ToastContainer } from '../../components/shared/Toast'
 import { useToast } from '../../hooks/useToast'
@@ -117,6 +118,8 @@ function devPreviewPlan(projectId: string, inputRevision: number): ExecutionPlan
 }
 
 export function ReconstructionWorkspace() {
+  const { queue: batchQueue } = useBatch()
+  const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
   const navigate = useNavigate()
   const { project, projectRoot, saveReconstructionConfig } = useProject()
   const { running, progress, logs, start, cancel } = useJob()
@@ -358,9 +361,10 @@ export function ReconstructionWorkspace() {
     await startPsxReexport(key)
   }, [componentSelection, startPsxReexport])
 
-  const canStart = Boolean(project && projectRoot && plan && readiness.canContinue && selectedProbe?.available && !(config.backend === 'colmap' && hasFlatMedia) && !planError)
+  const canStart = Boolean(project && projectRoot && plan && readiness.canContinue && selectedProbe?.available && !(config.backend === 'colmap' && hasFlatMedia) && !planError && !batchActive)
   let blockReason = planError || '正在生成执行流程'
-  if (!project) blockReason = '请先创建或打开 xPano 工程'
+  if (batchActive) blockReason = '批量队列正在运行，请先停止队列'
+  else if (!project) blockReason = '请先创建或打开 xPano 工程'
   else if (!readiness.canContinue) blockReason = readiness.blockReason
   else if (config.backend === 'colmap' && hasFlatMedia) blockReason = 'COLMAP 混合素材流程尚未通过回归验证'
   else if (selectedProbe?.available === false) blockReason = `${config.backend === 'metashape' ? 'Metashape' : 'COLMAP'} 当前不可用`

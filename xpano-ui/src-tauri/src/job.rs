@@ -22,6 +22,7 @@ pub(crate) struct JobContext {
     project_id: String,
     pub(crate) job_id: String,
     workspace: ProjectWorkspace,
+    pub(crate) task_id: Option<String>,
 }
 
 impl JobContext {
@@ -158,6 +159,8 @@ fn event_for(
         timestamp: now_iso8601(),
         project_id: context.project_id.clone(),
         job_id: context.job_id.clone(),
+        project_root: Some(context.project_root.to_string_lossy().to_string()),
+        task_id: context.task_id.clone(),
         workspace: context.workspace,
         kind,
         stage_id,
@@ -192,9 +195,18 @@ fn replace_project_snapshot(
     write_project_atomic(project_root, &project)
 }
 
+#[cfg(test)]
 pub(crate) fn begin_job_impl(
     project_root: &Path,
     workspace: ProjectWorkspace,
+) -> Result<(JobContext, JobSnapshot), ProjectCommandError> {
+    begin_job_with_task_impl(project_root, workspace, None)
+}
+
+pub(crate) fn begin_job_with_task_impl(
+    project_root: &Path,
+    workspace: ProjectWorkspace,
+    task_id: Option<String>,
 ) -> Result<(JobContext, JobSnapshot), ProjectCommandError> {
     let _guard = JOB_IO_LOCK
         .lock()
@@ -214,9 +226,12 @@ pub(crate) fn begin_job_impl(
         project_id: project.project_id.clone(),
         job_id: Uuid::new_v4().to_string(),
         workspace,
+        task_id,
     };
     let snapshot = JobSnapshot {
         job_id: context.job_id.clone(),
+        project_root: Some(context.project_root.to_string_lossy().to_string()),
+        task_id: context.task_id.clone(),
         workspace,
         state: JobState::Running,
         stage_id: None,
@@ -582,6 +597,7 @@ pub(crate) fn recover_orphaned_jobs_impl(
             project_id: project.project_id.clone(),
             job_id: snapshot.job_id,
             workspace: snapshot.workspace,
+            task_id: snapshot.task_id.clone(),
         };
         finish_job_impl(&context, JobState::Interrupted, "应用退出后任务已中断")?;
     }
@@ -667,6 +683,23 @@ mod tests {
         assert_eq!(cancelling.state, JobState::Cancelling);
         assert!(cancelling.sequence > started.sequence);
         assert_eq!(get_job_snapshots_impl(&root).unwrap(), vec![cancelling]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn batch_job_events_keep_project_and_task_identity() {
+        let root = temp_case("identity");
+        write_project_atomic(&root, &fixture_project()).unwrap();
+        let (context, started) = begin_job_with_task_impl(&root, ProjectWorkspace::Media, Some("batch-task-1".to_string())).unwrap();
+        assert_eq!(started.project_root.as_deref(), Some(root.to_string_lossy().as_ref()));
+        assert_eq!(started.task_id.as_deref(), Some("batch-task-1"));
+        let event = record_log_impl(&context, "batch progress").unwrap();
+        assert_eq!(event.project_root.as_deref(), Some(root.to_string_lossy().as_ref()));
+        assert_eq!(event.task_id.as_deref(), Some("batch-task-1"));
+        let events = read_job_events_impl(&root, &started.job_id, 0, 100).unwrap();
+        assert!(events.iter().all(|item| item.project_root.as_deref() == Some(root.to_string_lossy().as_ref())));
+        assert!(events.iter().all(|item| item.task_id.as_deref() == Some("batch-task-1")));
+        assert_eq!(events.last(), Some(&event));
         let _ = std::fs::remove_dir_all(root);
     }
 

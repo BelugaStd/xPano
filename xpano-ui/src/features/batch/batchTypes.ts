@@ -37,11 +37,28 @@ export const emptyBatchTask = (): BatchTask => {
 }
 
 export function validateStagePrefix(stages: BatchStages): string | null {
+  if (!stages.media && !stages.reconstruction && !stages.training) return '请至少开启素材准备阶段'
   if (stages.reconstruction && !stages.media) return '开启对齐前必须先开启素材准备'
   if (stages.training && !stages.reconstruction) return '开启训练前必须先开启对齐'
   return null
 }
 
+export function setBatchStage(stages: BatchStages, key: keyof BatchStages, value: boolean): BatchStages {
+  const next = { ...stages, [key]: value }
+  if (key === 'media' && !value) {
+    next.reconstruction = false
+    next.training = false
+  }
+  if (key === 'reconstruction' && !value) next.training = false
+  return next
+}
+
 export function enabledStageCount(stages: BatchStages) {
   return Number(stages.media) + Number(stages.reconstruction) + Number(stages.training)
+}
+
+export function batchOverallPercent(tasks: BatchTask[]) {
+  if (!tasks.length) return 0
+  const terminal = new Set<BatchTaskState>(['completed', 'failed', 'cancelled', 'interrupted'])
+  return tasks.reduce((sum, task) => sum + (terminal.has(task.state) ? 100 : task.progress.percent), 0) / tasks.length
 }

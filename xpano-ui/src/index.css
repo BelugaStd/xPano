@@ -797,6 +797,11 @@ html.theme-is-switching::before {
   border-radius: 14px;
 }
 
+.liquid-panel.batch-task-editor-panel {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .liquid-card {
   border-radius: 10px;
   box-shadow: var(--xp-soft-shadow);

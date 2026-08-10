@@ -1,33 +1,301 @@
-import { useEffect, useState } from 'react'
-import { ArrowLeft, Check, FolderOpen, Images, ScanLine, Sparkles } from 'lucide-react'
-import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import { ArrowLeft, Check, FilePlus2, FolderOpen, FolderPlus, Images, ScanLine, Sparkles } from 'lucide-react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useBatch } from '../../app/BatchProvider'
-import { emptyBatchTask, validateStagePrefix, type BatchTask } from './batchTypes'
+import type { OpenProjectResult } from '../../app/projectContext'
+import { useProject } from '../../app/useProject'
 import { ThemeControls } from '../../components/layout/ThemeControls'
 import { WindowControls } from '../../components/layout/WindowControls'
+import { RuntimeReadinessBadge } from '../../components/layout/RuntimeReadinessBadge'
+import type { ExecutionPlan, XpanoProjectV2 } from '../../lib/contracts'
+import { commandErrorMessage } from '../../lib/commandError'
+import { normalizeDisplayPath } from '../../lib/paths'
 import type { ThemeMode } from '../../lib/types'
-import type { XpanoProjectV2 } from '../../lib/contracts'
+import { MaterialImportDialog } from '../media/MaterialImportDialog'
+import { createMediaImportDrafts, isDraftValid, type ImportPathInfo, type MediaImportDraft } from '../media/mediaTypes'
+import {
+  configFromProject,
+  defaultReconstructionConfig,
+  persistedReconstructionConfig,
+  type ReconstructionConfigDraft,
+} from '../reconstruction/reconstructionTypes'
+import { DEFAULT_TRAINING_CONFIG, type TrainingConfig } from '../training/trainingConfig'
+import { emptyBatchTask, setBatchStage, validateStagePrefix, type BatchTask } from './batchTypes'
 
-export function BatchTaskEditor({ themeMode, onThemeModeChange }: { themeMode: ThemeMode; onThemeModeChange: (mode: ThemeMode) => void }) {
-  const navigate = useNavigate(); const location = useLocation(); const { taskId } = useParams(); const { queue, saveTask } = useBatch();
-  const existing = taskId ? queue.tasks.find((task) => task.taskId === taskId) : undefined
+interface Props {
+  themeMode: ThemeMode
+  onThemeModeChange: (mode: ThemeMode) => void
+}
+
+const inputClass = 'theme-input mt-1 w-full'
+
+function trainingConfigFromProject(project: XpanoProjectV2): TrainingConfig {
+  return { ...DEFAULT_TRAINING_CONFIG, ...(project.training.config as Partial<TrainingConfig>), gui: true }
+}
+
+export function BatchTaskEditor({ themeMode, onThemeModeChange }: Props) {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { taskId } = useParams()
+  const { queue, saveTask, enqueueTask } = useBatch()
+  const { project, projectRoot, openProject } = useProject()
+  const existing = taskId ? queue.tasks.find((item) => item.taskId === taskId) : undefined
   const [task, setTask] = useState<BatchTask>(() => existing ? structuredClone(existing) : emptyBatchTask())
-  const [saving, setSaving] = useState(false); const [error, setError] = useState<string | null>(null)
-  useEffect(() => { if (existing) setTask(structuredClone(existing)) }, [existing])
-  useEffect(() => { const value = new URLSearchParams(location.search).get('projectRoot'); if (value && !task.projectRoot) setTask((current) => ({ ...current, projectRoot: value })) }, [location.search, task.projectRoot])
+  const [reconstruction, setReconstruction] = useState<ReconstructionConfigDraft>(defaultReconstructionConfig)
+  const [training, setTraining] = useState<TrainingConfig>(DEFAULT_TRAINING_CONFIG)
+  const [drafts, setDrafts] = useState<MediaImportDraft[]>([])
+  const [importing, setImporting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const locked = existing?.state === 'queued' || existing?.state === 'running'
+
   useEffect(() => {
-    if (!task.projectRoot || task.projectId || !(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return
-    let disposed = false
-    invoke<{ project: XpanoProjectV2 } | null>('open_project', { path: task.projectRoot }).then((opened) => {
-      if (disposed || !opened) return
-      setTask((current) => ({ ...current, projectId: opened.project.projectId, configuredRevision: opened.project.revision, pipeline: { ...current.pipeline, mediaTrackIds: current.pipeline.mediaTrackIds.length ? current.pipeline.mediaTrackIds : opened.project.tracks.map((track) => track.id) } }))
-    }).catch(() => {})
-    return () => { disposed = true }
-  }, [task.projectRoot, task.projectId])
-  const setStages = (key: keyof BatchTask['stages'], value: boolean) => setTask((current) => { const next = { ...current.stages, [key]: value }; if (key === 'media' && !value) { next.reconstruction = false; next.training = false }; if (key === 'reconstruction' && !value) next.training = false; return { ...current, stages: next, stageStatus: { media: next.media ? 'pending' : 'disabled', reconstruction: next.reconstruction ? 'pending' : 'disabled', training: next.training ? 'pending' : 'disabled' } } })
-  const browse = async () => { const selected = await openDialog({ directory: true }); if (selected && !Array.isArray(selected)) setTask((current) => ({ ...current, projectRoot: selected })) }
-  const save = async () => { const prefixError = validateStagePrefix(task.stages); if (prefixError) { setError(prefixError); return }; if (!task.label.trim() || !task.projectRoot.trim() || !task.projectId.trim()) { setError('请填写任务名称、工程 ID 和工程目录'); return }; setSaving(true); const saved = await saveTask(task); setSaving(false); if (saved) navigate('/batch') }
-  return <div className="app-shell relative z-10 h-screen min-h-[720px] min-w-[1024px] overflow-hidden text-ink"><header className="liquid-topbar app-titlebar drag-region flex items-center justify-between px-3.5"><div className="flex items-center gap-2.5"><img src="/icon.png" alt="xPano" className="h-6 w-6 rounded-subtle" /><span className="text-[13px] font-semibold">xPano</span><span className="titlebar-section-divider" /><span className="text-[11px] text-muted">批量任务设置</span></div><div className="topbar-control-group no-drag flex items-center gap-1"><span className="titlebar-environment px-2 text-[10px] text-success">环境就绪</span><ThemeControls themeMode={themeMode} onThemeModeChange={onThemeModeChange} /><span className="topbar-control-divider" /><WindowControls /></div></header><main className="app-workspace min-h-0 overflow-auto p-4 md:p-6"><section className="liquid-panel mx-auto max-w-5xl p-5 md:p-6"><div className="flex items-start justify-between"><div><button type="button" onClick={() => navigate('/batch')} className="mb-3 flex items-center gap-1 text-[11px] text-muted hover:text-brand"><ArrowLeft className="h-3.5 w-3.5" />返回任务列表</button><h1 className="text-[17px] font-semibold">{taskId ? '编辑任务' : '新增任务'}</h1><p className="mt-1 text-[11px] text-muted">一次完成素材、对齐和训练参数设置</p></div><button type="button" onClick={save} disabled={saving} className="motion-press flex h-9 items-center gap-1.5 rounded-comfortable bg-brand px-4 text-[11px] font-semibold text-white disabled:opacity-50"><Check className="h-3.5 w-3.5" />{saving ? '保存中…' : '保存任务'}</button></div>{error && <div className="mt-4 rounded-comfortable border border-danger/20 bg-danger/8 px-3 py-2 text-[11px] text-danger">{error}</div>}<div className="mt-5 grid gap-4 md:grid-cols-2"><label className="block"><span className="text-[11px] font-medium text-muted">任务名称</span><input value={task.label} onChange={(event) => setTask({ ...task, label: event.target.value })} className="theme-input mt-1 w-full" placeholder="例如：南区夜间处理" /></label><label className="block"><span className="text-[11px] font-medium text-muted">工程 ID</span><input value={task.projectId} onChange={(event) => setTask({ ...task, projectId: event.target.value })} className="theme-input mt-1 w-full" placeholder="对应工程的 projectId" /></label><label className="block md:col-span-2"><span className="text-[11px] font-medium text-muted">工程目录</span><div className="mt-1 flex gap-2"><input value={task.projectRoot} onChange={(event) => setTask({ ...task, projectRoot: event.target.value })} className="theme-input min-w-0 flex-1" placeholder="选择独立的 xPano 工程目录" /><button type="button" onClick={browse} className="glass-control flex h-9 shrink-0 items-center gap-1.5 rounded-comfortable px-3 text-[11px]"><FolderOpen className="h-3.5 w-3.5" />浏览</button></div></label></div><div className="mt-6"><div className="mb-2 text-[11px] font-medium text-muted">处理阶段</div><div className="grid gap-2 md:grid-cols-3">{([{ key: 'media', label: '素材准备', hint: '导入素材并抽帧', icon: Images }, { key: 'reconstruction', label: '对齐重建', hint: 'Metashape / COLMAP', icon: ScanLine }, { key: 'training', label: '高斯训练', hint: 'LichtFeld Studio', icon: Sparkles }] as const).map((stage) => { const Icon = stage.icon; const enabled = task.stages[stage.key]; const locked = stage.key === 'reconstruction' ? !task.stages.media : stage.key === 'training' ? !task.stages.reconstruction : false; return <button type="button" key={stage.key} disabled={locked} onClick={() => setStages(stage.key, !enabled)} className={`flex min-h-[78px] items-center gap-3 rounded-comfortable border px-3 text-left transition-colors ${enabled ? 'border-brand/30 bg-brand/8' : 'border-ink/[0.08] bg-ink/[0.02]'} ${locked ? 'cursor-not-allowed opacity-40' : 'hover:border-brand/30'}`}><span className={`grid h-8 w-8 place-items-center rounded-full ${enabled ? 'bg-brand text-white' : 'bg-ink/[0.06] text-muted'}`}><Icon className="h-4 w-4" /></span><span><span className="block text-[12px] font-semibold">{stage.label}</span><span className="mt-0.5 block text-[10px] text-muted">{stage.hint}</span></span><span className="ml-auto text-[10px] text-muted">{enabled ? '已开启' : locked ? '需先开启前一阶段' : '未开启'}</span></button> })}</div></div><div className="mt-6 grid gap-4 lg:grid-cols-2"><section className="glass-inset rounded-comfortable p-4"><h2 className="text-[12px] font-semibold">素材参数</h2><label className="mt-3 block"><span className="text-[10px] text-muted">素材轨道 ID（逗号分隔）</span><input value={task.pipeline.mediaTrackIds.join(', ')} onChange={(event) => setTask({ ...task, pipeline: { ...task.pipeline, mediaTrackIds: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) } })} className="theme-input mt-1 w-full" placeholder="留空表示使用工程内全部轨道" /></label></section><section className="glass-inset rounded-comfortable p-4"><h2 className="text-[12px] font-semibold">训练参数</h2><label className="mt-3 block"><span className="text-[10px] text-muted">迭代步数</span><input type="number" min={1} value={Number(task.pipeline.trainingConfig?.iterations || 30000)} onChange={(event) => setTask({ ...task, pipeline: { ...task.pipeline, trainingConfig: { ...(task.pipeline.trainingConfig || {}), iterations: Number(event.target.value) } } })} className="theme-input mt-1 w-full" /></label><p className="mt-2 text-[10px] text-muted">高级参数沿用工程配置；这里只保存覆盖值，不在此页面拼接命令。</p></section></div></section></main></div>
+    if (existing) setTask(structuredClone(existing))
+  }, [existing])
+
+  useEffect(() => {
+    const value = new URLSearchParams(location.search).get('projectRoot')
+    const root = value || existing?.projectRoot
+    if (root && normalizeDisplayPath(root) !== normalizeDisplayPath(projectRoot)) void openProject(root)
+  }, [existing?.projectRoot, location.search, openProject, projectRoot])
+
+  useEffect(() => {
+    if (!project || !projectRoot) return
+    setTask((current) => ({
+      ...current,
+      label: current.label || project.name,
+      projectId: project.projectId,
+      projectRoot,
+      configuredRevision: project.revision,
+      pipeline: {
+        ...current.pipeline,
+        mediaTrackIds: current.pipeline.mediaTrackIds.length
+          ? current.pipeline.mediaTrackIds.filter((id) => project.tracks.some((track) => track.id === id))
+          : project.tracks.map((track) => track.id),
+      },
+    }))
+    setReconstruction(configFromProject(project.reconstruction.backend, project.reconstruction.config))
+    setTraining(trainingConfigFromProject(project))
+  }, [project, projectRoot])
+
+  const selectedTracks = useMemo(() => new Set(task.pipeline.mediaTrackIds), [task.pipeline.mediaTrackIds])
+
+  const setStages = (key: keyof BatchTask['stages'], value: boolean) => {
+    if (locked) return
+    setTask((current) => {
+      const stages = setBatchStage(current.stages, key, value)
+      return {
+        ...current,
+        stages,
+        stageStatus: {
+          media: stages.media ? 'pending' : 'disabled',
+          reconstruction: stages.reconstruction ? 'pending' : 'disabled',
+          training: stages.training ? 'pending' : 'disabled',
+        },
+      }
+    })
+  }
+
+  const browseProject = async () => {
+    const selected = await openDialog({ directory: true })
+    if (selected && !Array.isArray(selected)) await openProject(normalizeDisplayPath(selected))
+  }
+
+  const analyzePaths = useCallback(async (paths: string[]) => {
+    const clean = Array.from(new Set(paths.map(normalizeDisplayPath).filter(Boolean)))
+    if (!clean.length) return
+    try {
+      const infos = await invoke<ImportPathInfo[]>('analyze_import_paths', { paths: clean })
+      setDrafts(createMediaImportDrafts(infos))
+      setError(null)
+    } catch (reason) {
+      setError(`素材分析失败：${commandErrorMessage(reason)}`)
+    }
+  }, [])
+
+  const addFiles = async () => {
+    const selected = await openDialog({ multiple: true })
+    if (selected) await analyzePaths(Array.isArray(selected) ? selected : [selected])
+  }
+
+  const addFolder = async () => {
+    const selected = await openDialog({ directory: true })
+    if (selected && !Array.isArray(selected)) await analyzePaths([selected])
+  }
+
+  const confirmImport = async () => {
+    const accepted = drafts.filter(isDraftValid).map(({ id: _id, info: _info, duration: _duration, ...draft }) => draft)
+    if (!accepted.length || importing) return
+    setImporting(true)
+    try {
+      let root = projectRoot
+      let revision = project?.revision
+      if (!root || revision === undefined) {
+        const created = await invoke<OpenProjectResult>('create_project', {
+          name: accepted[0].label,
+          firstSource: accepted[0].sourcePath,
+          optionalRoot: null,
+        })
+        root = created.projectRoot
+        revision = created.project.revision
+      }
+      await invoke<XpanoProjectV2>('commit_import', {
+        projectRoot: root,
+        expectedRevision: revision,
+        drafts: accepted,
+      })
+      if (!await openProject(root)) throw new Error('素材已导入，但工程刷新失败')
+      setDrafts([])
+      setError(null)
+    } catch (reason) {
+      setError(`素材导入失败：${commandErrorMessage(reason)}`)
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const toggleTrack = (trackId: string) => {
+    setTask((current) => ({
+      ...current,
+      pipeline: {
+        ...current.pipeline,
+        mediaTrackIds: current.pipeline.mediaTrackIds.includes(trackId)
+          ? current.pipeline.mediaTrackIds.filter((id) => id !== trackId)
+          : [...current.pipeline.mediaTrackIds, trackId],
+      },
+    }))
+  }
+
+  const save = async () => {
+    if (locked) return
+    const prefixError = validateStagePrefix(task.stages)
+    if (prefixError) return setError(prefixError)
+    if (!project || !projectRoot) return setError('请先选择或创建一个 xPano 工程')
+    if (!task.label.trim()) return setError('请填写任务名称')
+    if (!task.pipeline.mediaTrackIds.length) return setError('请至少选择一条素材轨道')
+    setSaving(true)
+    setError(null)
+    try {
+      let current = project
+      let planId = task.pipeline.reconstructionPlanId || null
+      if (task.stages.reconstruction) {
+        current = await invoke<XpanoProjectV2>('update_reconstruction_config', {
+          projectRoot,
+          expectedRevision: current.revision,
+          backend: reconstruction.backend,
+          config: persistedReconstructionConfig(reconstruction),
+        })
+        const plan = await invoke<ExecutionPlan>('build_execution_plan', {
+          projectRoot,
+          expectedRevision: current.revision,
+          config: {
+            backend: reconstruction.backend,
+            alignmentMode: reconstruction.alignmentMode,
+            metashapePath: reconstruction.backend === 'metashape' ? reconstruction.metashapePath || null : null,
+          },
+        })
+        planId = plan.planId
+      }
+      if (task.stages.training) {
+        current = await invoke<XpanoProjectV2>('save_training_config', {
+          projectRoot,
+          expectedRevision: current.revision,
+          config: { ...training, gui: true },
+        })
+      }
+      const saved = await saveTask({
+        ...task,
+        projectId: current.projectId,
+        projectRoot,
+        label: task.label.trim(),
+        configuredRevision: current.revision,
+        pipeline: {
+          ...task.pipeline,
+          reconstructionPlanId: planId,
+          trainingConfig: task.stages.training ? { ...training, gui: true } : null,
+        },
+      })
+      if (!saved) throw new Error('保存任务失败')
+      setTask(saved)
+      if (!await enqueueTask(saved.taskId)) throw new Error('任务已保存，但加入队列失败')
+      navigate('/batch')
+    } catch (reason) {
+      setError(commandErrorMessage(reason))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const stageOptions = [
+    { key: 'media' as const, label: '素材准备', hint: '抽帧与预处理', icon: Images },
+    { key: 'reconstruction' as const, label: '对齐重建', hint: '生成训练数据', icon: ScanLine },
+    { key: 'training' as const, label: '高斯训练', hint: '启动 LichtFeld', icon: Sparkles },
+  ]
+
+  return <div className="app-shell relative z-10 h-screen min-h-[720px] min-w-[1024px] overflow-hidden text-ink">
+    <header className="liquid-topbar app-titlebar drag-region flex items-center justify-between px-3.5">
+      <div className="flex items-center gap-2.5"><img src="/icon.png" alt="xPano" className="h-6 w-6 rounded-subtle" /><span className="text-[13px] font-semibold">xPano</span><span className="titlebar-section-divider" /><span className="text-[11px] text-muted">批量任务设置</span></div>
+      <div className="topbar-control-group no-drag flex items-center gap-1"><RuntimeReadinessBadge /><ThemeControls themeMode={themeMode} onThemeModeChange={onThemeModeChange} /><span className="topbar-control-divider" /><WindowControls /></div>
+    </header>
+    <main className="app-workspace min-h-0 overflow-auto p-4 md:p-6">
+      <section className="liquid-panel batch-task-editor-panel mx-auto max-w-6xl p-5 md:p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div><button type="button" onClick={() => navigate('/batch')} className="mb-3 flex items-center gap-1 text-[11px] text-muted hover:text-brand"><ArrowLeft className="h-3.5 w-3.5" />返回任务列表</button><h1 className="text-[17px] font-semibold">{taskId ? '编辑任务' : '新增任务'}</h1><p className="mt-1 text-[11px] text-muted">在一个页面完成素材、对齐和训练设置</p></div>
+          <button type="button" onClick={save} disabled={saving || locked} className="motion-press flex h-9 items-center gap-1.5 rounded-comfortable bg-brand px-4 text-[11px] font-semibold text-white disabled:cursor-not-allowed disabled:opacity-45"><Check className="h-3.5 w-3.5" />{locked ? '任务已锁定' : saving ? '保存中…' : '保存并入队'}</button>
+        </div>
+        {error && <div className="mt-4 rounded-comfortable border border-danger/20 bg-danger/8 px-3 py-2 text-[11px] text-danger">{error}</div>}
+
+        <div className="mt-5 grid gap-4 md:grid-cols-[1fr_1.4fr]">
+          <label><span className="text-[11px] font-medium text-muted">任务名称</span><input disabled={locked} value={task.label} onChange={(event) => setTask({ ...task, label: event.target.value })} className={inputClass} placeholder="例如：南区夜间处理" /></label>
+          <label><span className="text-[11px] font-medium text-muted">工程目录</span><div className="mt-1 flex gap-2"><input readOnly value={projectRoot || task.projectRoot} className="theme-input min-w-0 flex-1" placeholder="选择现有工程，或直接添加素材创建工程" /><button type="button" disabled={locked} onClick={browseProject} className="glass-control flex h-9 items-center gap-1.5 rounded-comfortable px-3 text-[11px]"><FolderOpen className="h-3.5 w-3.5" />选择</button></div></label>
+        </div>
+
+        <div className="mt-5 grid gap-2 md:grid-cols-3">
+          {stageOptions.map((stage) => {
+            const Icon = stage.icon
+            const enabled = task.stages[stage.key]
+            const dependentLocked = stage.key === 'reconstruction' ? !task.stages.media : stage.key === 'training' ? !task.stages.reconstruction : false
+            return <button type="button" key={stage.key} disabled={locked || dependentLocked} onClick={() => setStages(stage.key, !enabled)} className={`flex min-h-[74px] items-center gap-3 rounded-comfortable border px-3 text-left transition-colors ${enabled ? 'border-brand/30 bg-brand/8' : 'border-ink/[0.08] bg-ink/[0.02]'} disabled:cursor-not-allowed disabled:opacity-40`}><span className={`grid h-8 w-8 place-items-center rounded-full ${enabled ? 'bg-brand text-white' : 'bg-ink/[0.06] text-muted'}`}><Icon className="h-4 w-4" /></span><span><span className="block text-[12px] font-semibold">{stage.label}</span><span className="mt-0.5 block text-[10px] text-muted">{dependentLocked ? '需先开启前一阶段' : stage.hint}</span></span><span className="ml-auto text-[10px] text-muted">{enabled ? '已开启' : '未开启'}</span></button>
+          })}
+        </div>
+
+        <div className="mt-5 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+          <section className="glass-inset rounded-comfortable p-4">
+            <div className="flex items-center justify-between"><div><h2 className="text-[12px] font-semibold">素材与抽帧</h2><p className="mt-1 text-[10px] text-muted">选择本任务要处理的轨道；导入窗口中可设置 FPS、上限、裁剪和 LUT。</p></div><div className="flex gap-1"><button type="button" disabled={locked} onClick={addFiles} className="glass-control flex h-8 items-center gap-1 rounded-subtle px-2 text-[10px]"><FilePlus2 className="h-3 w-3" />文件</button><button type="button" disabled={locked} onClick={addFolder} className="glass-control flex h-8 items-center gap-1 rounded-subtle px-2 text-[10px]"><FolderPlus className="h-3 w-3" />文件夹</button></div></div>
+            <div className="mt-3 max-h-64 space-y-1.5 overflow-auto pr-1">
+              {project?.tracks.length ? project.tracks.map((track) => <label key={track.id} className="flex cursor-pointer items-center gap-3 rounded-subtle border border-ink/[0.07] bg-ink/[0.018] px-3 py-2.5"><input type="checkbox" disabled={locked} checked={selectedTracks.has(track.id)} onChange={() => toggleTrack(track.id)} className="accent-brand" /><span className="min-w-0 flex-1"><span className="block truncate text-[11px] font-medium">{track.label}</span><span className="mt-0.5 block truncate text-[9px] text-muted" title={track.sourcePath}>{track.sourcePath}</span></span><span className="font-mono text-[9px] text-muted">{track.extraction.framesPerSecond} FPS</span></label>) : <div className="grid min-h-32 place-items-center rounded-subtle border border-dashed border-ink/[0.12] text-[11px] text-muted">选择工程或添加素材</div>}
+            </div>
+          </section>
+
+          <div className="space-y-4">
+            <section className={`glass-inset rounded-comfortable p-4 ${task.stages.reconstruction ? '' : 'opacity-45'}`}>
+              <h2 className="text-[12px] font-semibold">对齐参数</h2>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <label><span className="text-[10px] text-muted">后端</span><select disabled={locked || !task.stages.reconstruction} value={reconstruction.backend} onChange={(event) => setReconstruction({ ...reconstruction, backend: event.target.value as ReconstructionConfigDraft['backend'] })} className={inputClass}><option value="metashape">Metashape</option><option value="colmap">COLMAP</option></select></label>
+                {reconstruction.backend === 'metashape'
+                  ? <label><span className="text-[10px] text-muted">对齐流程</span><select disabled={locked || !task.stages.reconstruction} value={reconstruction.alignmentMode} onChange={(event) => setReconstruction({ ...reconstruction, alignmentMode: event.target.value as ReconstructionConfigDraft['alignmentMode'] })} className={inputClass}><option value="backbone">全景骨架优先</option><option value="mixed">混合素材</option></select></label>
+                  : <label><span className="text-[10px] text-muted">匹配方式</span><select disabled={locked || !task.stages.reconstruction} value={reconstruction.colmapMatcher} onChange={(event) => setReconstruction({ ...reconstruction, colmapMatcher: event.target.value as ReconstructionConfigDraft['colmapMatcher'] })} className={inputClass}><option value="sequential">顺序匹配</option><option value="exhaustive">穷举匹配</option></select></label>}
+              </div>
+              {reconstruction.backend === 'metashape'
+                ? <>
+                    <div className="mt-3 grid grid-cols-2 gap-3"><label><span className="text-[10px] text-muted">特征点上限</span><input disabled={locked || !task.stages.reconstruction} type="number" min={1000} value={reconstruction.metashapeKeypointLimit} onChange={(event) => setReconstruction({ ...reconstruction, metashapeKeypointLimit: Math.max(1000, Number(event.target.value) || 40000) })} className={inputClass} /></label><label><span className="text-[10px] text-muted">连接点上限</span><input disabled={locked || !task.stages.reconstruction} type="number" min={0} value={reconstruction.metashapeTiepointLimit} onChange={(event) => setReconstruction({ ...reconstruction, metashapeTiepointLimit: Math.max(0, Number(event.target.value) || 0) })} className={inputClass} /></label></div>
+                    <label className="mt-3 block"><span className="text-[10px] text-muted">Metashape 路径</span><input disabled={locked || !task.stages.reconstruction} value={reconstruction.metashapePath} onChange={(event) => setReconstruction({ ...reconstruction, metashapePath: event.target.value })} className={inputClass} placeholder="留空时自动检测" /></label>
+                  </>
+                : <div className="mt-3 grid grid-cols-2 gap-3"><label><span className="text-[10px] text-muted">最大图像尺寸</span><input disabled={locked || !task.stages.reconstruction} type="number" min={1} value={reconstruction.colmapMaxImageSize} onChange={(event) => setReconstruction({ ...reconstruction, colmapMaxImageSize: Math.max(1, Number(event.target.value) || 1600) })} className={inputClass} /></label><label><span className="text-[10px] text-muted">最大特征数</span><input disabled={locked || !task.stages.reconstruction} type="number" min={1} value={reconstruction.colmapMaxNumFeatures} onChange={(event) => setReconstruction({ ...reconstruction, colmapMaxNumFeatures: Math.max(1, Number(event.target.value) || 4096) })} className={inputClass} /></label></div>}
+              <details className="mt-3 border-t border-ink/[0.07] pt-2 text-[10px] text-muted"><summary className="cursor-pointer select-none hover:text-brand">高级参数</summary><div className="mt-2 grid grid-cols-2 gap-3"><label><span>向上轴</span><select disabled={locked || !task.stages.reconstruction} value={reconstruction.upAxis} onChange={(event) => setReconstruction({ ...reconstruction, upAxis: event.target.value })} className={inputClass}><option value="+Y">+Y</option><option value="+Z">+Z</option><option value="-Y">-Y</option><option value="-Z">-Z</option></select></label>{reconstruction.backend === 'colmap' && <label><span>密度预设</span><select disabled={locked || !task.stages.reconstruction} value={reconstruction.colmapDensityPreset} onChange={(event) => setReconstruction({ ...reconstruction, colmapDensityPreset: event.target.value as ReconstructionConfigDraft['colmapDensityPreset'] })} className={inputClass}><option value="stable">稳定</option><option value="high-density">高密度</option><option value="experimental-high-density">实验性高密度</option></select></label>}</div>{reconstruction.backend === 'colmap' && <label className="mt-2 flex items-center gap-1.5"><input type="checkbox" disabled={locked || !task.stages.reconstruction} checked={reconstruction.colmapUseGpu} onChange={(event) => setReconstruction({ ...reconstruction, colmapUseGpu: event.target.checked })} className="accent-brand" />使用 GPU</label>}</details>
+            </section>
+
+            <section className={`glass-inset rounded-comfortable p-4 ${task.stages.training ? '' : 'opacity-45'}`}>
+              <div className="flex items-center justify-between"><h2 className="text-[12px] font-semibold">训练参数</h2><label className="flex items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" disabled={locked || !task.stages.training} checked={training.bilateralGrid} onChange={(event) => setTraining({ ...training, bilateralGrid: event.target.checked })} className="accent-brand" />双边网格</label></div>
+              <div className="mt-3 grid grid-cols-2 gap-3"><label><span className="text-[10px] text-muted">迭代步数</span><input disabled={locked || !task.stages.training} type="number" min={1} value={training.iterations} onChange={(event) => setTraining({ ...training, iterations: Math.max(1, Number(event.target.value) || 30000) })} className={inputClass} /></label><label><span className="text-[10px] text-muted">最大图像宽度</span><input disabled={locked || !task.stages.training} type="number" min={0} value={training.maxWidth} onChange={(event) => setTraining({ ...training, maxWidth: Math.max(0, Number(event.target.value) || 0) })} className={inputClass} /></label></div>
+              <details className="mt-3 border-t border-ink/[0.07] pt-2 text-[10px] text-muted"><summary className="cursor-pointer select-none hover:text-brand">高级参数</summary><div className="mt-2 grid grid-cols-2 gap-3"><label><span>训练策略</span><select disabled={locked || !task.stages.training} value={training.strategy} onChange={(event) => setTraining({ ...training, strategy: event.target.value as TrainingConfig['strategy'] })} className={inputClass}><option value="mrnf">MRNF</option><option value="mcmc">MCMC</option><option value="igs+">IGS+</option></select></label><label><span>SH 阶数</span><select disabled={locked || !task.stages.training} value={training.shDegree} onChange={(event) => setTraining({ ...training, shDegree: Number(event.target.value) as TrainingConfig['shDegree'] })} className={inputClass}><option value={0}>0</option><option value={1}>1</option><option value={2}>2</option><option value={3}>3</option></select></label><label><span>高斯数量上限</span><input disabled={locked || !task.stages.training} type="number" min={1} value={training.maxGaussians} onChange={(event) => setTraining({ ...training, maxGaussians: Math.max(1, Number(event.target.value) || 1_000_000) })} className={inputClass} /></label><label><span>缩放倍率</span><select disabled={locked || !task.stages.training} value={training.resizeFactor} onChange={(event) => setTraining({ ...training, resizeFactor: event.target.value as TrainingConfig['resizeFactor'] })} className={inputClass}><option value="auto">自动</option><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></label></div><div className="mt-2 flex flex-wrap gap-x-4 gap-y-2"><label className="flex items-center gap-1.5"><input type="checkbox" disabled={locked || !task.stages.training} checked={training.useCpuCache} onChange={(event) => setTraining({ ...training, useCpuCache: event.target.checked })} className="accent-brand" />CPU 缓存</label><label className="flex items-center gap-1.5"><input type="checkbox" disabled={locked || !task.stages.training} checked={training.useFsCache} onChange={(event) => setTraining({ ...training, useFsCache: event.target.checked })} className="accent-brand" />文件缓存</label><label className="flex items-center gap-1.5"><input type="checkbox" disabled={locked || !task.stages.training} checked={training.enableMip} onChange={(event) => setTraining({ ...training, enableMip: event.target.checked })} className="accent-brand" />Mip</label><label className="flex items-center gap-1.5"><input type="checkbox" disabled={locked || !task.stages.training} checked={training.undistort} onChange={(event) => setTraining({ ...training, undistort: event.target.checked })} className="accent-brand" />训练前去畸变</label></div></details>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+    {drafts.length > 0 && <MaterialImportDialog drafts={drafts} onChange={setDrafts} onCancel={() => setDrafts([])} onConfirm={confirmImport} busy={importing} error={error || ''} />}
+  </div>
 }

@@ -439,7 +439,31 @@ fn training_exit_message(exit_code: &str, supervisor_error: Option<&str>) -> Str
 }
 
 fn emit_job_event(app: &AppHandle, event: crate::contracts::JobEvent) {
+    crate::batch::observe_job_event(app, &event);
     let _ = app.emit("job:event", event);
+}
+
+fn emit_pipeline_event<T: Serialize>(
+    app: &AppHandle,
+    event_name: &str,
+    payload: T,
+    context: Option<&crate::job::JobContext>,
+) {
+    let Ok(mut value) = serde_json::to_value(payload) else { return };
+    if let (Some(context), Some(object)) = (context, value.as_object_mut()) {
+        object.insert(
+            "projectRoot".to_string(),
+            serde_json::Value::String(context.project_root().to_string_lossy().to_string()),
+        );
+        object.insert(
+            "jobId".to_string(),
+            serde_json::Value::String(context.job_id.clone()),
+        );
+        if let Some(task_id) = context.task_id.as_ref() {
+            object.insert("taskId".to_string(), serde_json::Value::String(task_id.clone()));
+        }
+    }
+    let _ = app.emit(event_name, value);
 }
 
 fn emit_pipeline_progress(
@@ -477,7 +501,7 @@ fn emit_pipeline_progress(
             }
         }
     }
-    let _ = app.emit("pipeline:progress", event);
+    emit_pipeline_event(app, "pipeline:progress", event, job_context);
 }
 
 fn finish_persisted_job(
@@ -519,16 +543,6 @@ impl PipelineState {
             job: None,
             active_job: None,
         }
-    }
-
-    pub fn start(
-        &mut self,
-        app: AppHandle,
-        python_exe: &str,
-        script: &str,
-        args: &[String],
-    ) -> Result<(), String> {
-        self.start_internal(app, python_exe, script, args, true, None, None)
     }
 
     pub fn start_with_metashape_runtime(
@@ -764,7 +778,7 @@ impl PipelineState {
 
                     if let Some(payload) = trimmed.strip_prefix("MEDIA_ITEM:") {
                         if let Ok(event) = serde_json::from_str::<PipelineMediaItemEvent>(payload.trim()) {
-                            let _ = app.emit("pipeline:media-item", event);
+                            emit_pipeline_event(&app, "pipeline:media-item", event, stdout_job_context.as_ref());
                         }
                         continue;
                     }
@@ -803,11 +817,11 @@ impl PipelineState {
                     // PREVIEW:left|right format
                     if let Some(payload) = trimmed.strip_prefix("PREVIEW:") {
                         if let Some((left, right)) = payload.split_once('|') {
-                            let _ = app.emit(
+                            emit_pipeline_event(
+                                &app,
                                 "pipeline:preview",
-                                serde_json::json!({
-                                    "left": left.trim(), "right": right.trim()
-                                }),
+                                serde_json::json!({ "left": left.trim(), "right": right.trim() }),
+                                stdout_job_context.as_ref(),
                             );
                         }
                         continue;
@@ -820,12 +834,14 @@ impl PipelineState {
                                 *latest = Some(err.trim().to_string());
                             }
                         }
-                        let _ = app.emit(
+                        emit_pipeline_event(
+                            &app,
                             "pipeline:error",
                             PipelineErrorEvent {
                                 error: err.trim().to_string(),
                                 job_kind: stdout_job_kind.clone(),
                             },
+                            stdout_job_context.as_ref(),
                         );
                         continue;
                     }
@@ -893,12 +909,14 @@ impl PipelineState {
                                     *latest = Some(err.trim().to_string());
                                 }
                             }
-                            let _ = app.emit(
+                            emit_pipeline_event(
+                                &app,
                                 "pipeline:error",
                                 PipelineErrorEvent {
                                     error: err.trim().to_string(),
                                     job_kind: stderr_job_kind.clone(),
                                 },
+                                stderr_job_context.as_ref(),
                             );
                         } else {
                             emit_pipeline_progress(
@@ -1002,12 +1020,14 @@ impl PipelineState {
                                 crate::contracts::JobState::Cancelled,
                                 "任务已取消",
                             );
-                            let _ = app.emit(
+                            emit_pipeline_event(
+                                &app,
                                 "pipeline:error",
                                 PipelineErrorEvent {
                                     error: "任务已取消".to_string(),
                                     job_kind: job_kind.clone(),
                                 },
+                                watcher_job_context.as_ref(),
                             );
                         }
                         Ok(exit) if exit.success() => {
@@ -1034,12 +1054,14 @@ impl PipelineState {
                                         crate::contracts::JobState::Completed,
                                         "任务已完成",
                                     );
-                                    let _ = app.emit(
+                                    emit_pipeline_event(
+                                        &app,
                                         "pipeline:complete",
                                         PipelineCompleteEvent {
                                             output_path,
                                             job_kind,
                                         },
+                                        watcher_job_context.as_ref(),
                                     );
                                 }
                                 Err(error) => {
@@ -1049,12 +1071,14 @@ impl PipelineState {
                                         crate::contracts::JobState::Failed,
                                         &format!("任务结果提交失败: {}", error),
                                     );
-                                    let _ = app.emit(
+                                    emit_pipeline_event(
+                                        &app,
                                         "pipeline:error",
                                         PipelineErrorEvent {
                                             error: format!("任务结果提交失败: {}", error),
                                             job_kind,
                                         },
+                                        watcher_job_context.as_ref(),
                                     );
                                 }
                             }
@@ -1093,12 +1117,14 @@ impl PipelineState {
                                 crate::contracts::JobState::Failed,
                                 &format!("任务异常结束，退出码 {}", code),
                             );
-                            let _ = app.emit(
+                            emit_pipeline_event(
+                                &app,
                                 "pipeline:error",
                                 PipelineErrorEvent {
                                     error: format!("任务异常结束，退出码 {}", code),
                                     job_kind: job_kind.clone(),
                                 },
+                                watcher_job_context.as_ref(),
                             );
                         }
                         Err(error) => {
@@ -1128,12 +1154,14 @@ impl PipelineState {
                                 crate::contracts::JobState::Failed,
                                 &format!("无法获取任务退出状态: {}", error),
                             );
-                            let _ = app.emit(
+                            emit_pipeline_event(
+                                &app,
                                 "pipeline:error",
                                 PipelineErrorEvent {
                                     error: format!("无法获取任务退出状态: {}", error),
                                     job_kind: job_kind.clone(),
                                 },
+                                watcher_job_context.as_ref(),
                             );
                         }
                     }

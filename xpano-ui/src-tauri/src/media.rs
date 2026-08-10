@@ -1192,7 +1192,7 @@ pub fn start_media_job(
     target_track_ids: Vec<String>,
 ) -> Result<XpanoProjectV2, ProjectCommandError> {
     crate::batch::ensure_manual_startable(&app, state.inner())?;
-    start_media_job_blocking(&app, state.inner(), project_root, expected_revision, target_track_ids)
+    start_media_job_blocking(&app, state.inner(), project_root, expected_revision, target_track_ids, None)
 }
 
 pub(crate) fn start_media_job_blocking(
@@ -1201,6 +1201,7 @@ pub(crate) fn start_media_job_blocking(
     project_root: String,
     expected_revision: u64,
     target_track_ids: Vec<String>,
+    task_id: Option<String>,
 ) -> Result<XpanoProjectV2, ProjectCommandError> {
     let root = Path::new(&project_root);
     let stale_result = root.join(MEDIA_RESULT_RELATIVE_PATH);
@@ -1212,7 +1213,15 @@ pub(crate) fn start_media_job_blocking(
             )
         })?;
     }
-    let project = begin_media_job_impl(root, expected_revision, &target_track_ids)?;
+    begin_media_job_impl(root, expected_revision, &target_track_ids)?;
+    let (job_context, _) = match crate::job::begin_job_with_task_impl(root, ProjectWorkspace::Media, task_id) {
+        Ok(started) => started,
+        Err(error) => {
+            let _ = fail_media_job_impl(root);
+            return Err(error);
+        }
+    };
+    let project = read_project(root)?;
     let _ = app.emit(
         "project:updated",
         ProjectUpdatedEvent {
@@ -1247,8 +1256,15 @@ pub(crate) fn start_media_job_blocking(
             ));
         }
     };
-    if let Err(error) = pipeline.start(app.clone(), "", "scripts/run_xpano_prepare_project.py", &args) {
+    if let Err(error) = pipeline.start_registered_job(
+        app.clone(),
+        "",
+        "scripts/run_xpano_prepare_project.py",
+        &args,
+        job_context.clone(),
+    ) {
         let failed = fail_media_job_impl(root)?;
+        let _ = crate::job::finish_job_impl(&job_context, JobState::Failed, &error);
         let _ = app.emit(
             "project:updated",
             ProjectUpdatedEvent {

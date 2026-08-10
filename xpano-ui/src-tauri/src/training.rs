@@ -50,7 +50,7 @@ impl Default for TrainingConfig {
     }
 }
 
-fn validate_config(config: &TrainingConfig) -> Result<(), ProjectCommandError> {
+pub(crate) fn validate_config(config: &TrainingConfig) -> Result<(), ProjectCommandError> {
     if config.iterations == 0 {
         return Err(ProjectCommandError::new("invalid_training_config", "iterations must be greater than 0"));
     }
@@ -101,6 +101,31 @@ pub fn resolve_training_dataset(project_root: &Path, project: &XpanoProjectV2) -
         "training_not_ready",
         "COLMAP dataset requires images and sparse/0 model files",
     ))
+}
+
+pub(crate) fn save_training_config_impl(
+    project_root: &Path,
+    expected_revision: u64,
+    config: &TrainingConfig,
+) -> Result<XpanoProjectV2, ProjectCommandError> {
+    validate_config(config)?;
+    let mut project = crate::project::read_project(project_root)?;
+    if project.revision != expected_revision {
+        return Err(crate::project::ProjectCommandError::revision_conflict(expected_revision, project.revision));
+    }
+    if project.training.status == crate::contracts::TrainingStatus::Running {
+        return Err(crate::project::ProjectCommandError::new("job_conflict", "training configuration is locked while training is running"));
+    }
+    let value = serde_json::to_value(config).map_err(|error| crate::project::ProjectCommandError::new("invalid_training_config", error.to_string()))?;
+    if project.training.config == value && project.training.total_iterations == config.iterations {
+        return Ok(project);
+    }
+    project.training.config = value;
+    project.training.total_iterations = config.iterations;
+    project.revision += 1;
+    crate::project::touch_project(&mut project);
+    crate::project::write_project_atomic(project_root, &project)?;
+    Ok(project)
 }
 
 pub fn validate_training_start_inputs(
@@ -294,6 +319,22 @@ mod tests {
         assert_eq!(dataset, root.canonicalize().unwrap());
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.training.status, TrainingStatus::Idle);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(root.with_extension("jpg"));
+    }
+
+    #[test]
+    fn saves_training_config_without_starting_a_job() {
+        let root = training_project("save-config");
+        let before = crate::project::read_project(&root).unwrap();
+        let mut config = TrainingConfig::default();
+        config.iterations = 1234;
+        let updated = save_training_config_impl(&root, before.revision, &config).unwrap();
+        assert_eq!(updated.training.status, TrainingStatus::Idle);
+        assert_eq!(updated.training.total_iterations, 1234);
+        assert_eq!(updated.training.config["iterations"], serde_json::json!(1234));
+        let unchanged = save_training_config_impl(&root, updated.revision, &config).unwrap();
+        assert_eq!(unchanged.revision, updated.revision);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(root.with_extension("jpg"));
     }
