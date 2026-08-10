@@ -4,7 +4,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { ChevronRight, Clock3, FilePlus2, FolderPlus, Gauge, Images, Play } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useProject } from '../../app/useProject'
-import { useBatch } from '../../app/BatchProvider'
+import { useBatch } from '../../app/useBatch'
 import { useJob } from '../../app/useJob'
 import { ConfirmDialog } from '../../components/shared/ConfirmDialog'
 import { ToastContainer } from '../../components/shared/Toast'
@@ -17,6 +17,7 @@ import { MaterialImportDialog } from './MaterialImportDialog'
 import { allowedTrackTypes, isDraftValid, type ImportPathInfo, type MediaImportDraft } from './mediaTypes'
 import { TrackEditor } from './TrackEditor'
 import { TrackList } from './TrackList'
+import { useBatchTaskLock } from '../batch/useBatchTaskLock'
 
 function createDrafts(infos: ImportPathInfo[]): MediaImportDraft[] {
   return infos.map((info) => {
@@ -53,6 +54,7 @@ function previewSource(path?: string) {
 export function MediaWorkspace() {
   const { queue: batchQueue } = useBatch()
   const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
+  const { locked: taskInputLocked, reason: taskInputLockReason } = useBatchTaskLock()
   const navigate = useNavigate()
   const {
     project,
@@ -85,6 +87,10 @@ export function MediaWorkspace() {
   }, [project, selectedId])
 
   const analyzePaths = useCallback(async (paths: string[]) => {
+    if (taskInputLocked) {
+      toast.info(taskInputLockReason)
+      return
+    }
     const clean = Array.from(new Set(paths.map(normalizeDisplayPath).filter(Boolean)))
     if (!clean.length) return
     setImportError('')
@@ -94,7 +100,7 @@ export function MediaWorkspace() {
     } catch (error) {
       toast.error(`素材分析失败：${String(error)}`)
     }
-  }, [toast])
+  }, [taskInputLockReason, taskInputLocked, toast])
 
   useEffect(() => {
     if (!pendingDropPaths.length) return
@@ -208,7 +214,9 @@ export function MediaWorkspace() {
 
   return (
     <>
-      <div className="media-workspace-grid grid h-full min-h-0 gap-2">
+      <div className="flex h-full min-h-0 flex-col gap-2">
+        {taskInputLocked && <div className="shrink-0 rounded-comfortable border border-warning/20 bg-warning/8 px-3 py-2 text-[10px] text-warning">{taskInputLockReason}</div>}
+        <div className="media-workspace-grid grid min-h-0 flex-1 gap-2">
         <TrackList
           tracks={displayTracks}
           selectedId={selectedId}
@@ -221,6 +229,8 @@ export function MediaWorkspace() {
           activePercent={activeTrackPercent}
           activeCount={activeCount}
           activeEta={formatEta(progress.etaSeconds)}
+          editingDisabled={taskInputLocked}
+          editingDisabledReason={taskInputLockReason}
         />
 
         <TrackEditor
@@ -228,7 +238,9 @@ export function MediaWorkspace() {
           projectRoot={projectRoot}
           onSave={updateTrackSettings}
           onSelection={setItemSelection}
-          selectionDisabled={running && Boolean(selectedTrack && (mediaItems[selectedTrack.id]?.length ?? 0) > 0)}
+          selectionDisabled={taskInputLocked || (running && Boolean(selectedTrack && (mediaItems[selectedTrack.id]?.length ?? 0) > 0))}
+          settingsDisabled={taskInputLocked}
+          settingsDisabledReason={taskInputLockReason}
         />
 
         <aside className="media-monitor liquid-panel flex min-h-0 flex-col overflow-hidden p-0">
@@ -259,6 +271,7 @@ export function MediaWorkspace() {
               : <button type="button" onClick={startPreparation} disabled={batchActive || running || pendingTrackIds.length === 0} title={batchActive ? '批量队列运行中，请先停止队列' : undefined} className="motion-press flex h-10 w-full items-center justify-center gap-2 rounded-comfortable bg-brand px-4 text-[12px] font-semibold text-white shadow-sm shadow-brand/20 disabled:cursor-not-allowed disabled:opacity-45"><Play className="h-4 w-4 fill-current" /> {batchActive ? '批量队列运行中' : running ? progress.message : pendingTrackIds.length ? '开始抽帧' : '素材状态需处理'}</button>}
           </div>
         </aside>
+        </div>
       </div>
 
       {drafts.length > 0 && <MaterialImportDialog drafts={drafts} onChange={setDrafts} onCancel={() => setDrafts([])} onConfirm={confirmImport} busy={importing} error={importError} />}

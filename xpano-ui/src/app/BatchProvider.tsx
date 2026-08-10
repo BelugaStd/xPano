@@ -1,22 +1,17 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { BatchQueueFile, BatchTask } from '../features/batch/batchTypes'
+import { listen } from '@tauri-apps/api/event'
+import type { BatchQueueFile } from '../features/batch/batchTypes'
 import { commandErrorMessage } from '../lib/commandError'
+import { BatchContext, type BatchTaskSubmission } from './batchContext'
 
-const emptyQueue: BatchQueueFile = { schemaVersion: 1, revision: 0, state: 'idle', activeTaskId: null, tasks: [] }
-const BatchContext = createContext<{
-  queue: BatchQueueFile
-  loading: boolean
-  error: string | null
-  saveTask: (task: BatchTask) => Promise<BatchTask | null>
-  enqueueTask: (taskId: string) => Promise<boolean>
-  removeTask: (taskId: string) => Promise<void>
-  reorderTasks: (taskIds: string[]) => Promise<boolean>
-  startQueue: () => Promise<void>
-  stopQueue: () => Promise<void>
-  reload: () => Promise<void>
-} | null>(null)
-
+const emptyQueue: BatchQueueFile = {
+  schemaVersion: 1,
+  revision: 0,
+  state: 'idle',
+  activeTaskId: null,
+  tasks: [],
+}
 export function BatchProvider({ children }: { children: ReactNode }) {
   const [queue, setQueue] = useState<BatchQueueFile>(emptyQueue)
   const [loading, setLoading] = useState(true)
@@ -39,52 +34,121 @@ export function BatchProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  useEffect(() => { void reload() }, [reload])
   useEffect(() => {
-    if (queue.state !== 'running' && queue.state !== 'stopping') return
-    const timer = window.setInterval(() => { void reload() }, 1000)
-    return () => window.clearInterval(timer)
-  }, [queue.state, reload])
-
-  const saveTask = useCallback(async (task: BatchTask) => {
-    try {
-      const saved = await invoke<BatchTask>('save_batch_task', { task })
-      await reload()
-      return saved
-    } catch (reason) { setError(commandErrorMessage(reason)); return null }
+    void reload()
   }, [reload])
+  useEffect(() => {
+    if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return
+    let disposed = false
+    const unlisten: Array<() => void> = []
+    Promise.all([
+      listen<BatchQueueFile>('batch:queue', (event) => {
+        if (disposed) return
+        loadedRef.current = true
+        setLoading(false)
+        setQueue(event.payload)
+      }),
+      listen<{ code?: string; message?: string }>('batch:error', (event) => {
+        if (!disposed) setError(commandErrorMessage(event.payload))
+      }),
+    ])
+      .then((disposers) => {
+        if (disposed) disposers.forEach((dispose) => dispose())
+        else unlisten.push(...disposers)
+      })
+      .catch((reason) => {
+        if (!disposed) setError(commandErrorMessage(reason))
+      })
+    return () => {
+      disposed = true
+      unlisten.forEach((dispose) => dispose())
+    }
+  }, [])
 
-  const enqueueTask = useCallback(async (taskId: string) => {
-    try { setQueue(await invoke<BatchQueueFile>('enqueue_batch_task', { taskId })); setError(null); return true }
-    catch (reason) { setError(commandErrorMessage(reason)); return false }
+  const saveAndEnqueueTask = useCallback(
+    async (input: BatchTaskSubmission) => {
+      try {
+      const next = await invoke<BatchQueueFile>('save_and_enqueue_batch_task', {
+        task: input.task,
+        reconstructionBackend: input.reconstructionBackend,
+        reconstructionConfig: input.reconstructionConfig,
+        reconstructionPlanConfig: input.reconstructionPlanConfig,
+        trainingConfig: input.trainingConfig,
+      })
+        setQueue(next)
+        setError(null)
+        return next
+      } catch (reason) {
+        setError(commandErrorMessage(reason))
+        throw reason
+      }
+    },
+    [],
+  )
+
+  const requeueTask = useCallback(async (taskId: string) => {
+    try {
+      setQueue(await invoke<BatchQueueFile>('requeue_batch_task', { taskId }))
+      setError(null)
+      return true
+    } catch (reason) {
+      setError(commandErrorMessage(reason))
+      return false
+    }
   }, [])
 
   const removeTask = useCallback(async (taskId: string) => {
-    try { setQueue(await invoke<BatchQueueFile>('remove_batch_task', { taskId })); setError(null) }
-    catch (reason) { setError(commandErrorMessage(reason)) }
+    try {
+      setQueue(await invoke<BatchQueueFile>('remove_batch_task', { taskId }))
+      setError(null)
+    } catch (reason) {
+      setError(commandErrorMessage(reason))
+    }
   }, [])
 
   const reorderTasks = useCallback(async (taskIds: string[]) => {
-    try { setQueue(await invoke<BatchQueueFile>('reorder_batch_tasks', { taskIds })); setError(null); return true }
-    catch (reason) { setError(commandErrorMessage(reason)); return false }
+    try {
+      setQueue(await invoke<BatchQueueFile>('reorder_batch_tasks', { taskIds }))
+      setError(null)
+      return true
+    } catch (reason) {
+      setError(commandErrorMessage(reason))
+      return false
+    }
   }, [])
 
   const startQueue = useCallback(async () => {
-    try { setQueue(await invoke<BatchQueueFile>('start_batch_queue')); setError(null) }
-    catch (reason) { setError(commandErrorMessage(reason)) }
+    try {
+      setQueue(await invoke<BatchQueueFile>('start_batch_queue'))
+      setError(null)
+    } catch (reason) {
+      setError(commandErrorMessage(reason))
+    }
   }, [])
 
   const stopQueue = useCallback(async () => {
-    try { setQueue(await invoke<BatchQueueFile>('stop_batch_queue')); setError(null) }
-    catch (reason) { setError(commandErrorMessage(reason)) }
+    try {
+      setQueue(await invoke<BatchQueueFile>('stop_batch_queue'))
+      setError(null)
+    } catch (reason) {
+      setError(commandErrorMessage(reason))
+    }
   }, [])
 
-  const value = useMemo(() => ({ queue, loading, error, saveTask, enqueueTask, removeTask, reorderTasks, startQueue, stopQueue, reload }), [queue, loading, error, saveTask, enqueueTask, removeTask, reorderTasks, startQueue, stopQueue, reload])
+  const value = useMemo(
+    () => ({
+      queue,
+      loading,
+      error,
+      saveAndEnqueueTask,
+      requeueTask,
+      removeTask,
+      reorderTasks,
+      startQueue,
+      stopQueue,
+      reload,
+    }),
+    [queue, loading, error, saveAndEnqueueTask, requeueTask, removeTask, reorderTasks, startQueue, stopQueue, reload],
+  )
   return <BatchContext.Provider value={value}>{children}</BatchContext.Provider>
-}
-
-export function useBatch() {
-  const value = useContext(BatchContext)
-  if (!value) throw new Error('useBatch must be used inside BatchProvider')
-  return value
 }

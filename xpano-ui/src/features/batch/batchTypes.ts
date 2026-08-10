@@ -8,11 +8,6 @@ export interface BatchProgress { percent: number; message: string; current?: num
 export interface BatchError { code: string; stage?: string | null; message: string }
 export interface BatchPipelineInput {
   mediaTrackIds: string[]
-  reconstructionPlanId?: string | null
-  reconstructionPythonExe?: string | null
-  reconstructionScript?: string | null
-  reconstructionArgs: string[]
-  trainingConfig?: Record<string, unknown> | null
 }
 export interface BatchTask {
   taskId: string; projectId: string; projectRoot: string; label: string; order: number; configuredRevision: number
@@ -31,7 +26,7 @@ export const emptyBatchTask = (): BatchTask => {
     stageStatus: { media: 'pending', reconstruction: 'pending', training: 'pending' },
     state: 'draft', currentStage: null, stageJobIds: {},
     progress: { percent: 0, message: '', current: null, total: null, etaSeconds: null, elapsedSeconds: 0 },
-    lastError: null, pipeline: { mediaTrackIds: [], reconstructionArgs: [], trainingConfig: null },
+    lastError: null, pipeline: { mediaTrackIds: [] },
     createdAt: now, startedAt: null, finishedAt: null, updatedAt: now,
   }
 }
@@ -61,4 +56,37 @@ export function batchOverallPercent(tasks: BatchTask[]) {
   if (!tasks.length) return 0
   const terminal = new Set<BatchTaskState>(['completed', 'failed', 'cancelled', 'interrupted'])
   return tasks.reduce((sum, task) => sum + (terminal.has(task.state) ? 100 : task.progress.percent), 0) / tasks.length
+}
+
+export function batchEditorProjectRoot(existingTaskRoot?: string, requestedRoot?: string | null) {
+  return requestedRoot?.trim() || existingTaskRoot?.trim() || ''
+}
+
+export function moveBatchTaskIds(taskIds: string[], taskId: string, offset: -1 | 1) {
+  const currentIndex = taskIds.indexOf(taskId)
+  const nextIndex = currentIndex + offset
+  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= taskIds.length) return taskIds
+  const next = [...taskIds]
+  next.splice(nextIndex, 0, next.splice(currentIndex, 1)[0])
+  return next
+}
+
+export function batchQueueElapsedSeconds(tasks: BatchTask[]) {
+  return tasks.reduce((total, task) => {
+    if (task.state === 'draft' || task.state === 'queued') return total
+    return total + Math.max(0, task.progress.elapsedSeconds || 0)
+  }, 0)
+}
+
+export function latestBatchJobId(task: BatchTask) {
+  for (const stage of ['training', 'reconstruction', 'media']) {
+    const value = task.stageJobIds[stage]
+    if (typeof value === 'string' && value) return value
+  }
+  return null
+}
+
+export function batchTaskInputLocked(tasks: BatchTask[], taskId?: string | null) {
+  if (!taskId) return false
+  return tasks.some((task) => task.taskId === taskId && (task.state === 'queued' || task.state === 'running'))
 }

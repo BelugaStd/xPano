@@ -15,6 +15,8 @@ interface TrackEditorProps {
   onSave: (trackId: string, patch: TrackSettingsPatch) => Promise<boolean>
   onSelection: (trackId: string, itemIds: string[], selected: boolean) => Promise<boolean>
   selectionDisabled?: boolean
+  settingsDisabled?: boolean
+  settingsDisabledReason?: string
 }
 
 const PAGE_SIZE = 120
@@ -73,7 +75,7 @@ function ItemGrid({ track, projectRoot, onSelection, selectionDisabled }: Pick<T
   )
 }
 
-export function TrackEditor({ track, projectRoot, onSave, onSelection, selectionDisabled = false }: TrackEditorProps) {
+export function TrackEditor({ track, projectRoot, onSave, onSelection, selectionDisabled = false, settingsDisabled = false, settingsDisabledReason }: TrackEditorProps) {
   const [trim, setTrim] = useState<{ start: number; end: number } | null>(track?.trim ?? null)
   const [framesPerSecond, setFramesPerSecond] = useState(track?.extraction.framesPerSecond ?? 1)
   const [frameLimit, setFrameLimit] = useState(track?.extraction.frameLimit ?? 0)
@@ -111,6 +113,20 @@ export function TrackEditor({ track, projectRoot, onSave, onSelection, selection
     setColorLutPreset(track.extraction.colorLutPreset ?? null)
     setCameraProfile(track.cameraProfile === 'standard' ? 'standard' : 'wide')
     setEditingExisting(false)
+  }
+
+  if (settingsDisabled) {
+    return (
+      <section className="liquid-panel flex min-h-0 flex-col overflow-hidden p-0">
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--xp-line)] px-4">
+          <div className="min-w-0"><h2 className="truncate text-[13px] font-semibold text-ink">{track.label}</h2><p className="truncate font-mono text-[10px] text-muted">{track.sourcePath}</p></div>
+          <span className="rounded-full bg-warning/10 px-2 py-1 text-[10px] text-warning" title={settingsDisabledReason}>参数已锁定</span>
+        </header>
+        {track.items.length > 0
+          ? <ItemGrid track={track} projectRoot={projectRoot} onSelection={onSelection} selectionDisabled />
+          : <div className="grid min-h-0 flex-1 place-items-center px-6 text-center text-[11px] leading-5 text-muted">{settingsDisabledReason || '该任务的素材参数已锁定'}</div>}
+      </section>
+    )
   }
 
   if (track.items.length > 0 && !editingExisting) {

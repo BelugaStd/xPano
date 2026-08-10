@@ -14,6 +14,8 @@ interface TrackListProps {
   activePercent?: number
   activeCount?: string
   activeEta?: string
+  editingDisabled?: boolean
+  editingDisabledReason?: string
 }
 
 const statusMeta = {
@@ -33,7 +35,7 @@ function trackIcon(track: ProjectTrack) {
   return Video
 }
 
-export function TrackList({ tracks, selectedId, missingIds, onSelect, onAddFiles, onAddFolder, onRemove, activeTrackId, activePercent = 0, activeCount, activeEta }: TrackListProps) {
+export function TrackList({ tracks, selectedId, missingIds, onSelect, onAddFiles, onAddFolder, onRemove, activeTrackId, activePercent = 0, activeCount, activeEta, editingDisabled = false, editingDisabledReason }: TrackListProps) {
   const selectedCounts = useMemo(() => new Map(tracks.map((track) => [track.id, track.items.filter((item) => item.selected).length])), [tracks])
   return (
     <aside className="liquid-panel flex min-h-0 flex-col overflow-hidden p-0">
@@ -43,14 +45,14 @@ export function TrackList({ tracks, selectedId, missingIds, onSelect, onAddFiles
           <p className="text-[10px] text-muted">{tracks.length} 条轨道</p>
         </div>
         <div className="flex items-center gap-1">
-          <button type="button" onClick={onAddFiles} className="glass-control motion-press grid h-8 w-8 place-items-center rounded-comfortable text-muted hover:text-brand" title="添加文件" aria-label="添加文件"><FilePlus2 className="h-4 w-4" /></button>
-          <button type="button" onClick={onAddFolder} className="glass-control motion-press grid h-8 w-8 place-items-center rounded-comfortable text-muted hover:text-brand" title="添加照片文件夹" aria-label="添加照片文件夹"><FolderPlus className="h-4 w-4" /></button>
+          <button type="button" disabled={editingDisabled} onClick={onAddFiles} className="glass-control motion-press grid h-8 w-8 place-items-center rounded-comfortable text-muted hover:text-brand disabled:cursor-not-allowed disabled:opacity-40" title={editingDisabled ? editingDisabledReason : '添加文件'} aria-label="添加文件"><FilePlus2 className="h-4 w-4" /></button>
+          <button type="button" disabled={editingDisabled} onClick={onAddFolder} className="glass-control motion-press grid h-8 w-8 place-items-center rounded-comfortable text-muted hover:text-brand disabled:cursor-not-allowed disabled:opacity-40" title={editingDisabled ? editingDisabledReason : '添加照片文件夹'} aria-label="添加照片文件夹"><FolderPlus className="h-4 w-4" /></button>
         </div>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {tracks.length === 0 ? (
-          <button type="button" onClick={onAddFiles} className="grid h-full min-h-56 w-full place-items-center rounded-comfortable border border-dashed border-[var(--xp-line)] text-center text-muted hover:border-brand/35 hover:text-brand">
+          <button type="button" disabled={editingDisabled} onClick={onAddFiles} title={editingDisabled ? editingDisabledReason : undefined} className="grid h-full min-h-56 w-full place-items-center rounded-comfortable border border-dashed border-[var(--xp-line)] text-center text-muted hover:border-brand/35 hover:text-brand disabled:cursor-not-allowed disabled:opacity-45">
             <span>
               <FilePlus2 className="mx-auto h-6 w-6" />
               <span className="mt-2 block text-[12px] font-medium">添加或拖入素材</span>
@@ -80,7 +82,7 @@ export function TrackList({ tracks, selectedId, missingIds, onSelect, onAddFiles
                       )}
                     </span>
                   </button>
-                  <button type="button" onClick={() => onRemove(track)} className="motion-press m-1.5 grid w-8 shrink-0 place-items-center rounded-comfortable bg-danger/12 text-danger opacity-75 transition-opacity hover:bg-danger hover:text-white group-hover:opacity-100" title="移除轨道" aria-label={`移除 ${track.label}`}><Trash2 className="h-3.5 w-3.5" /></button>
+                  <button type="button" disabled={editingDisabled} onClick={() => onRemove(track)} className="motion-press m-1.5 grid w-8 shrink-0 place-items-center rounded-comfortable bg-danger/12 text-danger opacity-75 transition-opacity hover:bg-danger hover:text-white group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30" title={editingDisabled ? editingDisabledReason : '移除轨道'} aria-label={`移除 ${track.label}`}><Trash2 className="h-3.5 w-3.5" /></button>
                 </div>
               )
             })}

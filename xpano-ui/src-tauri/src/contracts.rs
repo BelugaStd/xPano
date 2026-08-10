@@ -207,16 +207,6 @@ pub struct BatchError {
 pub struct BatchPipelineInput {
     #[serde(default)]
     pub media_track_ids: Vec<String>,
-    #[serde(default)]
-    pub reconstruction_plan_id: Option<String>,
-    #[serde(default)]
-    pub reconstruction_python_exe: Option<String>,
-    #[serde(default)]
-    pub reconstruction_script: Option<String>,
-    #[serde(default)]
-    pub reconstruction_args: Vec<String>,
-    #[serde(default)]
-    pub training_config: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

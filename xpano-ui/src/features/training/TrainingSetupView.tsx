@@ -84,6 +84,7 @@ interface TrainingSetupViewProps {
   checking: boolean
   advancedOpen: boolean
   blocker: TrainingStartBlocker | null
+  inputsDisabled?: boolean
   onAdvancedOpenChange: (open: boolean) => void
   onSelectPreset: (preset: TrainingPreset) => void
   onChange: <Key extends keyof TrainingConfig>(key: Key, value: TrainingConfig[Key]) => void
@@ -91,13 +92,13 @@ interface TrainingSetupViewProps {
   onRecover: (action: TrainingRecoveryAction) => void
 }
 
-export function TrainingSetupView({ config, preset, readiness, checking, advancedOpen, blocker, onAdvancedOpenChange, onSelectPreset, onChange, onStart, onRecover }: TrainingSetupViewProps) {
+export function TrainingSetupView({ config, preset, readiness, checking, advancedOpen, blocker, inputsDisabled = false, onAdvancedOpenChange, onSelectPreset, onChange, onStart, onRecover }: TrainingSetupViewProps) {
   const summary = formatSummary(config)
   const recoverLabel = blocker?.action === 'reconstruction' ? '前往对齐与重建' : blocker?.action === 'results' ? '前往成果与后处理' : blocker?.action === 'media' ? '前往素材与处理' : '重新检查'
 
   return (
     <section className="liquid-panel grid h-full min-h-0 grid-cols-[minmax(0,1fr)_clamp(264px,24vw,304px)] overflow-hidden rounded-panel">
-      <div className="flex min-h-0 min-w-0 flex-col">
+      <fieldset disabled={inputsDisabled} className="flex min-h-0 min-w-0 flex-col disabled:opacity-65">
         <header className="flex shrink-0 items-center justify-between gap-4 border-b border-line px-5 py-4">
           <div className="min-w-0"><h1 className="text-[18px] font-semibold text-ink">高斯训练</h1><p className="mt-1 text-[11px] text-muted">配置本次训练质量与资源规模</p></div>
           <span className={`flex shrink-0 items-center gap-1.5 text-[11px] font-medium ${!checking && !blocker ? 'text-success' : 'text-muted'}`}>
@@ -140,7 +141,7 @@ export function TrainingSetupView({ config, preset, readiness, checking, advance
             </div>}
           </section>
         </div>
-      </div>
+      </fieldset>
 
       <aside className="flex min-h-0 flex-col border-l border-line bg-ink/[0.022] px-4 py-4">
         <div><p className="text-[12px] font-semibold text-ink">本次训练</p><p className="mt-2 text-[13px] font-semibold text-brand">{presetLabels[preset].title}</p><dl className="mt-3 space-y-2 text-[11px]"><div><dt className="text-muted">规模</dt><dd className="mt-0.5 font-medium text-ink/80">{summary.scale}</dd></div><div><dt className="text-muted">方法</dt><dd className="mt-0.5 font-medium text-ink/80">{summary.method}</dd></div><div><dt className="text-muted">图像</dt><dd className="mt-0.5 font-medium text-ink/80">{summary.resolution}</dd></div><div><dt className="text-muted">外观补偿</dt><dd className="mt-0.5 font-medium text-ink/80">双边网格{config.bilateralGrid ? '已开启' : '已关闭'}</dd></div></dl></div>

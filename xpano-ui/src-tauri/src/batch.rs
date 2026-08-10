@@ -1,6 +1,7 @@
 use crate::contracts::{
     BatchError, BatchProgress, BatchQueueFile, BatchQueueState, BatchStageStatus,
-    BatchStageStatuses, BatchTask, BatchTaskState, BATCH_QUEUE_SCHEMA_VERSION,
+    BatchStageStatuses, BatchTask, BatchTaskState, ReconstructionBackend,
+    BATCH_QUEUE_SCHEMA_VERSION,
 };
 #[cfg(test)]
 use crate::contracts::{BatchPipelineInput, BatchStages};
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{atomic::{AtomicU8, Ordering}, Arc};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 const BATCH_DIRECTORY: &str = "batch";
@@ -19,6 +20,8 @@ const BATCH_QUEUE_FILE: &str = "queue.json";
 const SIGNAL_RUNNING: u8 = 0;
 const SIGNAL_STOP: u8 = 1;
 const SIGNAL_SHUTDOWN: u8 = 2;
+const BATCH_QUEUE_EVENT: &str = "batch:queue";
+const BATCH_ERROR_EVENT: &str = "batch:error";
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
@@ -28,31 +31,46 @@ fn batch_error(code: &str, message: impl Into<String>) -> ProjectCommandError {
     ProjectCommandError::new(code, message)
 }
 
+fn emit_queue_snapshot(app: &AppHandle, queue: &BatchQueueFile) {
+    let _ = app.emit(BATCH_QUEUE_EVENT, queue);
+}
+
+fn emit_batch_error(app: &AppHandle, error: &ProjectCommandError) {
+    let _ = app.emit(
+        BATCH_ERROR_EVENT,
+        serde_json::json!({ "code": error.code, "message": error.message }),
+    );
+}
+
 pub(crate) fn observe_job_event(app: &AppHandle, event: &crate::contracts::JobEvent) {
     let Some(task_id) = event.task_id.as_deref() else { return };
     let Some(state) = app.try_state::<crate::AppState>() else { return };
-    let Ok(mut coordinator) = state.batch.lock() else { return };
-    if coordinator.ensure_loaded(app).is_err() { return; }
-    let Some(queue) = coordinator.queue.as_mut() else { return };
-    let Some(task) = queue.tasks.iter_mut().find(|task| task.task_id == task_id) else { return };
-    let (stage, index) = match event.workspace {
-        crate::contracts::ProjectWorkspace::Media => ("media", 0.0),
-        crate::contracts::ProjectWorkspace::Reconstruction => ("reconstruction", 1.0),
-        crate::contracts::ProjectWorkspace::Training => ("training", 2.0),
-        crate::contracts::ProjectWorkspace::Results => return,
+    let snapshot = {
+        let Ok(mut coordinator) = state.batch.lock() else { return };
+        if coordinator.ensure_loaded(app).is_err() { return; }
+        let Some(queue) = coordinator.queue.as_mut() else { return };
+        let Some(task) = queue.tasks.iter_mut().find(|task| task.task_id == task_id) else { return };
+        let (stage, index) = match event.workspace {
+            crate::contracts::ProjectWorkspace::Media => ("media", 0.0),
+            crate::contracts::ProjectWorkspace::Reconstruction => ("reconstruction", 1.0),
+            crate::contracts::ProjectWorkspace::Training => ("training", 2.0),
+            crate::contracts::ProjectWorkspace::Results => return,
+        };
+        let stage_count = [task.stages.media, task.stages.reconstruction, task.stages.training].into_iter().filter(|enabled| *enabled).count().max(1) as f64;
+        let stage_percent = event.percent.unwrap_or_else(|| if event.state == crate::contracts::JobState::Completed { 100.0 } else { 0.0 }).clamp(0.0, 100.0);
+        task.progress.percent = ((index * 100.0 + stage_percent) / stage_count).clamp(0.0, 100.0);
+        task.progress.message = event.message.clone();
+        task.progress.current = event.current;
+        task.progress.total = event.total;
+        task.progress.eta_seconds = event.eta_seconds;
+        task.progress.elapsed_seconds = task.started_at.as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|started| Utc::now().signed_duration_since(started.with_timezone(&Utc)).num_seconds().max(0) as u64)
+            .unwrap_or(task.progress.elapsed_seconds);
+        task.current_stage = Some(stage.to_string());
+        queue.clone()
     };
-    let stage_count = [task.stages.media, task.stages.reconstruction, task.stages.training].into_iter().filter(|enabled| *enabled).count().max(1) as f64;
-    let stage_percent = event.percent.unwrap_or_else(|| if event.state == crate::contracts::JobState::Completed { 100.0 } else { 0.0 }).clamp(0.0, 100.0);
-    task.progress.percent = ((index * 100.0 + stage_percent) / stage_count).clamp(0.0, 100.0);
-    task.progress.message = event.message.clone();
-    task.progress.current = event.current;
-    task.progress.total = event.total;
-    task.progress.eta_seconds = event.eta_seconds;
-    task.progress.elapsed_seconds = task.started_at.as_deref()
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|started| Utc::now().signed_duration_since(started.with_timezone(&Utc)).num_seconds().max(0) as u64)
-        .unwrap_or(task.progress.elapsed_seconds);
-    task.current_stage = Some(stage.to_string());
+    emit_queue_snapshot(app, &snapshot);
 }
 
 pub(crate) fn queue_path(app: &AppHandle) -> Result<PathBuf, ProjectCommandError> {
@@ -201,6 +219,11 @@ impl BatchQueueFile {
         Ok(updated)
     }
 
+    pub fn upsert_and_enqueue(&mut self, task: BatchTask) -> Result<BatchTask, ProjectCommandError> {
+        let saved = self.upsert(task)?;
+        self.enqueue(&saved.task_id)
+    }
+
     pub fn remove(&mut self, task_id: &str) -> Result<(), ProjectCommandError> {
         let index = self.tasks.iter().position(|task| task.task_id == task_id).ok_or_else(|| {
             batch_error("invalid_project", "batch task does not exist")
@@ -227,7 +250,9 @@ impl BatchQueueFile {
             return Err(batch_error("invalid_project", "batch reorder contains unknown or duplicate task ids"));
         }
         for (order, task_id) in task_ids.iter().enumerate() {
-            let task = self.tasks.iter_mut().find(|task| task.task_id == *task_id).unwrap();
+            let task = self.tasks.iter_mut().find(|task| task.task_id == *task_id).ok_or_else(|| {
+                batch_error("artifact_corrupt", "batch reorder lost a validated task")
+            })?;
             if matches!(task.state, BatchTaskState::Running) {
                 return Err(batch_error("job_conflict", "running batch task cannot be reordered"));
             }
@@ -356,12 +381,26 @@ impl Default for BatchCoordinator {
     }
 }
 
+fn apply_queue_update(
+    queue: &mut BatchQueueFile,
+    mutate: impl FnOnce(&mut BatchQueueFile) -> Result<(), ProjectCommandError>,
+    persist: impl FnOnce(&BatchQueueFile) -> Result<(), ProjectCommandError>,
+) -> Result<BatchQueueFile, ProjectCommandError> {
+    let mut candidate = queue.clone();
+    mutate(&mut candidate)?;
+    candidate.validate()?;
+    persist(&candidate)?;
+    *queue = candidate.clone();
+    Ok(candidate)
+}
+
 fn save_queue(app: &AppHandle, state: &crate::AppState, mutate: impl FnOnce(&mut BatchQueueFile) -> Result<(), ProjectCommandError>) -> Result<BatchQueueFile, ProjectCommandError> {
-    let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
-    let queue = coordinator.queue_mut(app)?;
-    mutate(queue)?;
-    coordinator.persist()?;
-    Ok(coordinator.queue.as_ref().unwrap().clone())
+    let snapshot = {
+        let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
+        coordinator.update_queue(app, mutate)?
+    };
+    emit_queue_snapshot(app, &snapshot);
+    Ok(snapshot)
 }
 
 fn mark_stage(app: &AppHandle, state: &crate::AppState, task_id: &str, stage: &str, status: BatchStageStatus, message: &str, percent: f64) -> Result<(), ProjectCommandError> {
@@ -419,6 +458,17 @@ fn validate_task_project(
             project.revision,
         ));
     }
+    Ok(())
+}
+
+fn refresh_task_revision(
+    task: &mut BatchTask,
+    project: &crate::contracts::XpanoProjectV2,
+) -> Result<(), ProjectCommandError> {
+    if task.project_id != project.project_id {
+        return Err(batch_error("invalid_project", "任务绑定的工程已被替换，不能重新入队"));
+    }
+    task.configured_revision = project.revision;
     Ok(())
 }
 
@@ -494,6 +544,20 @@ fn default_reconstruction_args(project_root: &Path) -> Result<Vec<String>, Proje
     Ok(args)
 }
 
+fn training_config_from_project(
+    project: &crate::contracts::XpanoProjectV2,
+) -> Result<crate::training::TrainingConfig, ProjectCommandError> {
+    let mut merged = serde_json::to_value(crate::training::TrainingConfig::default())
+        .map_err(|error| batch_error("invalid_training_config", error.to_string()))?;
+    if let (Some(base), Some(config)) = (merged.as_object_mut(), project.training.config.as_object()) {
+        for (key, value) in config {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::from_value(merged)
+        .map_err(|error| batch_error("invalid_training_config", error.to_string()))
+}
+
 fn wait_for_stage(state: &crate::AppState, task: &BatchTask, stage: &str, job_id: &str, signal: &Arc<AtomicU8>) -> Result<(), ProjectCommandError> {
     let root = Path::new(&task.project_root);
     let started = std::time::Instant::now();
@@ -520,20 +584,26 @@ fn wait_for_stage(state: &crate::AppState, task: &BatchTask, stage: &str, job_id
 }
 
 fn run_batch_worker(app: AppHandle, signal: Arc<AtomicU8>) {
+    let mut fatal_error = None;
     loop {
         if signal.load(Ordering::SeqCst) != SIGNAL_RUNNING { break; }
         let state = app.state::<crate::AppState>();
-        let task = {
-            let mut coordinator = match state.batch.lock() { Ok(value) => value, Err(_) => break };
-            let queue = match coordinator.queue_mut(&app) { Ok(value) => value, Err(_) => break };
+        let mut selected = None;
+        if let Err(error) = save_queue(&app, state.inner(), |queue| {
             let Some(task) = queue.tasks.iter().find(|task| task.state == BatchTaskState::Queued).cloned() else {
-                let _ = queue.mark_queue_state(BatchQueueState::Idle, None);
-                let _ = coordinator.persist();
-                break;
+                queue.mark_queue_state(BatchQueueState::Idle, None)?;
+                return Ok(());
             };
             let stage = if task.stages.media { "media" } else if task.stages.reconstruction { "reconstruction" } else { "training" };
-            if queue.mark_task_running(&task.task_id, stage).is_err() || coordinator.persist().is_err() { break; }
-            task
+            queue.mark_task_running(&task.task_id, stage)?;
+            selected = Some(task);
+            Ok(())
+        }) {
+            fatal_error = Some(error);
+            break;
+        }
+        let Some(task) = selected else {
+            break;
         };
         let current = crate::project::read_project(Path::new(&task.project_root));
         let mut failed_stage = task.current_stage.clone();
@@ -559,10 +629,10 @@ fn run_batch_worker(app: AppHandle, signal: Arc<AtomicU8>) {
             if task.stages.reconstruction {
                 failed_stage = Some("reconstruction".to_string());
                 mark_stage(&app, state.inner(), &task.task_id, "reconstruction", BatchStageStatus::Running, "正在对齐重建", stage_percent)?;
-                let plan_id = task.pipeline.reconstruction_plan_id.clone().or_else(|| crate::reconstruction::active_execution_plan_impl(Path::new(&task.project_root)).ok().map(|plan| plan.plan_id)).ok_or_else(|| batch_error("invalid_project", "工程中没有可用的对齐计划"))?;
-                let python = task.pipeline.reconstruction_python_exe.clone().unwrap_or_else(|| crate::tool_resolver::resolve_python(""));
-                let script = task.pipeline.reconstruction_script.clone().unwrap_or_else(|| "scripts/run_xpano_tracks_job.py".to_string());
-                let reconstruction_args = if task.pipeline.reconstruction_args.is_empty() { default_reconstruction_args(Path::new(&task.project_root))? } else { task.pipeline.reconstruction_args.clone() };
+                let plan_id = crate::reconstruction::active_execution_plan_impl(Path::new(&task.project_root))?.plan_id;
+                let python = crate::tool_resolver::resolve_python("");
+                let script = "scripts/run_xpano_tracks_job.py".to_string();
+                let reconstruction_args = default_reconstruction_args(Path::new(&task.project_root))?;
                 crate::start_reconstruction_job_blocking(app.clone(), task.project_root.clone(), crate::project::read_project(Path::new(&task.project_root))?.revision, plan_id, python, script, reconstruction_args, Some(task.task_id.clone()))?;
                 let job_id = latest_job_id(Path::new(&task.project_root), crate::contracts::ProjectWorkspace::Reconstruction)?;
                 record_stage_job_id(&app, state.inner(), &task.task_id, "reconstruction", &job_id)?;
@@ -573,13 +643,9 @@ fn run_batch_worker(app: AppHandle, signal: Arc<AtomicU8>) {
             if task.stages.training {
                 failed_stage = Some("training".to_string());
                 mark_stage(&app, state.inner(), &task.task_id, "training", BatchStageStatus::Running, "正在进行高斯训练", stage_percent)?;
-                let config = task.pipeline.training_config.clone().unwrap_or_default();
-                let mut merged = serde_json::to_value(crate::training::TrainingConfig::default()).map_err(|error| batch_error("invalid_training_config", error.to_string()))?;
-                if let (Some(base), Some(overrides)) = (merged.as_object_mut(), config.as_object()) {
-                    for (key, value) in overrides { base.insert(key.clone(), value.clone()); }
-                }
-                let config: crate::training::TrainingConfig = serde_json::from_value(merged).map_err(|error| batch_error("invalid_training_config", error.to_string()))?;
-                crate::start_training_job_blocking(app.clone(), task.project_root.clone(), crate::project::read_project(Path::new(&task.project_root))?.revision, config, Some(task.task_id.clone()))?;
+                let project = crate::project::read_project(Path::new(&task.project_root))?;
+                let config = training_config_from_project(&project)?;
+                crate::start_training_job_blocking(app.clone(), task.project_root.clone(), project.revision, config, Some(task.task_id.clone()))?;
                 let job_id = latest_job_id(Path::new(&task.project_root), crate::contracts::ProjectWorkspace::Training)?;
                 record_stage_job_id(&app, state.inner(), &task.task_id, "training", &job_id)?;
                 wait_for_stage(state.inner(), &task, "training", &job_id, &signal)?;
@@ -588,17 +654,57 @@ fn run_batch_worker(app: AppHandle, signal: Arc<AtomicU8>) {
             Ok(())
         });
         let terminal = match result { Ok(()) => (BatchTaskState::Completed, None), Err(error) => (terminal_state_for_stop(&signal), Some(BatchError { code: error.code, stage: failed_stage, message: error.message })) };
-        if save_queue(&app, state.inner(), |queue| queue.mark_task_finished(&task.task_id, terminal.0, terminal.1)).is_err() {
+        if let Err(error) = save_queue(&app, state.inner(), |queue| queue.mark_task_finished(&task.task_id, terminal.0, terminal.1)) {
+            fatal_error = Some(error);
             break;
         }
     }
     let state = app.state::<crate::AppState>();
-    let _ = save_queue(&app, state.inner(), |queue| {
+    if let Some(error) = fatal_error {
+        let snapshot = {
+            let mut coordinator = match state.batch.lock() {
+                Ok(value) => value,
+                Err(_) => {
+                    emit_batch_error(&app, &error);
+                    return;
+                }
+            };
+            if let Some(queue) = coordinator.queue.as_mut() {
+                let active_id = queue.active_task_id.clone();
+                let failure_stage = active_id.as_ref().and_then(|id| {
+                    queue.tasks.iter().find(|task| task.task_id == *id).and_then(|task| task.current_stage.clone())
+                });
+                let _ = queue.interrupt_active_for_shutdown();
+                if let Some(task) = active_id.and_then(|id| queue.tasks.iter_mut().find(|task| task.task_id == id)) {
+                    task.last_error = Some(BatchError {
+                        code: error.code.clone(),
+                        stage: failure_stage,
+                        message: format!("队列存储失败，已停止执行：{}", error.message),
+                    });
+                }
+            }
+            coordinator.stop_signal = None;
+            coordinator.queue.clone()
+        };
+        emit_batch_error(&app, &error);
+        if let Some(snapshot) = snapshot {
+            emit_queue_snapshot(&app, &snapshot);
+        }
+        return;
+    }
+    match save_queue(&app, state.inner(), |queue| {
         queue.state = BatchQueueState::Idle;
         queue.active_task_id = None;
         queue.bump_revision();
         Ok(())
-    });
+    }) {
+        Ok(_) => {
+            if let Ok(mut coordinator) = state.batch.lock() {
+                coordinator.stop_signal = None;
+            }
+        }
+        Err(error) => emit_batch_error(&app, &error),
+    }
 }
 
 #[tauri::command]
@@ -608,16 +714,21 @@ pub fn start_batch_queue(app: AppHandle, state: State<'_, crate::AppState>) -> R
         let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
         let pipeline = state.pipeline.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
         pipeline.ensure_startable().map_err(|error| batch_error("job_conflict", error))?;
-        let queue = coordinator.queue_mut(&app)?;
-        if queue.state != BatchQueueState::Idle { return Err(batch_error("job_conflict", "batch queue is already running")); }
-        if !queue.tasks.iter().any(|task| task.state == BatchTaskState::Queued) { return Err(batch_error("invalid_project", "no queued batch task")); }
-        queue.state = BatchQueueState::Running;
-        queue.bump_revision();
-        let snapshot = queue.clone();
+        let snapshot = coordinator.update_queue(&app, |queue| {
+            if queue.state != BatchQueueState::Idle {
+                return Err(batch_error("job_conflict", "batch queue is already running"));
+            }
+            if !queue.tasks.iter().any(|task| task.state == BatchTaskState::Queued) {
+                return Err(batch_error("invalid_project", "no queued batch task"));
+            }
+            queue.state = BatchQueueState::Running;
+            queue.bump_revision();
+            Ok(())
+        })?;
         coordinator.stop_signal = Some(signal.clone());
-        coordinator.persist()?;
         snapshot
     };
+    emit_queue_snapshot(&app, &queue);
     thread::spawn(move || run_batch_worker(app, signal));
     Ok(queue)
 }
@@ -657,39 +768,49 @@ impl BatchCoordinator {
                 || queue.tasks.iter().any(|task| task.state == BatchTaskState::Running);
             if recovered {
                 queue.interrupt_active_for_shutdown()?;
+                persist_queue(&path, &queue)?;
             }
             self.queue = Some(queue);
             self.path = Some(path);
-            if recovered {
-                self.persist()?;
-            }
         } else if self.queue.is_none() {
             let mut queue = load_queue(&path)?;
             let recovered = queue.state != BatchQueueState::Idle
                 || queue.tasks.iter().any(|task| task.state == BatchTaskState::Running);
             if recovered {
                 queue.interrupt_active_for_shutdown()?;
+                persist_queue(&path, &queue)?;
             }
             self.queue = Some(queue);
-            if recovered {
-                self.persist()?;
-            }
         }
         Ok(())
     }
 
-    fn queue_mut(&mut self, app: &AppHandle) -> Result<&mut BatchQueueFile, ProjectCommandError> {
+    fn update_queue(
+        &mut self,
+        app: &AppHandle,
+        mutate: impl FnOnce(&mut BatchQueueFile) -> Result<(), ProjectCommandError>,
+    ) -> Result<BatchQueueFile, ProjectCommandError> {
         self.ensure_loaded(app)?;
-        Ok(self.queue.as_mut().unwrap())
+        let path = self.path.as_ref().cloned().ok_or_else(|| {
+            batch_error("invalid_project", "batch queue is not loaded")
+        })?;
+        let queue = self.queue.as_mut().ok_or_else(|| {
+            batch_error("invalid_project", "batch queue is not loaded")
+        })?;
+        apply_queue_update(queue, mutate, |candidate| persist_queue(&path, candidate))
     }
 
     fn persist(&self) -> Result<(), ProjectCommandError> {
         let path = self.path.as_ref().ok_or_else(|| batch_error("invalid_project", "batch queue is not loaded"))?;
-        let queue = self.queue.as_ref().unwrap();
-        queue.validate()?;
-        let value = serde_json::to_value(queue).map_err(|error| batch_error("artifact_corrupt", error.to_string()))?;
-        write_json_value_atomic(path, &value)
+        let queue = self.queue.as_ref().ok_or_else(|| batch_error("invalid_project", "batch queue is not loaded"))?;
+        persist_queue(path, queue)
     }
+}
+
+fn persist_queue(path: &Path, queue: &BatchQueueFile) -> Result<(), ProjectCommandError> {
+    queue.validate()?;
+    let value = serde_json::to_value(queue).map_err(|error| batch_error("artifact_corrupt", error.to_string()))?;
+    write_json_value_atomic(path, &value)
 }
 
 fn load_queue(path: &Path) -> Result<BatchQueueFile, ProjectCommandError> {
@@ -741,31 +862,73 @@ pub fn get_batch_queue(
 ) -> Result<BatchQueueFile, ProjectCommandError> {
     let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
     coordinator.ensure_loaded(&app)?;
-    Ok(coordinator.queue.as_ref().unwrap().clone())
+    coordinator.queue.as_ref().cloned().ok_or_else(|| batch_error("invalid_project", "batch queue is not loaded"))
 }
 
 #[tauri::command]
-pub fn save_batch_task(
+pub fn save_and_enqueue_batch_task(
     app: AppHandle,
     state: State<'_, crate::AppState>,
-    task: BatchTask,
-) -> Result<BatchTask, ProjectCommandError> {
-    let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
-    let saved = coordinator.queue_mut(&app)?.upsert(task)?;
-    coordinator.persist()?;
-    Ok(saved)
-}
-
-#[tauri::command]
-pub fn enqueue_batch_task(
-    app: AppHandle,
-    state: State<'_, crate::AppState>,
-    task_id: String,
+    mut task: BatchTask,
+    reconstruction_backend: Option<ReconstructionBackend>,
+    reconstruction_config: Option<serde_json::Value>,
+    reconstruction_plan_config: Option<crate::reconstruction::ReconstructionPlanConfig>,
+    training_config: Option<crate::training::TrainingConfig>,
 ) -> Result<BatchQueueFile, ProjectCommandError> {
-    let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
-    coordinator.queue_mut(&app)?.enqueue(&task_id)?;
-    coordinator.persist()?;
-    Ok(coordinator.queue.as_ref().unwrap().clone())
+    let project_root = Path::new(&task.project_root);
+    let mut project = crate::project::read_project(project_root)?;
+    validate_task_project(&task, &project)?;
+
+    if task.stages.reconstruction {
+        let backend = reconstruction_backend.ok_or_else(|| {
+            batch_error("invalid_project", "reconstruction backend is required for this batch task")
+        })?;
+        let config = reconstruction_config.ok_or_else(|| {
+            batch_error("invalid_project", "reconstruction config is required for this batch task")
+        })?;
+        let plan_config = reconstruction_plan_config.ok_or_else(|| {
+            batch_error("invalid_project", "reconstruction plan config is required for this batch task")
+        })?;
+        if plan_config.backend != backend {
+            return Err(batch_error(
+                "invalid_project",
+                "reconstruction backend and execution plan backend do not match",
+            ));
+        }
+        project = crate::reconstruction::update_reconstruction_config_impl(
+            project_root,
+            project.revision,
+            backend,
+            config,
+        )?;
+        crate::reconstruction::build_execution_plan_impl(
+            project_root,
+            project.revision,
+            plan_config,
+        )?;
+    }
+
+    if task.stages.training {
+        let mut config = training_config.ok_or_else(|| {
+            batch_error("invalid_project", "training config is required for this batch task")
+        })?;
+        config.gui = true;
+        project = crate::training::save_training_config_impl(
+            project_root,
+            project.revision,
+            &config,
+        )?;
+    }
+
+    task.label = task.label.trim().to_string();
+    task.project_id = project.project_id;
+    task.configured_revision = project.revision;
+    validate_task_project(&task, &crate::project::read_project(project_root)?)?;
+
+    save_queue(&app, state.inner(), |queue| {
+        queue.upsert_and_enqueue(task)?;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -774,7 +937,23 @@ pub fn requeue_batch_task(
     state: State<'_, crate::AppState>,
     task_id: String,
 ) -> Result<BatchQueueFile, ProjectCommandError> {
-    enqueue_batch_task(app, state, task_id)
+    let task = {
+        let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
+        coordinator.ensure_loaded(&app)?;
+        coordinator.queue.as_ref()
+            .and_then(|queue| queue.tasks.iter().find(|task| task.task_id == task_id))
+            .cloned()
+            .ok_or_else(|| batch_error("invalid_project", "batch task does not exist"))?
+    };
+    let project = crate::project::read_project(Path::new(&task.project_root))?;
+    save_queue(&app, state.inner(), |queue| {
+        let task = queue.tasks.iter_mut().find(|task| task.task_id == task_id).ok_or_else(|| {
+            batch_error("invalid_project", "batch task does not exist")
+        })?;
+        refresh_task_revision(task, &project)?;
+        queue.enqueue(&task_id)?;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -783,10 +962,7 @@ pub fn remove_batch_task(
     state: State<'_, crate::AppState>,
     task_id: String,
 ) -> Result<BatchQueueFile, ProjectCommandError> {
-    let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
-    coordinator.queue_mut(&app)?.remove(&task_id)?;
-    coordinator.persist()?;
-    Ok(coordinator.queue.as_ref().unwrap().clone())
+    save_queue(&app, state.inner(), |queue| queue.remove(&task_id))
 }
 
 #[tauri::command]
@@ -795,10 +971,7 @@ pub fn reorder_batch_tasks(
     state: State<'_, crate::AppState>,
     task_ids: Vec<String>,
 ) -> Result<BatchQueueFile, ProjectCommandError> {
-    let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
-    coordinator.queue_mut(&app)?.reorder(&task_ids)?;
-    coordinator.persist()?;
-    Ok(coordinator.queue.as_ref().unwrap().clone())
+    save_queue(&app, state.inner(), |queue| queue.reorder(&task_ids))
 }
 
 #[tauri::command]
@@ -808,14 +981,18 @@ pub fn delete_batch_queue(
 ) -> Result<(), ProjectCommandError> {
     let mut coordinator = state.batch.lock().map_err(|error| batch_error("job_conflict", error.to_string()))?;
     coordinator.ensure_loaded(&app)?;
-    if coordinator.queue.as_ref().unwrap().tasks.iter().any(|task| matches!(task.state, BatchTaskState::Running)) {
+    let queue = coordinator.queue.as_ref().ok_or_else(|| batch_error("invalid_project", "batch queue is not loaded"))?;
+    if queue.tasks.iter().any(|task| matches!(task.state, BatchTaskState::Running)) {
         return Err(batch_error("job_conflict", "running batch queue cannot be deleted"));
     }
-    let path = coordinator.path.as_ref().unwrap();
+    let path = coordinator.path.as_ref().ok_or_else(|| batch_error("invalid_project", "batch queue path is not loaded"))?;
     if path.is_file() {
         std::fs::remove_file(path).map_err(|error| batch_error("disk_full", format!("failed to delete batch queue: {error}")))?;
     }
     coordinator.queue = Some(BatchQueueFile::empty());
+    let snapshot = coordinator.queue.as_ref().cloned().ok_or_else(|| batch_error("invalid_project", "batch queue is not loaded"))?;
+    drop(coordinator);
+    emit_queue_snapshot(&app, &snapshot);
     Ok(())
 }
 
@@ -880,6 +1057,21 @@ mod tests {
         assert!(queued.stage_job_ids.is_empty());
         assert!(queued.started_at.is_none());
         assert!(queued.finished_at.is_none());
+    }
+
+    #[test]
+    fn saving_and_enqueuing_is_one_queue_mutation_result() {
+        let mut queue = BatchQueueFile::empty();
+        let item = task(BatchStages { media: true, reconstruction: true, training: false });
+
+        let queued = queue.upsert_and_enqueue(item).unwrap();
+
+        assert_eq!(queued.state, BatchTaskState::Queued);
+        assert_eq!(queue.tasks.len(), 1);
+        assert_eq!(queue.tasks[0].task_id, queued.task_id);
+        assert_eq!(queue.tasks[0].stage_status.media, BatchStageStatus::Pending);
+        assert_eq!(queue.tasks[0].stage_status.reconstruction, BatchStageStatus::Pending);
+        assert_eq!(queue.tasks[0].stage_status.training, BatchStageStatus::Disabled);
     }
 
     #[test]
@@ -1032,5 +1224,49 @@ mod tests {
             entry.file_name().to_string_lossy().starts_with("queue.json.corrupt.")
         }));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_queue_persistence_does_not_mutate_the_live_queue() {
+        let mut queue = BatchQueueFile::empty();
+        let before = queue.clone();
+        let result = apply_queue_update(
+            &mut queue,
+            |candidate| {
+                candidate.state = BatchQueueState::Running;
+                candidate.bump_revision();
+                Ok(())
+            },
+            |_| Err(batch_error("disk_full", "simulated persistence failure")),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(queue, before);
+    }
+
+    #[test]
+    fn requeue_refreshes_the_frozen_revision_for_the_same_project() {
+        let project: crate::contracts::XpanoProjectV2 = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/xpano_project_v3.example.json"
+        ))
+        .unwrap();
+        let mut item = task(BatchStages { media: true, reconstruction: false, training: false });
+        item.project_id = project.project_id.clone();
+        item.configured_revision = project.revision.saturating_sub(1);
+
+        refresh_task_revision(&mut item, &project).unwrap();
+
+        assert_eq!(item.configured_revision, project.revision);
+        item.project_id = "another-project".to_string();
+        assert_eq!(refresh_task_revision(&mut item, &project).unwrap_err().code, "invalid_project");
+    }
+
+    #[test]
+    fn queue_tasks_only_store_track_selection_not_execution_parameters() {
+        let item = task(BatchStages { media: true, reconstruction: true, training: true });
+        let value = serde_json::to_value(item).unwrap();
+        let keys = value["pipeline"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+
+        assert_eq!(keys, vec!["mediaTrackIds"]);
     }
 }

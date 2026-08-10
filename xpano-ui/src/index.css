@@ -5,7 +5,7 @@
 @layer components {
   .batch-task-row { min-height: 78px; transition: background-color var(--xp-motion-fast) ease; }
   .batch-task-row:hover { background: rgb(var(--xp-ink-rgb) / 0.025); }
-  .batch-task-row.is-running { background: rgb(var(--xp-brand-rgb) / 0.045); }
+  .batch-task-row.is-running { background: rgb(var(--xp-brand-rgb) / 0.045); box-shadow: inset 3px 0 0 rgb(var(--xp-brand-rgb) / 0.72); }
   .batch-stage-dot { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; color: rgb(var(--xp-muted-rgb) / 0.8); background: rgb(var(--xp-ink-rgb) / 0.06); }
   .batch-stage-dot.active { color: var(--xp-brand); background: rgb(var(--xp-brand-rgb) / 0.12); }
   .batch-stage-dot.done { color: var(--xp-success); background: rgb(var(--xp-success-rgb) / 0.12); }
@@ -604,6 +604,15 @@ html.theme-is-switching::before {
   gap: 8px;
   padding: 6px;
   border-radius: 10px;
+}
+
+.app-bottom-dock.batch-bottom-dock {
+  grid-template-columns: minmax(0, 1fr);
+  padding-inline: 12px;
+}
+
+.batch-bottom-dock .global-job-bar {
+  grid-template-columns: minmax(210px, 1.3fr) minmax(150px, 240px) auto auto;
 }
 
 .titlebar-section-divider,

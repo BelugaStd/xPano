@@ -4,7 +4,8 @@ import { FolderOpen } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useJob } from '../../app/useJob'
 import { useProject } from '../../app/useProject'
-import { useBatch } from '../../app/BatchProvider'
+import { useBatch } from '../../app/useBatch'
+import { useBatchTaskLock } from '../batch/useBatchTaskLock'
 import { joinDisplayPath } from '../../lib/paths'
 import { TrainingSetupView } from './TrainingSetupView'
 import { TrainingTaskView } from './TrainingTaskView'
@@ -28,6 +29,7 @@ function isTauriRuntime() {
 export function TrainingWorkspace() {
   const { queue: batchQueue } = useBatch()
   const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
+  const { locked: taskInputLocked, reason: taskInputLockReason } = useBatchTaskLock()
   const navigate = useNavigate()
   const { project, projectRoot } = useProject()
   const { progress, running, logs, startTraining, cancel } = useJob()
@@ -66,6 +68,8 @@ export function TrainingWorkspace() {
   const preset = deriveTrainingPreset(config)
   const blocker = batchActive
     ? { reason: '批量队列正在运行，请先停止队列', action: null }
+    : taskInputLocked
+      ? { reason: taskInputLockReason, action: null }
     : trainingStartBlocker(Boolean(project && projectRoot), readiness, running)
   const percent = trainingDisplayPercent(trainingStatus, project?.training.lastIteration ?? 0, project?.training.totalIterations ?? 0, trainingRunning, progress.percent)
   const iteration = progress.current ?? project?.training.lastIteration ?? 0
@@ -130,6 +134,7 @@ export function TrainingWorkspace() {
           checking={checking}
           advancedOpen={advancedOpen}
           blocker={blocker}
+          inputsDisabled={taskInputLocked}
           onAdvancedOpenChange={setAdvancedOpen}
           onSelectPreset={selectPreset}
           onChange={update}

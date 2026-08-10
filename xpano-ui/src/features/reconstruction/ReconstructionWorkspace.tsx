@@ -4,7 +4,8 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { useNavigate } from 'react-router-dom'
 import { FolderOpen, Images } from 'lucide-react'
 import { useProject } from '../../app/useProject'
-import { useBatch } from '../../app/BatchProvider'
+import { useBatch } from '../../app/useBatch'
+import { useBatchTaskLock } from '../batch/useBatchTaskLock'
 import { useJob } from '../../app/useJob'
 import { ToastContainer } from '../../components/shared/Toast'
 import { useToast } from '../../hooks/useToast'
@@ -120,6 +121,7 @@ function devPreviewPlan(projectId: string, inputRevision: number): ExecutionPlan
 export function ReconstructionWorkspace() {
   const { queue: batchQueue } = useBatch()
   const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
+  const { locked: taskInputLocked, reason: taskInputLockReason } = useBatchTaskLock()
   const navigate = useNavigate()
   const { project, projectRoot, saveReconstructionConfig } = useProject()
   const { running, progress, logs, start, cancel } = useJob()
@@ -361,9 +363,10 @@ export function ReconstructionWorkspace() {
     await startPsxReexport(key)
   }, [componentSelection, startPsxReexport])
 
-  const canStart = Boolean(project && projectRoot && plan && readiness.canContinue && selectedProbe?.available && !(config.backend === 'colmap' && hasFlatMedia) && !planError && !batchActive)
+  const canStart = Boolean(project && projectRoot && plan && readiness.canContinue && selectedProbe?.available && !(config.backend === 'colmap' && hasFlatMedia) && !planError && !batchActive && !taskInputLocked)
   let blockReason = planError || '正在生成执行流程'
   if (batchActive) blockReason = '批量队列正在运行，请先停止队列'
+  else if (taskInputLocked) blockReason = taskInputLockReason
   else if (!project) blockReason = '请先创建或打开 xPano 工程'
   else if (!readiness.canContinue) blockReason = readiness.blockReason
   else if (config.backend === 'colmap' && hasFlatMedia) blockReason = 'COLMAP 混合素材流程尚未通过回归验证'
@@ -383,15 +386,18 @@ export function ReconstructionWorkspace() {
 
   return (
     <>
-      <div className="reconstruction-workspace-grid grid h-full min-h-0 gap-2">
-        <BackendSettings config={config} probes={probes} tracks={project.tracks} running={running} dirty={dirty} onChange={setConfig} onBrowseMetashape={browseMetashape} onReconfigure={() => setWizardOpen(true)} onReset={() => setConfig(appliedConfig)} />
+      <div className="flex h-full min-h-0 flex-col gap-2">
+        {taskInputLocked && <div className="shrink-0 rounded-comfortable border border-warning/20 bg-warning/8 px-3 py-2 text-[10px] text-warning">{taskInputLockReason}</div>}
+        <div className="reconstruction-workspace-grid grid min-h-0 flex-1 gap-2">
+        <BackendSettings config={config} probes={probes} tracks={project.tracks} running={running || taskInputLocked} dirty={dirty} onChange={setConfig} onBrowseMetashape={browseMetashape} onReconfigure={() => setWizardOpen(true)} onReset={() => setConfig(appliedConfig)} />
         <ExecutionGraph plan={plan} error={planError} running={running} progress={progress} projectComplete={projectComplete} onToggleMonitor={() => setShowMonitor((value) => !value)} />
         <ReconstructionMonitor plan={plan} progress={progress} logs={logs} running={running} canStart={canStart} blockReason={blockReason} showReexport={currentPsx && project.reconstruction.backend === 'metashape'} canReexport={reexportAvailability.allowed} reexportBusy={inspectingComponents} reexportReason={reexportAvailability.reason} onStart={startReconstruction} onReexport={reexportFromPsx} onStop={cancel} onOpenOutput={openOutput} onOpenProject={openMetashapeProject} onViewResults={() => navigate('/project/results')} alignmentReport={alignmentReport} components={alignmentComponents} exportedComponentKey={exportedComponentKey} />
+        </div>
       </div>
 
       {showMonitor && <div className="reconstruction-monitor-backdrop fixed inset-0 z-[115] bg-black/20 xl:hidden" onClick={() => setShowMonitor(false)}><div className="absolute bottom-[60px] right-2 top-[132px] w-[320px] max-w-[calc(100vw-16px)]" onClick={(event) => event.stopPropagation()}><ReconstructionMonitor overlay onClose={() => setShowMonitor(false)} plan={plan} progress={progress} logs={logs} running={running} canStart={canStart} blockReason={blockReason} showReexport={currentPsx && project.reconstruction.backend === 'metashape'} canReexport={reexportAvailability.allowed} reexportBusy={inspectingComponents} reexportReason={reexportAvailability.reason} onStart={startReconstruction} onReexport={reexportFromPsx} onStop={cancel} onOpenOutput={openOutput} onOpenProject={openMetashapeProject} onViewResults={() => navigate('/project/results')} alignmentReport={alignmentReport} components={alignmentComponents} exportedComponentKey={exportedComponentKey} /></div></div>}
 
-      <ReconstructionSetupDialog open={wizardOpen} config={config} probes={probes} tracks={project.tracks} projectRoot={projectRoot} onChange={setConfig} onBrowseMetashape={browseMetashape} onClose={() => setWizardOpen(false)} onStart={startReconstruction} />
+      <ReconstructionSetupDialog open={wizardOpen && !taskInputLocked} config={config} probes={probes} tracks={project.tracks} projectRoot={projectRoot} onChange={setConfig} onBrowseMetashape={browseMetashape} onClose={() => setWizardOpen(false)} onStart={startReconstruction} />
       {componentSelection && <ComponentSelectionDialog inspection={componentSelection.inspection} currentExportedComponentKey={componentSelection.currentExportedComponentKey} selectedComponentKey={componentSelection.selectedComponentKey} onSelect={(selectedComponentKey) => setComponentSelection((current) => current ? { ...current, selectedComponentKey } : current)} onCancel={() => setComponentSelection(null)} onConfirm={confirmComponentReexport} />}
       <ToastContainer toasts={toasts} onRemove={removeToast} />
     </>
