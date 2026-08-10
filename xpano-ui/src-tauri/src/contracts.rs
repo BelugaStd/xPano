@@ -102,6 +102,154 @@ pub enum JobState {
     Interrupted,
 }
 
+pub const BATCH_QUEUE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchQueueState {
+    #[default]
+    Idle,
+    Running,
+    Stopping,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchTaskState {
+    #[default]
+    Draft,
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchStageStatus {
+    #[default]
+    Disabled,
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchStages {
+    pub media: bool,
+    pub reconstruction: bool,
+    pub training: bool,
+}
+
+impl BatchStages {
+    pub fn validate_prefix(&self) -> Result<(), String> {
+        if self.reconstruction && !self.media {
+            return Err("batch stages must enable media before reconstruction".to_string());
+        }
+        if self.training && !self.reconstruction {
+            return Err("batch stages must enable reconstruction before training".to_string());
+        }
+        if !self.media && (self.reconstruction || self.training) {
+            return Err("batch stages must form a contiguous prefix".to_string());
+        }
+        Ok(())
+    }
+
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchStageStatuses {
+    pub media: BatchStageStatus,
+    pub reconstruction: BatchStageStatus,
+    pub training: BatchStageStatus,
+}
+
+impl BatchStageStatuses {
+    pub fn for_stages(stages: &BatchStages) -> Self {
+        Self {
+            media: if stages.media { BatchStageStatus::Pending } else { BatchStageStatus::Disabled },
+            reconstruction: if stages.reconstruction { BatchStageStatus::Pending } else { BatchStageStatus::Disabled },
+            training: if stages.training { BatchStageStatus::Pending } else { BatchStageStatus::Disabled },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProgress {
+    pub percent: f64,
+    pub message: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+    pub eta_seconds: Option<u64>,
+    pub elapsed_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchError {
+    pub code: String,
+    pub stage: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchPipelineInput {
+    #[serde(default)]
+    pub media_track_ids: Vec<String>,
+    #[serde(default)]
+    pub reconstruction_plan_id: Option<String>,
+    #[serde(default)]
+    pub reconstruction_python_exe: Option<String>,
+    #[serde(default)]
+    pub reconstruction_script: Option<String>,
+    #[serde(default)]
+    pub reconstruction_args: Vec<String>,
+    #[serde(default)]
+    pub training_config: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTask {
+    pub task_id: String,
+    pub project_id: String,
+    pub project_root: String,
+    pub label: String,
+    pub order: u64,
+    pub configured_revision: u64,
+    pub stages: BatchStages,
+    pub stage_status: BatchStageStatuses,
+    pub state: BatchTaskState,
+    pub current_stage: Option<String>,
+    #[serde(default)]
+    pub stage_job_ids: serde_json::Map<String, serde_json::Value>,
+    pub progress: BatchProgress,
+    pub last_error: Option<BatchError>,
+    pub pipeline: BatchPipelineInput,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchQueueFile {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub state: BatchQueueState,
+    pub active_task_id: Option<String>,
+    pub tasks: Vec<BatchTask>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressMode {

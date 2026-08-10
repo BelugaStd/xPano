@@ -2,6 +2,20 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .batch-task-row { min-height: 78px; transition: background-color var(--xp-motion-fast) ease; }
+  .batch-task-row:hover { background: rgb(var(--xp-ink-rgb) / 0.025); }
+  .batch-task-row.is-running { background: rgb(var(--xp-brand-rgb) / 0.045); }
+  .batch-stage-dot { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; color: rgb(var(--xp-muted-rgb) / 0.8); background: rgb(var(--xp-ink-rgb) / 0.06); }
+  .batch-stage-dot.active { color: var(--xp-brand); background: rgb(var(--xp-brand-rgb) / 0.12); }
+  .batch-stage-dot.done { color: var(--xp-success); background: rgb(var(--xp-success-rgb) / 0.12); }
+  .batch-stage-dot.error { color: var(--xp-danger); background: rgb(var(--xp-danger-rgb) / 0.12); }
+  .batch-status-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 54px; height: 22px; padding: 0 8px; border-radius: 999px; font-size: 10px; font-weight: 600; background: rgb(var(--xp-ink-rgb) / 0.06); color: var(--xp-muted); }
+  .batch-status-pill.state-running { color: var(--xp-brand); background: rgb(var(--xp-brand-rgb) / 0.12); }
+  .batch-status-pill.state-completed { color: var(--xp-success); background: rgb(var(--xp-success-rgb) / 0.12); }
+  .batch-status-pill.state-failed { color: var(--xp-danger); background: rgb(var(--xp-danger-rgb) / 0.12); }
+}
+
 /* ============================================================
    xPano Design System — 知天下品牌色系
    浅色 = 知天下主站风格 / 深色 = 知天下三维观测模式

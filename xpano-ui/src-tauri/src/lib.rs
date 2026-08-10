@@ -1,4 +1,5 @@
 mod contracts;
+mod batch;
 mod geometry;
 mod job;
 mod media;
@@ -1489,6 +1490,7 @@ pub(crate) struct AppState {
     pipeline: Mutex<PipelineState>,
     densify_pid: Mutex<Option<u32>>,
     lichtfeld_readiness: Mutex<LichtfeldReadinessCache>,
+    pub(crate) batch: Mutex<batch::BatchCoordinator>,
 }
 
 fn cli_arg_value(args: &[String], name: &str) -> Option<String> {
@@ -2034,6 +2036,7 @@ fn start_pipeline(
     script: String,
     args: Vec<String>,
 ) -> Result<String, String> {
+    batch::ensure_manual_startable(&app, state.inner()).map_err(|error| error.message)?;
     let environment = run_preflight_environment_check(&app, &args)?;
     let mut pipeline = state.pipeline.lock().map_err(|e| e.to_string())?;
     pipeline.start_with_metashape_runtime(
@@ -2046,7 +2049,7 @@ fn start_pipeline(
     Ok("Pipeline started".into())
 }
 
-fn start_reconstruction_job_blocking(
+pub(crate) fn start_reconstruction_job_blocking(
     app: tauri::AppHandle,
     project_root: String,
     expected_revision: u64,
@@ -2188,6 +2191,7 @@ async fn start_reconstruction_job(
     script: String,
     args: Vec<String>,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
+    batch::ensure_manual_startable(&app, app.state::<AppState>().inner())?;
     tauri::async_runtime::spawn_blocking(move || {
         start_reconstruction_job_blocking(
             app,
@@ -2629,7 +2633,7 @@ fn training_readiness_blocking(
     }
 }
 
-fn start_training_job_blocking(
+pub(crate) fn start_training_job_blocking(
     app: tauri::AppHandle,
     project_root: String,
     expected_revision: u64,
@@ -2755,6 +2759,7 @@ async fn start_training_job(
     expected_revision: u64,
     config: training::TrainingConfig,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
+    batch::ensure_manual_startable(&app, app.state::<AppState>().inner())?;
     tauri::async_runtime::spawn_blocking(move || {
         start_training_job_blocking(app, project_root, expected_revision, config)
     })
@@ -4198,6 +4203,7 @@ pub fn run() {
             pipeline: Mutex::new(PipelineState::new()),
             densify_pid: Mutex::new(None),
             lichtfeld_readiness: Mutex::new(LichtfeldReadinessCache::default()),
+            batch: Mutex::new(batch::BatchCoordinator::default()),
         })
         .manage(Mutex::new(ThumbgenState::new()))
         .setup(|app| {
@@ -4274,6 +4280,15 @@ pub fn run() {
             media::finalize_media_job,
             media::sync_media_job_result,
             media::fail_media_job,
+            batch::get_batch_queue,
+            batch::save_batch_task,
+            batch::enqueue_batch_task,
+            batch::requeue_batch_task,
+            batch::remove_batch_task,
+            batch::reorder_batch_tasks,
+            batch::delete_batch_queue,
+            batch::start_batch_queue,
+            batch::stop_batch_queue,
             reconstruction::build_execution_plan,
             reconstruction::build_reexport_plan,
             reconstruction::inspect_metashape_components,

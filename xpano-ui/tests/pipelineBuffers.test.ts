@@ -11,8 +11,8 @@ function item(id: string) {
   }
 }
 
-test('the application defaults to the media import workspace', () => {
-  assert.equal(DEFAULT_PROJECT_PATH, '/project/media')
+test('the application defaults to the batch task list', () => {
+  assert.equal(DEFAULT_PROJECT_PATH, '/batch')
 })
 
 test('mergeMediaItemBatch deduplicates updates and keeps a bounded live window', () => {

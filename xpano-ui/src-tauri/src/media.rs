@@ -1191,6 +1191,17 @@ pub fn start_media_job(
     expected_revision: u64,
     target_track_ids: Vec<String>,
 ) -> Result<XpanoProjectV2, ProjectCommandError> {
+    crate::batch::ensure_manual_startable(&app, state.inner())?;
+    start_media_job_blocking(&app, state.inner(), project_root, expected_revision, target_track_ids)
+}
+
+pub(crate) fn start_media_job_blocking(
+    app: &AppHandle,
+    state: &crate::AppState,
+    project_root: String,
+    expected_revision: u64,
+    target_track_ids: Vec<String>,
+) -> Result<XpanoProjectV2, ProjectCommandError> {
     let root = Path::new(&project_root);
     let stale_result = root.join(MEDIA_RESULT_RELATIVE_PATH);
     if stale_result.exists() {
