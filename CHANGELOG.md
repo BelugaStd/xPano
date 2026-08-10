@@ -2,6 +2,19 @@
 
 All notable xPano release changes are recorded here. Versions follow Semantic Versioning.
 
+## [2.0.1-4kfix] - 2026-07-28
+
+### Fixed
+
+- Normalized dual-fisheye focal calibration to the actual per-lens resolution so 4K sources no longer inherit the 8K pixel focal length.
+- Corrected Metashape fisheye tangential-distortion projection during cubemap export.
+- Rejected resolution-incompatible legacy fisheye calibration before export instead of producing images with fisheye distortion or large black borders.
+
+### Verification
+
+- Added 4K/8K calibration, Metashape compatibility, remap coverage, legacy-project rejection and release-staging regression coverage.
+- Accepted the source with 325 Python tests, 117 Rust tests, 54 frontend tests, lint and a production frontend build.
+
 ## [2.0.0-preview] - 2026-07-17
 
 ### Changed

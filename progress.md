@@ -1069,3 +1069,15 @@
 - A complete relocated resource tree under a path containing Chinese characters and spaces produces the same structured preflight result. This proves the packaged LFS resource lookup and normal Windows child path behavior in that path class.
 - The first transcripted rebuild overlapped an already-running NSIS compression job and returned a collision failure. The resulting fresh artifact came from the first completed build; all subsequent acceptance uses its new timestamp and verified hash. Do not run installer builds concurrently.
 - Final source gates pass: Python 319, Rust 117, frontend unit 54, frontend lint/build, Python compileall, PowerShell parser, and `git diff --check`. `cargo fmt --check` remains unavailable because `stable-x86_64-pc-windows-gnu` lacks rustfmt.
+
+# 2026-08-10 Phase 68 started
+
+- User requested a new global batch-mode task list that serially runs extraction, alignment and training while preserving the existing four-workspace manual flow.
+- Scope for this turn is architecture research and a two-iteration design plan; no product code or release artifact will be changed.
+- Planning files were resumed from the previous session and a new Phase 68 section was added without rewriting historical phases.
+
+## 2026-08-10 Phase 68 research checkpoint
+
+- Resumed prior planning context and verified the worktree has unrelated user changes; no product code or release payload was touched.
+- Inspected router/AppShell, ProjectProvider/JobProvider, usePipeline event/recovery wiring, Rust PipelineState/job lifecycle, media/reconstruction/training commands, project schema and UI style specification.
+- Confirmed the central design constraint: one application-scoped serial executor already exists; the batch feature should queue work above it and must first give media preparation the same durable job identity as reconstruction/training.

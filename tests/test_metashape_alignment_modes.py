@@ -165,10 +165,12 @@ def import_alignment_variants_with_fake_metashape():
 
 
 class MetashapeAlignmentModeTests(unittest.TestCase):
-    def test_panorama_sensor_restores_legacy_equidistant_model_and_imported_calibration(self):
+    def test_4k_panorama_sensor_uses_resolution_normalized_initial_calibration(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
         source_camera = FakeCamera("pano_left.jpg", None)
+        source_camera.sensor.width = 1920
+        source_camera.sensor.height = 1920
         source_camera.sensor.calibration.f = 6275.7
 
         sensor = pipeline.make_track_sensor(
@@ -179,9 +181,14 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         )
 
         self.assertEqual(sensor.type, "EquidistantFisheye")
-        self.assertIs(sensor.calibration, source_camera.sensor.calibration)
-        self.assertEqual(sensor.calibration.f, 6275.7)
-        self.assertEqual(sensor.calibration.type, "EquidistantFisheye")
+        self.assertIsNot(sensor.calibration, source_camera.sensor.calibration)
+        self.assertIsNotNone(sensor.user_calib)
+        self.assertEqual(sensor.user_calib.type, "EquidistantFisheye")
+        self.assertEqual((sensor.user_calib.width, sensor.user_calib.height), (1920, 1920))
+        self.assertAlmostEqual(sensor.user_calib.f, 520.8333333333334)
+        self.assertAlmostEqual(sensor.pixel_width, 0.0048)
+        self.assertAlmostEqual(sensor.pixel_height, 0.0048)
+        self.assertEqual(sensor.focal_length, 2.5)
 
     def test_alignment_summary_reports_panorama_and_frame_quality_separately(self):
         pipeline = import_pipeline_with_fake_metashape()

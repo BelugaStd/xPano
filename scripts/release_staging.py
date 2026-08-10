@@ -501,6 +501,7 @@ def stage_release_resources(
             temporary / "scripts" / "lichtfeld_training.py",
             temporary / "scripts" / "export_image_cache.py",
             temporary / "scripts" / "export_remap.py",
+            temporary / "scripts" / "fisheye_geometry.py",
             temporary / "scripts" / "metashape_runtime_env.py",
             temporary / "scripts" / "metashape_runtime_probe.py",
             temporary / "scripts" / "metashape_pipeline.py",

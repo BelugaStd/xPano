@@ -55,6 +55,7 @@ class ReleaseStagingTests(unittest.TestCase):
             "scripts/lichtfeld_training.py": b"print('training')",
             "scripts/export_image_cache.py": b"CACHE_SCHEMA_VERSION = 1",
             "scripts/export_remap.py": b"def remap_bilinear(): pass",
+            "scripts/fisheye_geometry.py": b"def normalized_fisheye_focal_px(): pass",
             "scripts/metashape_runtime_env.py": b"def build_metashape_process_env(): pass",
             "scripts/metashape_runtime_probe.py": b"print('probe')",
             "scripts/metashape_pipeline.py": b"print('pipeline')",
@@ -250,6 +251,7 @@ class ReleaseStagingTests(unittest.TestCase):
             self.assertTrue((stage / "scripts/lichtfeld_training.py").is_file())
             self.assertTrue((stage / "scripts/export_image_cache.py").is_file())
             self.assertTrue((stage / "scripts/export_remap.py").is_file())
+            self.assertTrue((stage / "scripts/fisheye_geometry.py").is_file())
             self.assertTrue((stage / "scripts/metashape_runtime_env.py").is_file())
             self.assertTrue((stage / "scripts/metashape_runtime_probe.py").is_file())
             self.assertTrue((stage / "scripts/metashape_pipeline.py").is_file())

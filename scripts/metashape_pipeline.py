@@ -44,6 +44,19 @@ except ImportError:
         normalize_alignment_mode,
     )
 
+try:
+    from scripts.fisheye_geometry import (
+        REFERENCE_FISHEYE_FOCAL_MM,
+        effective_fisheye_pixel_size_mm,
+        normalized_fisheye_focal_px,
+    )
+except ImportError:
+    from fisheye_geometry import (
+        REFERENCE_FISHEYE_FOCAL_MM,
+        effective_fisheye_pixel_size_mm,
+        normalized_fisheye_focal_px,
+    )
+
 
 FRAME_TRACK_TYPES = {"ordinary_video", "standard_photos", "aerial_photos"}
 FRAME_CAMERA_PROFILE_FOV = {
@@ -124,7 +137,7 @@ def load_manifest(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def copy_sensor_geometry(dst, src, *, copy_calibration=False):
+def copy_sensor_geometry(dst, src):
     if not src:
         return
     dst.width = src.width
@@ -132,8 +145,6 @@ def copy_sensor_geometry(dst, src, *, copy_calibration=False):
     dst.pixel_width = src.pixel_width
     dst.pixel_height = src.pixel_height
     dst.focal_length = src.focal_length
-    if copy_calibration:
-        dst.calibration = src.calibration
 
 
 def panorama_sensor_type():
@@ -142,11 +153,23 @@ def panorama_sensor_type():
 
 def configure_fisheye_sensor(sensor):
     sensor_type = panorama_sensor_type()
+    focal_px = normalized_fisheye_focal_px(sensor.width, sensor.height)
+    pixel_size_mm = effective_fisheye_pixel_size_mm(sensor.width, sensor.height)
     sensor.type = sensor_type
-    sensor.pixel_width = 0.0024
-    sensor.pixel_height = 0.0024
-    sensor.focal_length = 2.5
+    sensor.pixel_width = pixel_size_mm
+    sensor.pixel_height = pixel_size_mm
+    sensor.focal_length = REFERENCE_FISHEYE_FOCAL_MM
     sensor.fixed_params = ["B1", "B2", "K4"]
+
+    initial_calib = Metashape.Calibration()
+    initial_calib.type = sensor_type
+    initial_calib.width = sensor.width
+    initial_calib.height = sensor.height
+    initial_calib.f = focal_px
+    for name in ("b1", "b2", "k1", "k2", "k3", "k4", "p1", "p2"):
+        setattr(initial_calib, name, 0)
+    sensor.user_calib = initial_calib
+
     calib = sensor.calibration
     if calib:
         try:
@@ -274,7 +297,7 @@ def make_track_sensor(chunk, source_camera, label, sensor_type, camera_profile=N
         Metashape.Sensor.Type.Fisheye,
         panorama_sensor_type(),
     }
-    copy_sensor_geometry(sensor, source_sensor, copy_calibration=is_panorama)
+    copy_sensor_geometry(sensor, source_sensor)
     if is_panorama:
         configure_fisheye_sensor(sensor)
     elif sensor_type == Metashape.Sensor.Type.Frame:

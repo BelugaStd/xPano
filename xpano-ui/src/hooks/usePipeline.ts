@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import type { JobEvent, JobRecovery, JobSnapshot, ProjectMediaItem, XpanoProjectV2 } from '../lib/contracts'
 import { recoverJobView } from '../lib/jobRecovery'
 import { appendBoundedLog, mergeMediaItemBatch } from '../lib/pipelineBuffers'
-import { pipelineStartCommand } from '../lib/pipelineStartCommand'
+import { pipelineInputTracks, pipelineStartCommand } from '../lib/pipelineStartCommand'
 import { sanitizeProgress } from '../lib/pipelineProgress'
 import type { MaterialTrack, PipelineComplete, PipelineConfig, PipelineError, PipelineProgress, ProjectRunOptions } from '../lib/types'
 import type { TrainingConfig } from '../features/training/trainingConfig'
@@ -457,7 +457,7 @@ export function usePipeline(projectRoot = '') {
     setLogs((prev) => appendLog(prev, formatLogLine('正在创建任务并检查参数', 'idle', 0, 0)))
 
     try {
-      const args = buildArgs(tracks, config)
+      const args = buildArgs(pipelineInputTracks(tracks, options), config)
       if (options.manifestPath) args.push('--manifest', options.manifestPath)
       if (options.skipExtract) args.push('--skip-extract')
       if (options.reexportOnly) args.push('--reexport-existing-project')

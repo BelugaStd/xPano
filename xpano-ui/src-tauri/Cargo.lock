@@ -4827,7 +4827,7 @@ dependencies = [
 
 [[package]]
 name = "xpano-ui"
-version = "2.0.0-stable"
+version = "2.0.1-4kfix"
 dependencies = [
  "chrono",
  "log",

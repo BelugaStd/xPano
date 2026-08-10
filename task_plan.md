@@ -1302,3 +1302,40 @@ Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnos
 | No automatic training retry | Retrying native crashes can duplicate GPU allocations or create competing output writers without correcting the cause. |
 
 **Status:** supply-chain/staging, runtime-boundary, supervisor isolation, readiness caching, terminal-error retention, and production-signing gates are implemented and source/installed/relocated development acceptance has passed. Production release remains intentionally blocked until a real signing certificate and timestamp service are configured.
+
+---
+
+# Phase 68: 批量任务调度模式调研与方案
+
+## Goal
+
+在不破坏现有四栏手动工作区的前提下，增加一个全局“任务列表”入口，支持多个项目串行执行抽帧、对齐、训练；单个任务失败后记录失败并自动继续下一个任务；用户可随时进入单任务详情或切回手动模式。
+
+## Scope for this phase
+
+- [ ] 盘点现有前端工作区、项目持久化、Rust 作业调度、Python 入口和事件恢复能力。
+- [ ] 评估至少两种批量调度方案并记录自我迭代与取舍。
+- [ ] 形成最终 UI 规范、状态模型、调度 seam、失败/恢复契约和分阶段落地计划。
+- [ ] 本阶段只产出调研与方案，不修改产品代码、不打包。
+
+## Decisions resolved in `docs/BATCH_MODE_DESIGN_PLAN.md`
+
+- Task-list data location and schema versioning。
+- Whether batch task outputs are created at task-add time or run-start time。
+- Queue cancellation semantics and per-task retry policy。
+
+**Status:** complete
+
+## Phase 68 decisions and research checkpoint
+
+- [x] Read prior session catch-up and preserve the dirty worktree boundary.
+- [x] Inspect router/shell/providers and confirm batch must be a top-level route.
+- [x] Inspect Rust pipeline/job seams and confirm one global serial executor.
+- [x] Inspect all three stage entrypoints and identify media's missing registered-job lifecycle.
+- [x] Compare two queue designs and record the second iteration/decision in `findings.md`.
+- [x] Finalize queue schema, UI specification, failure/recovery contract and implementation phases in `docs/BATCH_MODE_DESIGN_PLAN.md`.
+- [x] Queue data location: versioned atomic JSON under Tauri `app_local_data_dir()/batch/queue.json`.
+- [x] Task outputs: create a dedicated xPano project when the task is saved, using a unique user-selectable project root.
+- [x] Cancellation: stop current and continue, or stop the whole queue; no automatic retry; app-close recovery is explicit.
+- [x] Valid stage combinations are strict prefixes: media, media+reconstruction, or media+reconstruction+training.
+- [x] No product code or package was changed in this research phase.

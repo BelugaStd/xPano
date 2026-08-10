@@ -59,7 +59,8 @@ except ImportError:
     from export_remap import RemapEngine, benchmark_remap_backends, remap_bilinear, select_remap_backend
 
 
-IMAGE_CONTRACT_VERSION = "xpano-images-v1"
+IMAGE_CONTRACT_VERSION = "xpano-images-v2-fisheye-projection"
+MIN_FISHEYE_REMAP_COVERAGE = 0.99
 CALIBRATION_FIELDS = ("width", "height", "f", "cx", "cy", "k1", "k2", "k3", "k4", "p1", "p2", "b1", "b2")
 
 # ==========================================
@@ -352,22 +353,37 @@ def build_remap_grid(face, W, calib, R_face, sensor_info_str):
     p1, p2 = getattr(calib, 'p1', 0) or 0, getattr(calib, 'p2', 0) or 0
     b1, b2 = getattr(calib, 'b1', 0) or 0, getattr(calib, 'b2', 0) or 0
     
-    r2 = r_base**2
-    r_dist = r_base * (1 + k[0]*r2 + k[1]*r2**2 + k[2]*r2**3 + k[3]*r2**4)
     mask = r_xy > 1e-10
     xn, yn = np.zeros_like(theta), np.zeros_like(theta)
     xn[mask], yn[mask] = Xb[mask] / r_xy[mask], Yb[mask] / r_xy[mask]
-    xd, yd = xn * r_dist, yn * r_dist
-    
-    if p1 != 0 or p2 != 0:
-        r_dist2 = r_dist**2
-        tang_x = p1 * (r_dist2 + 2 * xd**2) + 2 * p2 * xd * yd
-        tang_y = p2 * (r_dist2 + 2 * yd**2) + 2 * p1 * xd * yd
-        xd += tang_x; yd += tang_y
+    x, y = xn * r_base, yn * r_base
+    r2 = x**2 + y**2
+    radial = 1 + k[0]*r2 + k[1]*r2**2 + k[2]*r2**3 + k[3]*r2**4
+    xd = x * radial + p1 * (r2 + 2 * x**2) + 2 * p2 * x * y
+    yd = y * radial + p2 * (r2 + 2 * y**2) + 2 * p1 * x * y
     
     mx = (calib.width/2.0 + calib.cx - 0.5) + xd * calib.f + xd * b1 + yd * b2
     my = (calib.height/2.0 + calib.cy - 0.5) + yd * calib.f
     return mx.astype(np.float32), my.astype(np.float32)
+
+
+def remap_valid_fraction(mx, my, width, height):
+    if width < 2 or height < 2 or mx.size == 0 or my.shape != mx.shape:
+        return 0.0
+    valid = (mx >= 0) & (mx < width - 1) & (my >= 0) & (my < height - 1)
+    return float(np.mean(valid))
+
+
+def validate_fisheye_remap_grid(sensor, face, mx, my):
+    coverage = remap_valid_fraction(mx, my, sensor.calibration.width, sensor.calibration.height)
+    if coverage < MIN_FISHEYE_REMAP_COVERAGE:
+        raise RuntimeError(
+            "Fisheye calibration cannot cover the requested cubemap face: "
+            f"sensor={sensor.label!r} face={face} coverage={coverage:.1%}. "
+            "This project likely contains a resolution-incompatible legacy calibration; "
+            "re-align the source material with the current xPano version."
+        )
+    return coverage
 
 def save_image_array(image_array, file_path):
     if image_array.ndim == 2:
@@ -746,6 +762,19 @@ def _run_active_component_export(
                 if img_src is None:
                     raise RuntimeError(f"Cubemap source image could not be loaded for {camera.label}")
 
+                for face in ['front', 'left', 'right', 'top', 'bottom']:
+                    cache_key = (camera.sensor.key, opt_W, face)
+                    if cache_key not in grid_cache:
+                        grid = build_remap_grid(
+                            face,
+                            opt_W,
+                            camera.sensor.calibration,
+                            R_faces[face],
+                            strategy['info_str'],
+                        )
+                        validate_fisheye_remap_grid(camera.sensor, face, *grid)
+                        grid_cache[cache_key] = grid
+
             # 只为当前的这张图片创建临时并发池，处理完立刻清空内存
             cam_tasks = []
             output_paths = []
@@ -780,8 +809,6 @@ def _run_active_component_export(
                 output_paths.append(out_path)
                 if not reused:
                     cache_key = (camera.sensor.key, opt_W, face)
-                    if cache_key not in grid_cache:
-                        grid_cache[cache_key] = build_remap_grid(face, opt_W, camera.sensor.calibration, R_faces[face], strategy['info_str'])
                     mx, my = grid_cache[cache_key]
                     # 提交这一个面的渲染任务
                     cam_tasks.append((executor.submit(threaded_remap_and_save, img_src, mx, my, out_path, remap_engine), out_path))

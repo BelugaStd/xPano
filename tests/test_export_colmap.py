@@ -166,6 +166,131 @@ class ExportColmapTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
         self.assertIn("driver failed", warnings[0])
 
+    def test_fisheye_grid_matches_metashape_tangential_distortion_order(self):
+        module = self._load_module_with_metashape(types.SimpleNamespace())
+        calibration = types.SimpleNamespace(
+            width=400,
+            height=400,
+            f=108.5,
+            cx=1.25,
+            cy=-0.75,
+            k1=0.02,
+            k2=-0.003,
+            k3=0.0004,
+            k4=0.0,
+            p1=0.004,
+            p2=-0.003,
+            b1=0.2,
+            b2=-0.1,
+        )
+        output_width = 218
+        mx, my = module.build_remap_grid(
+            "front",
+            output_width,
+            calibration,
+            np.eye(3),
+            "EquidistantFisheye",
+        )
+
+        face_width, face_height, cx, cy = module.get_face_configs(output_width)["front"]
+        u, v = np.meshgrid(
+            np.arange(face_width, dtype=np.float32),
+            np.arange(face_height, dtype=np.float32),
+        )
+        pinhole_focal = output_width / 2.0
+        x_ray = (u + 0.5 - cx) / pinhole_focal
+        y_ray = (v + 0.5 - cy) / pinhole_focal
+        ray_radius = np.hypot(x_ray, y_ray)
+        theta = np.arctan2(ray_radius, np.ones_like(ray_radius))
+        x = np.divide(x_ray, ray_radius, out=np.zeros_like(theta), where=ray_radius > 1e-10) * theta
+        y = np.divide(y_ray, ray_radius, out=np.zeros_like(theta), where=ray_radius > 1e-10) * theta
+        radius2 = x * x + y * y
+        radial = 1 + calibration.k1 * radius2 + calibration.k2 * radius2**2 + calibration.k3 * radius2**3
+        xd = x * radial + calibration.p1 * (radius2 + 2 * x * x) + 2 * calibration.p2 * x * y
+        yd = y * radial + calibration.p2 * (radius2 + 2 * y * y) + 2 * calibration.p1 * x * y
+        expected_mx = (
+            calibration.width / 2.0
+            + calibration.cx
+            - 0.5
+            + xd * calibration.f
+            + xd * calibration.b1
+            + yd * calibration.b2
+        )
+        expected_my = calibration.height / 2.0 + calibration.cy - 0.5 + yd * calibration.f
+
+        np.testing.assert_allclose(mx, expected_mx, atol=1e-4)
+        np.testing.assert_allclose(my, expected_my, atol=1e-4)
+
+    def test_normalized_4k_fisheye_calibration_covers_every_export_face(self):
+        module = self._load_module_with_metashape(types.SimpleNamespace())
+        calibration = types.SimpleNamespace(
+            width=1920,
+            height=1920,
+            f=520.8333333333334,
+            cx=0.0,
+            cy=0.0,
+            k1=0.0,
+            k2=0.0,
+            k3=0.0,
+            k4=0.0,
+            p1=0.0,
+            p2=0.0,
+            b1=0.0,
+            b2=0.0,
+        )
+        output_width = 1042
+        rotations = {
+            "front": np.eye(3),
+            "left": np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]]),
+            "right": np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]]),
+            "top": np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]]),
+            "bottom": np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]]),
+        }
+
+        for face, rotation in rotations.items():
+            with self.subTest(face=face):
+                mx, my = module.build_remap_grid(
+                    face,
+                    output_width,
+                    calibration,
+                    rotation,
+                    "EquidistantFisheye",
+                )
+                self.assertGreaterEqual(
+                    module.remap_valid_fraction(mx, my, calibration.width, calibration.height),
+                    0.999,
+                )
+
+    def test_legacy_unscaled_4k_calibration_is_rejected_before_export(self):
+        module = self._load_module_with_metashape(types.SimpleNamespace())
+        calibration = types.SimpleNamespace(
+            width=1920,
+            height=1920,
+            f=1041.6666666666667,
+            cx=0.0,
+            cy=0.0,
+            k1=-0.095,
+            k2=0.0,
+            k3=0.0,
+            k4=0.0,
+            p1=0.0,
+            p2=0.0,
+            b1=0.0,
+            b2=0.0,
+        )
+        sensor = types.SimpleNamespace(label="legacy-4k", calibration=calibration)
+        rotation = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]])
+        mx, my = module.build_remap_grid(
+            "left",
+            2084,
+            calibration,
+            rotation,
+            "EquidistantFisheye",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "re-align"):
+            module.validate_fisheye_remap_grid(sensor, "left", mx, my)
+
     def test_camera_image_signature_ignores_pose_but_invalidates_pixel_inputs(self):
         module = self._load_module_with_metashape(types.SimpleNamespace())
         calibration = types.SimpleNamespace(

@@ -1030,3 +1030,48 @@
 - The release manifest is generated but never verified after installation. The unsigned installer and executables leave antivirus quarantine or partial installation indistinguishable from a source packaging defect.
 - LFS GUI training directly imports the NVIDIA driver API and Vulkan loader. Driver/hardware incompatibility must be reported separately from bundled-file corruption; `nvcuda.dll` must not be copied from another machine.
 - The on-demand densification runtime is a separate versioned Python/Torch chain and should remain separate. Its follow-up gap is CUDA-profile revalidation, not the LFS GUI resource layout.
+
+# Phase 68 批量模式调研
+
+本阶段调研结果将追加在此处；先保留历史阶段记录不改写。
+
+- 当前应用只有 `/project/*` 路由，默认进入 `/project/media`；四个工作区由同一个 `AppShell`、`ProjectProvider` 和 `JobProvider` 承载。批量页若要真正独立，应作为 `/batch` 顶层路由，不套用项目四栏底栏。
+- `ProjectProvider` 只持有一个当前 `projectRoot/project`；`JobProvider` 也只为当前项目创建一个 `usePipeline(projectRoot)`。因此不能把批量调度写成在前端循环切换当前项目，否则路由切换、组件卸载或应用最小化都会破坏夜间运行。
+- 项目 schema v3 已持久化 tracks、抽帧设置、reconstruction config、training config、jobs 和 revisions；这允许批量项只引用 `projectRoot` 与阶段开关，不必复制一套素材/参数模型。
+- 每个项目已有 durable `JobSnapshot`/`JobEvent`、恢复命令和互斥 job 语义。批量调度应复用这些 project-scoped job 作为执行单元，并额外持久化一个 application-scoped queue；队列不应替代项目 job 状态。
+- 现有 `activeWorkspace` 是项目详情的最后停留页，适合在从任务列表点入详情时恢复；批量调度本身不应通过修改 `activeWorkspace` 驱动阶段执行。
+- Rust `AppState` 只有一个 `PipelineState`，`ensure_startable()` 明确拒绝第二个进程；这是现成且正确的全局串行 seam。批量模式应在该 seam 之上排队，不应新增并发 pipeline 或用前端定时器抢锁。
+- `PipelineState` 已能关联一个 project-scoped `JobContext`，重建和训练都使用 registered job；取消会终止完整 Windows 进程树。调度器可以通过同一 active process 生命周期等待终态，然后推进队列。
+- 素材准备目前仍走未注册的 `pipeline.start()`，项目只持久化 track running/ready/failed 和 media marker，没有与重建/训练同级的 durable `JobSnapshot`。若批量模式直接复用它，任务列表在重启后难以精确区分“正在抽帧”“进程已丢失”“结果已落盘待提交”；这是落地前需要补齐的最小一致性缺口。
+- 全局单 pipeline 意味着任务详情与批量页可以并行查看，但手动模式不得在批量队列运行时启动另一任务。UI 应显示“批量队列占用执行器”，而不是让手动按钮点击后才报 `ALREADY_RUNNING`。
+
+## Phase 68 architecture evidence (2026-08-10)
+
+- The only application routes are `/project/*`; `AppShell` owns the four-workspace footer and `ProjectProvider`/`JobProvider` are mounted once above the router. A batch list must be a top-level route with a separate shell, not another footer workspace.
+- `ProjectProvider` and `usePipeline(projectRoot)` model one active project. Switching that root in a frontend loop would tear down listeners and make overnight orchestration dependent on route/UI lifetime.
+- Rust `AppState` owns one `PipelineState`; `ensure_startable()` rejects a second process. This is the correct serial execution seam and should be reused by a queue, not bypassed with parallel processes or frontend timers.
+- Reconstruction and training use registered `JobContext`/`JobSnapshot`/`JobEvent` lifecycles. `start_media_job` still uses a media marker plus track status and calls unregistered `pipeline.start()`, so media needs the smallest registered-job adapter before queue recovery can be reliable.
+- Existing project schema v3 already persists tracks, extraction settings, reconstruction/training config, revisions and project jobs. A batch task should reference a project root plus stage switches and a config snapshot/hash, not copy a second material/parameter model.
+- Native stage boundaries are already explicit: `start_media_job`, `start_reconstruction_job` (execution plan), and `start_training_job`; each has a backend terminal watcher that commits success/failure. The queue should wait on those durable terminal states, then atomically advance or fail one task.
+- The project-level `activeWorkspace` is a detail-page resume hint. Batch execution must not mutate it to drive stages; opening a task can still navigate to the saved workspace.
+
+## Phase 68 design iterations
+
+### Iteration 1: React-owned queue (rejected)
+
+- Proposed shape: `/batch` stores tasks in React/localStorage, listens to `pipeline:*`, calls `start_media_job`, then builds/starts reconstruction, then starts training.
+- It minimizes initial Rust work, but the queue would depend on one active `ProjectProvider` and UI listener lifetime. A reload, route switch or frontend exception could lose orchestration even while the child process remains alive.
+- Global `pipeline:*` events do not identify a project or queue task, and media is not a registered durable job. Correlation and recovery would therefore be guesswork.
+- Failure-continuation, cancellation and revision conflict policy would be spread across React effects. This is a shallow module with a large interface and poor locality, so it fails the overnight reliability requirement.
+
+### Iteration 2: application-scoped Rust coordinator (selected)
+
+- Add one deep `batch` module behind a small command/event interface. It owns a versioned queue store under Tauri `app_local_data_dir`, one worker loop, task/stage transitions and queue-level cancellation.
+- Reuse the existing single `PipelineState` as the execution seam. The coordinator never starts two native processes and manual commands consult the same batch occupancy before launch.
+- A task is created/configured as a real xPano project before enqueue. The queue stores project identity/root, a frozen project revision, stage switches and execution status; media/reconstruction/training parameters remain authoritative in the project schema.
+- Add the missing persisted training-config save command and convert media preparation to a registered project job. The coordinator then treats all three stages through the same start -> durable terminal snapshot -> advance/fail contract.
+- The frontend owns presentation and editing only. `batch:snapshot`/`batch:event` carry queue/task/stage identity, progress, elapsed, ETA and error summaries; detailed logs remain project-job logs and are read lazily.
+
+### Rejected alternative: external supervisor script
+
+- A standalone Python/PowerShell supervisor could survive frontend reloads, but it would duplicate environment resolution, project transactions, process-tree cancellation and job/event persistence already implemented in Rust. The deletion test shows this would move existing complexity into a second implementation rather than deepen the current execution module.
