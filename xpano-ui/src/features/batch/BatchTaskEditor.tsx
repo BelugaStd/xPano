@@ -9,6 +9,7 @@ import { useProject } from '../../app/useProject'
 import { ThemeControls } from '../../components/layout/ThemeControls'
 import { WindowControls } from '../../components/layout/WindowControls'
 import { RuntimeReadinessBadge } from '../../components/layout/RuntimeReadinessBadge'
+import { BrandAboutButton } from '../../components/layout/BrandAboutButton'
 import { ConfirmDialog } from '../../components/shared/ConfirmDialog'
 import type { ProjectTrack, XpanoProjectV2 } from '../../lib/contracts'
 import { commandErrorMessage } from '../../lib/commandError'
@@ -31,7 +32,7 @@ interface Props {
   onThemeModeChange: (mode: ThemeMode) => void
 }
 
-const inputClass = 'theme-input mt-1 w-full'
+const inputClass = 'theme-input batch-form-control mt-1 w-full'
 
 function trainingConfigFromProject(project: XpanoProjectV2): TrainingConfig {
   return {
@@ -296,8 +297,7 @@ export function BatchTaskEditor({ themeMode, onThemeModeChange }: Props) {
     <div className="app-shell relative z-10 h-screen min-h-[720px] min-w-[1024px] overflow-hidden text-ink">
       <header className="liquid-topbar app-titlebar drag-region flex items-center justify-between px-3.5">
         <div className="flex items-center gap-2.5">
-          <img src="/icon.png" alt="xPano" className="h-6 w-6 rounded-subtle" />
-          <span className="text-[13px] font-semibold">xPano</span>
+          <BrandAboutButton />
           <span className="titlebar-section-divider" />
           <span className="text-[11px] text-muted">批量任务设置</span>
         </div>
@@ -308,7 +308,7 @@ export function BatchTaskEditor({ themeMode, onThemeModeChange }: Props) {
           <WindowControls />
         </div>
       </header>
-      <main className="app-workspace min-h-0 overflow-auto p-4 md:p-6">
+      <main className="app-workspace batch-editor-workspace min-h-0 overflow-auto p-4 md:p-6">
         <section className="liquid-panel batch-task-editor-panel mx-auto max-w-6xl p-5 md:p-6">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -331,7 +331,7 @@ export function BatchTaskEditor({ themeMode, onThemeModeChange }: Props) {
           </div>
           {error && <div className="mt-4 rounded-comfortable border border-danger/20 bg-danger/8 px-3 py-2 text-[11px] text-danger">{error}</div>}
 
-          <div className="mt-5 grid gap-4 md:grid-cols-[1fr_1.4fr]">
+          <div className="mt-5 grid gap-4 md:grid-cols-[minmax(260px,0.9fr)_minmax(420px,1.4fr)]">
             <label>
               <span className="text-[11px] font-medium text-muted">任务名称</span>
               <input
@@ -345,7 +345,7 @@ export function BatchTaskEditor({ themeMode, onThemeModeChange }: Props) {
             <label>
               <span className="text-[11px] font-medium text-muted">工程目录</span>
               <div className="mt-1 flex gap-2">
-                <input readOnly value={editorRoot} className="theme-input min-w-0 flex-1" placeholder="选择现有工程，或直接添加素材创建工程" />
+                <input readOnly value={editorRoot} className="theme-input batch-form-control min-w-0 flex-1" placeholder="选择现有工程，或直接添加素材创建工程" />
                 <button
                   type="button"
                   disabled={locked}
@@ -370,22 +370,22 @@ export function BatchTaskEditor({ themeMode, onThemeModeChange }: Props) {
                   key={stage.key}
                   disabled={locked || dependentLocked}
                   onClick={() => setStages(stage.key, !enabled)}
-                  className={`flex min-h-[74px] items-center gap-3 rounded-comfortable border px-3 text-left transition-colors ${enabled ? 'border-brand/30 bg-brand/8' : 'border-ink/[0.08] bg-ink/[0.02]'} disabled:cursor-not-allowed disabled:opacity-40`}
+                  className={`batch-stage-toggle grid min-h-[72px] grid-cols-[32px_minmax(0,1fr)_auto] items-center gap-3 rounded-comfortable border px-3 text-left transition-colors ${enabled ? 'border-brand/30 bg-brand/8' : 'border-ink/[0.08] bg-ink/[0.02]'} disabled:cursor-not-allowed disabled:opacity-40`}
                 >
                   <span className={`grid h-8 w-8 place-items-center rounded-full ${enabled ? 'bg-brand text-white' : 'bg-ink/[0.06] text-muted'}`}>
                     <Icon className="h-4 w-4" />
                   </span>
-                  <span>
+                  <span className="min-w-0">
                     <span className="block text-[12px] font-semibold">{stage.label}</span>
                     <span className="mt-0.5 block text-[10px] text-muted">{dependentLocked ? '需先开启前一阶段' : stage.hint}</span>
                   </span>
-                  <span className="ml-auto text-[10px] text-muted">{enabled ? '已开启' : '未开启'}</span>
+                  <span className="whitespace-nowrap text-[10px] text-muted">{enabled ? '已开启' : '未开启'}</span>
                 </button>
               )
             })}
           </div>
 
-          <div className="mt-5 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
+          <div className="mt-5 grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.9fr)]">
             <section className="glass-inset rounded-comfortable p-4">
               <div className="flex items-center justify-between">
                 <div>

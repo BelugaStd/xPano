@@ -9,10 +9,66 @@ import unittest
 from pathlib import Path
 
 from scripts.colmap_backend import read_colmap_points3d_file, write_colmap_points3d
+from scripts.lichtfeld_densify import LichtfeldDensifyConfig
 from scripts.run_lfs_densify_viewer import build_argparser, run
 
 
 class LfsDensifyViewerTests(unittest.TestCase):
+    def test_default_densification_profile_is_balanced_for_4k_material(self):
+        args = build_argparser().parse_args([
+            "--output-dir",
+            "scene",
+            "--python-exe",
+            "python.exe",
+            "--plugin-dir",
+            "plugin",
+        ])
+        config = LichtfeldDensifyConfig()
+
+        self.assertEqual(args.roma, "fast")
+        self.assertEqual(args.num_refs, 0.75)
+        self.assertEqual(args.nns_per_ref, 3)
+        self.assertEqual(args.matches_per_ref, 10000)
+        self.assertEqual(args.certainty_thresh, 0.20)
+        self.assertEqual(config.roma_setting, "fast")
+        self.assertEqual(config.num_refs, 0.75)
+        self.assertEqual(config.nns_per_ref, 3)
+        self.assertEqual(config.matches_per_ref, 10000)
+        self.assertEqual(config.certainty_thresh, 0.20)
+
+    def test_invalid_reference_defaults_fall_back_to_balanced_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sparse = root / "sparse" / "0"
+            (root / "images").mkdir(parents=True)
+            write_colmap_points3d(
+                sparse / "points3D.bin",
+                [{"id": 1, "xyz": (0.0, 0.0, 0.0), "rgb": (1, 2, 3), "error": 0.0, "track": []}],
+            )
+            captured = {}
+
+            def fake_runner(config, **kwargs):
+                captured.update({
+                    "num_refs": config.num_refs,
+                    "nns_per_ref": config.nns_per_ref,
+                })
+                (sparse / config.out_name).write_bytes(
+                    b"ply\nformat binary_little_endian 1.0\nelement vertex 0\n"
+                    b"property float x\nproperty float y\nproperty float z\n"
+                    b"property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n"
+                )
+
+            args = build_argparser().parse_args([
+                "--output-dir", str(root),
+                "--python-exe", "python.exe",
+                "--plugin-dir", "plugin",
+                "--num-refs", "0",
+                "--nns-per-ref", "0",
+            ])
+            run(args, densify_runner=fake_runner)
+
+            self.assertEqual(captured, {"num_refs": 0.75, "nns_per_ref": 3})
+
     def test_script_help_runs_from_arbitrary_working_directory(self):
         script = Path(__file__).resolve().parents[1] / "scripts" / "run_lfs_densify_viewer.py"
         with tempfile.TemporaryDirectory() as tmp:

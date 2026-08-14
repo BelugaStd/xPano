@@ -42,8 +42,8 @@ def build_argparser():
     parser.add_argument("--plugin-dir", required=True)
     parser.add_argument("--roma", default="fast", choices=["turbo", "fast", "base", "high", "precise"])
     parser.add_argument("--max-points", type=int, default=0)
-    parser.add_argument("--num-refs", type=float, default=0.8)
-    parser.add_argument("--nns-per-ref", type=int, default=1)
+    parser.add_argument("--num-refs", type=float, default=0.75)
+    parser.add_argument("--nns-per-ref", type=int, default=3)
     parser.add_argument("--matches-per-ref", type=int, default=10000)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--certainty-thresh", type=float, default=0.2)
@@ -86,8 +86,8 @@ def run(args, densify_runner=run_densify_command):
             images_subdir=images_subdir,
             out_name=dense_ply.name,
             roma_setting=args.roma,
-            num_refs=_positive_float(args.num_refs, 0.8),
-            nns_per_ref=_positive_int(args.nns_per_ref, 1),
+            num_refs=_positive_float(args.num_refs, 0.75),
+            nns_per_ref=_positive_int(args.nns_per_ref, 3),
             matches_per_ref=_positive_int(args.matches_per_ref, 10000),
             certainty_thresh=max(0.0, min(1.0, float(args.certainty_thresh))),
             max_points=max(0, int(args.max_points)),

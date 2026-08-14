@@ -101,8 +101,8 @@ export function BatchTrackSettings({ track, selected, disabled, onSelectedChange
                 }
               }} />
               <div className="mt-3 grid grid-cols-2 gap-2">
-                <label className="text-[10px] text-muted">帧 / 秒<input type="number" min="0.01" step="0.1" value={framesPerSecond} onChange={(event) => setFramesPerSecond(Math.max(0.01, Number(event.target.value) || 0.01))} className="theme-input mt-1 w-full" /></label>
-                <label className="text-[10px] text-muted">帧数上限<input type="number" min="0" step="1" value={frameLimit} onChange={(event) => setFrameLimit(Math.max(0, Math.floor(Number(event.target.value) || 0)))} className="theme-input mt-1 w-full" /></label>
+                <label className="text-[10px] text-muted">帧 / 秒<input type="number" min="0.01" step="0.1" value={framesPerSecond} onChange={(event) => setFramesPerSecond(Math.max(0.01, Number(event.target.value) || 0.01))} className="theme-input batch-form-control mt-1 w-full" /></label>
+                <label className="text-[10px] text-muted">帧数上限<input type="number" min="0" step="1" value={frameLimit} onChange={(event) => setFrameLimit(Math.max(0, Math.floor(Number(event.target.value) || 0)))} className="theme-input batch-form-control mt-1 w-full" /></label>
               </div>
             </>
           )}
@@ -113,7 +113,7 @@ export function BatchTrackSettings({ track, selected, disabled, onSelectedChange
           )}
           {styleSupported && <div className="mt-3"><ColorLutField value={styleLutPath} onChange={setStyleLutPath} disabled={saving} /></div>}
           {track.type === 'ordinary_video' && (
-            <label className="mt-3 block text-[10px] text-muted">初始相机视角<select value={cameraProfile} onChange={(event) => setCameraProfile(event.target.value as 'wide' | 'standard')} className="theme-input mt-1 w-full"><option value="wide">广角视角</option><option value="standard">标准视角</option></select></label>
+            <label className="mt-3 block text-[10px] text-muted">初始相机视角<select value={cameraProfile} onChange={(event) => setCameraProfile(event.target.value as 'wide' | 'standard')} className="theme-input batch-form-control mt-1 w-full"><option value="wide">广角视角</option><option value="standard">标准视角</option></select></label>
           )}
           <div className="mt-3 flex justify-end">
             <button type="button" disabled={saving} onClick={save} className="motion-press flex h-8 items-center gap-1.5 rounded-comfortable bg-brand px-3 text-[10px] font-semibold text-white disabled:opacity-45"><Save className="h-3 w-3" />{saving ? '保存中…' : '保存轨道参数'}</button>

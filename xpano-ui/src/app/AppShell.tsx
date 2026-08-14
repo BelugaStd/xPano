@@ -6,6 +6,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import gsap from 'gsap'
 import { ThemeControls } from '../components/layout/ThemeControls'
+import { BrandAboutButton } from '../components/layout/BrandAboutButton'
 import { WindowControls } from '../components/layout/WindowControls'
 import { RuntimeReadinessBadge } from '../components/layout/RuntimeReadinessBadge'
 import { JobBar } from '../features/jobs/JobBar'
@@ -132,8 +133,7 @@ export function AppShell({ themeMode, resolvedTheme, onThemeModeChange }: AppShe
     <div className="app-shell relative z-10 h-screen min-h-[720px] min-w-[1024px] overflow-hidden text-ink">
       <header className="liquid-topbar app-titlebar drag-region flex min-w-0 items-center justify-between px-3.5">
         <div className="flex min-w-0 items-center gap-2.5">
-          <img src="/icon.png" alt="xPano" className="h-6 w-6 rounded-subtle" />
-          <span className="text-[13px] font-semibold text-ink">xPano</span>
+          <BrandAboutButton />
           <span className="titlebar-section-divider" />
           <div className="no-drag flex min-w-0 items-center gap-2" title={displayPath ? `${projectStateLabel} · ${displayPath}` : projectStateLabel}>
             <span className={`h-2 w-2 shrink-0 rounded-full ${projectStateClass}`} />

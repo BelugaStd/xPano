@@ -112,3 +112,16 @@ test('queued and running task details lock project inputs while completed detail
   assert.equal(batchTaskInputLocked(tasks, 'done'), false)
   assert.equal(batchTaskInputLocked(tasks, null), false)
 })
+
+test('the batch editor owns a compact, overflow-safe form layout', () => {
+  const editor = readFileSync(new URL('../src/features/batch/BatchTaskEditor.tsx', import.meta.url), 'utf8')
+  const styles = readFileSync(new URL('../src/index.css', import.meta.url), 'utf8')
+  assert.match(editor, /className="app-workspace batch-editor-workspace/)
+  assert.match(editor, /className="theme-input batch-form-control/)
+  assert.match(editor, /batch-stage-toggle/)
+  assert.match(editor, /lg:grid-cols-\[minmax\(0,1\.25fr\)_minmax\(360px,0\.9fr\)\]/)
+  assert.match(styles, /\.batch-task-editor-panel \.batch-form-control/)
+  assert.match(styles, /height:\s*36px/)
+  assert.match(styles, /font-size:\s*12px/)
+  assert.doesNotMatch(styles, /\.liquid-panel\.batch-task-editor-panel\s*\{[^}]*overflow-y:\s*auto/s)
+})

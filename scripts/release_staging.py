@@ -512,6 +512,8 @@ def stage_release_resources(
             temporary / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
             temporary / "tools" / "ffmpeg" / "bin" / "ffprobe.exe",
             temporary / "tools" / "lichtfeld-densification-plugin" / "densify.py",
+            temporary / "tools" / "lichtfeld-densification-plugin" / "third_party" / "dinov3" / "hubconf.py",
+            temporary / "tools" / "lichtfeld-densification-plugin" / "third_party" / "dinov3" / "LICENSE.md",
             temporary / "tools" / "offline-wheels" / "app" / "tqdm-4.68.3-py3-none-any.whl",
             temporary / "runtime" / "densify-runtime-manifest.json",
             temporary / "runtime" / "pip.pyz",

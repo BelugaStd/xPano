@@ -169,7 +169,7 @@ def main():
     parser.add_argument("--lfs-densify-python")
     parser.add_argument("--lfs-densify-plugin")
     parser.add_argument("--lfs-densify-roma", default="fast", choices=["precise", "high", "base", "fast", "turbo"])
-    parser.add_argument("--lfs-densify-num-refs", type=float, default=8.0)
+    parser.add_argument("--lfs-densify-num-refs", type=float, default=0.75)
     parser.add_argument("--lfs-densify-max-points", type=int, default=0)
     parser.add_argument("--frames-per-second", type=float)
     parser.add_argument("--seconds-per-frame", dest="legacy_seconds_per_frame", type=float, help=argparse.SUPPRESS)

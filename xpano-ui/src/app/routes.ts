@@ -1,1 +1,1 @@
-export const DEFAULT_PROJECT_PATH = '/batch'
+export const DEFAULT_PROJECT_PATH = '/project/media'

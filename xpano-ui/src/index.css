@@ -808,7 +808,40 @@ html.theme-is-switching::before {
 
 .liquid-panel.batch-task-editor-panel {
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: visible;
+}
+
+.batch-editor-workspace > .batch-task-editor-panel {
+  height: auto;
+  min-height: 100%;
+}
+
+.batch-task-editor-panel .glass-inset {
+  border-color: color-mix(in srgb, var(--xp-line-muted) 72%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--xp-highlight) 32%, transparent);
+}
+
+.batch-task-editor-panel .batch-form-control {
+  box-sizing: border-box;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.batch-task-editor-panel select.batch-form-control {
+  padding-right: 30px;
+}
+
+.batch-task-editor-panel label > span:first-child {
+  display: block;
+  line-height: 14px;
+}
+
+.batch-task-editor-panel .batch-stage-toggle > span:nth-child(2) {
+  overflow: hidden;
 }
 
 .liquid-card {

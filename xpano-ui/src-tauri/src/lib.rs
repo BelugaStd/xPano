@@ -3196,8 +3196,8 @@ async fn run_lfs_densify(
             "fast".to_string()
         };
         let max_points_text = max_points.max(0).to_string();
-        let num_refs_text = if num_refs > 0.0 { num_refs } else { 8.0 }.to_string();
-        let nns_per_ref_text = nns_per_ref.max(1).to_string();
+        let num_refs_text = if num_refs > 0.0 { num_refs } else { 0.75 }.to_string();
+        let nns_per_ref_text = if nns_per_ref > 0 { nns_per_ref } else { 3 }.to_string();
         let matches_per_ref_text = matches_per_ref.max(100).to_string();
         let steps_text = steps.clamp(1, 500).to_string();
         let certainty_thresh_text = certainty_thresh.clamp(0.0, 1.0).to_string();

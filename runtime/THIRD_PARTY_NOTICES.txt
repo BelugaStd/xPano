@@ -36,3 +36,9 @@ Project: https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
 The app-local runtime files under runtime/windows-x64 are redistributed for
 use by xPano's bundled native components under the applicable Microsoft
 Visual Studio license terms.
+
+DINOv3 source snapshot (facebookresearch/dinov3, adc254450203739c8149213a7a69d8d905b4fcfa)
+License: DINOv3 License
+Project: https://github.com/facebookresearch/dinov3
+The accompanying license is distributed at
+tools/lichtfeld-densification-plugin/third_party/dinov3/LICENSE.md.

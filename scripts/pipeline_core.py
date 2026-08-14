@@ -184,7 +184,7 @@ class MultiTrackJobConfig:
     lfs_densify_python: str = None
     lfs_densify_plugin: Path = None
     lfs_densify_roma: str = "fast"
-    lfs_densify_num_refs: float = 8.0
+    lfs_densify_num_refs: float = 0.75
     lfs_densify_max_points: int = 0
     ordinary_video_tracks: list = field(default_factory=list)
     track_extraction_settings: dict = field(default_factory=dict)
@@ -221,7 +221,7 @@ def material_tracks_to_job_config(
     lfs_densify_python=None,
     lfs_densify_plugin=None,
     lfs_densify_roma="fast",
-    lfs_densify_num_refs=8.0,
+    lfs_densify_num_refs=0.75,
     lfs_densify_max_points=0,
     reexport_existing_project=False,
     existing_project_path=None,

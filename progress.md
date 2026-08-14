@@ -1081,3 +1081,10 @@
 - Resumed prior planning context and verified the worktree has unrelated user changes; no product code or release payload was touched.
 - Inspected router/AppShell, ProjectProvider/JobProvider, usePipeline event/recovery wiring, Rust PipelineState/job lifecycle, media/reconstruction/training commands, project schema and UI style specification.
 - Confirmed the central design constraint: one application-scoped serial executor already exists; the batch feature should queue work above it and must first give media preparation the same durable job identity as reconstruction/training.
+# 2026-08-13 Phase 69 full-offline installer
+
+- Staging passed with 2280 files and 6.652 GB, version `2.0.1-4kfix`; Python 326 tests, frontend 69 tests, lint, build and PE closure checks passed.
+- NSIS 3.12 failed at the 3.224 GB CUDA PyTorch artifact with `failed creating mmap`; the failure is an installer-tool limitation for this payload, not a source or staging failure.
+- Built `build/xPano-2.0.1-4kfix-full-offline-sfx.7z` in storage mode and verified `Everything is Ok` for 2283 files.
+- Built `dist/xPano-2.0.1-4kfix-full-offline-sfx-unsigned-dev-windows-x64.exe` using the local 7-Zip SFX module. Final size is 7,155,503,525 bytes and SHA-256 is `699A2C1475008F51BF3E7232D6189E1E984B1A00EF51C930A09EE9FF9689A4A5`.
+- 7-Zip can list the final SFX contents and confirms the full payload, CUDA/RoMa artifacts, LichtFeld runtime, plugin and launch files are embedded.

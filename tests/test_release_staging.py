@@ -73,6 +73,8 @@ class ReleaseStagingTests(unittest.TestCase):
             "tools/colmap/_downloads/archive.zip": b"must not ship",
             "tools/lichtfeld-densification-plugin/densify.py": b"def build_argparser(): pass",
             "tools/lichtfeld-densification-plugin/core/pipeline.py": b"pass",
+            "tools/lichtfeld-densification-plugin/third_party/dinov3/hubconf.py": b"def dinov3_vitl16(): pass",
+            "tools/lichtfeld-densification-plugin/third_party/dinov3/LICENSE.md": b"DINOv3 License",
             "tools/lichtfeld-densification-plugin/.git/config": b"must not ship",
             "tools/lichtfeld-densification-plugin/__pycache__/bad.pyc": b"must not ship",
             "tools/torch-cache/model.bin": b"must not ship",
@@ -552,6 +554,30 @@ class ReleaseStagingTests(unittest.TestCase):
             bundled = stage / "runtime/densify-artifacts/sha256"
             self.assertEqual((bundled / hashlib.sha256(cpu).hexdigest()).read_bytes(), cpu)
             self.assertEqual((bundled / hashlib.sha256(cuda).hexdigest()).read_bytes(), cuda)
+
+    def test_stage_rejects_missing_bundled_dinov3_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            stage = Path(tmp) / "stage"
+            root.mkdir()
+            self.make_fixture(root)
+            (root / "tools/lichtfeld-densification-plugin/third_party/dinov3/hubconf.py").unlink()
+            ffmpeg = Path(tmp) / "ffmpeg.exe"
+            ffprobe = Path(tmp) / "ffprobe.exe"
+            loader = Path(tmp) / "WebView2Loader.dll"
+            ffmpeg.write_bytes(b"ffmpeg")
+            ffprobe.write_bytes(b"ffprobe")
+            loader.write_bytes(b"loader")
+
+            with self.assertRaisesRegex(ReleaseStagingError, "dinov3"):
+                stage_release_resources(
+                    root,
+                    stage,
+                    ffmpeg,
+                    ffprobe,
+                    loader,
+                    version="1.2.3",
+                )
 
     def test_full_offline_stage_rejects_incomplete_artifact_closure(self):
         with tempfile.TemporaryDirectory() as tmp:

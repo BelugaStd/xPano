@@ -1339,3 +1339,26 @@ Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnos
 - [x] Cancellation: stop current and continue, or stop the whole queue; no automatic retry; app-close recovery is explicit.
 - [x] Valid stage combinations are strict prefixes: media, media+reconstruction, or media+reconstruction+training.
 - [x] No product code or package was changed in this research phase.
+
+---
+
+# Phase 69: Full Offline Densification Installer
+
+## Goal
+
+Build and validate a Windows x64 NSIS installer that embeds the existing offline CPU/CUDA densification artifacts, without modifying the user's pending batch-mode source changes.
+
+## Plan
+
+- [x] Verify the installer path supports `-FullOffline` and locate the complete 5.007 GB artifact cache.
+- [x] Confirm disk capacity and required application runtime inputs.
+- [x] Attempt the full-offline NSIS development installer; NSIS 3.12 failed on the 3.224 GB CUDA wheel memory map.
+- [x] Build a 7-Zip SFX full-offline installer from the same validated payload.
+- [x] Verify the generated installer contains the runtime manifest, artifact cache, LFS runtime and essential binaries.
+- [x] Produce hashes and record the version/source relationship for release handoff.
+
+## Decision
+
+Use the existing application version `2.0.1-4kfix` because the package metadata has not been updated for the pending batch-mode changes. The release artifact will be explicitly named `full-offline-sfx-unsigned-dev`; it must not be represented as a signed NSIS production release.
+
+**Status:** complete. The validated 7-Zip SFX installer is ready for manual installation testing. No source commit, tag, or GitHub upload was performed.

@@ -24,6 +24,7 @@ import { useProject } from '../../app/useProject'
 import { ThemeControls } from '../../components/layout/ThemeControls'
 import { WindowControls } from '../../components/layout/WindowControls'
 import { RuntimeReadinessBadge } from '../../components/layout/RuntimeReadinessBadge'
+import { BrandAboutButton } from '../../components/layout/BrandAboutButton'
 import { ConfirmDialog } from '../../components/shared/ConfirmDialog'
 import type { JobEvent } from '../../lib/contracts'
 import type { ResolvedTheme, ThemeMode } from '../../lib/types'
@@ -177,8 +178,7 @@ export function BatchShell({ themeMode, resolvedTheme, onThemeModeChange }: Prop
     <div className="app-shell relative z-10 h-screen min-h-[720px] min-w-[1024px] overflow-hidden text-ink">
       <header className="liquid-topbar app-titlebar drag-region flex min-w-0 items-center justify-between px-3.5">
         <div className="flex items-center gap-2.5">
-          <img src="/icon.png" alt="xPano" className="h-6 w-6 rounded-subtle" />
-          <span className="text-[13px] font-semibold">xPano</span>
+          <BrandAboutButton />
           <span className="titlebar-section-divider" />
           <span className="text-[11px] font-medium text-muted">批量任务</span>
         </div>
