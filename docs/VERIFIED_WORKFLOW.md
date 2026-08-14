@@ -30,8 +30,8 @@ The panorama backbone stage must match the README/screenshot workflow:
 1. Extract each sampled video time into a folder containing the left and right fisheye JPEGs.
 2. Import each frame folder as one Metashape camera group.
 3. Set every group type to `Station` before matching and alignment.
-4. Set every sensor to `Metashape.Sensor.Type.Fisheye`.
-   In the Metashape UI this corresponds to the equidistant fisheye camera type used by the screenshots.
+4. Set every sensor to `Metashape.Sensor.Type.EquidistantFisheye` when supported, with `Fisheye` only as an older-version fallback.
+   Copy the calibration imported from the source image before applying the projection type and fixed parameters.
 5. Set sensor pixel size to `0.0024` mm and focal length to `2.5` mm.
 6. Set initial `b1`, `b2`, and `k4` to `0`.
 7. Fix exactly `["B1", "B2", "K4"]`.
@@ -42,7 +42,7 @@ The panorama backbone stage must match the README/screenshot workflow:
    - `reference_preselection=False`
    - `filter_stationary_points=False`
    - `guided_matching=False`
-   - `keep_keypoints=False`
+   - `keep_keypoints=True`
    - `reset_matches=False`
    - `keypoint_limit=40000`
    - `tiepoint_limit=0`
@@ -57,21 +57,13 @@ The panorama backbone stage must match the README/screenshot workflow:
 For mixed panorama + ordinary/video/photo projects, the GUI defaults to the
 Metashape `backbone` strategy:
 
-1. Import panorama tracks and ordinary video/photo/aerial tracks as clean
-   `Frame` sensors before matching.
-2. Set panorama groups to `Station` and match the fresh chunk exactly once,
-   with generic visual preselection and without storing keypoints for another
-   match. The workflow must not synthesize temporal or frame-index pairs.
-3. Temporarily disable Frame cameras and register only panorama cameras to
-   establish the Station-constrained backbone, then optimize it while retaining
-   the Station constraint. Restore each Frame camera's original
-   enabled state before its incremental alignment.
-4. Register only the newly imported Frame cameras from the already-created
-   visual overlaps.
+1. Import only panorama tracks, set their groups to `Station`, and visually match with retained keypoints.
+2. Align the panorama cameras, restore their groups to `Folder`, and optimize the panorama solution.
+3. Import ordinary video/photo/aerial tracks as `Frame` sensors.
+4. Match again with retained keypoints, then call incremental alignment without resetting the solved panorama cameras.
 5. Run a final conservative global optimization.
 
-The legacy one-stage mixed workflow is still available through
-`--metashape-alignment-mode mixed` or the GUI advanced strategy selector.
+Legacy `mixed` configuration values are accepted for compatibility and normalized to this staged workflow.
 
 ## Do Not Regress
 
@@ -79,7 +71,7 @@ The legacy one-stage mixed workflow is still available through
 - Do not use `Frame` camera type for `.osv` / `.insv` dual-fisheye input.
 - Do not use lowercase fixed parameter names.
 - Do not enable `filter_stationary_points` in the verified workflow.
-- Keep dual-fisheye panorama groups as `Station` through panorama and final global optimization/export.
+- Restore dual-fisheye panorama groups to `Folder` after the panorama solve, before optimization and Frame import.
 
 ## GUI Production Behavior
 

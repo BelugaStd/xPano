@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Check, ChevronLeft, ChevronRight, ImageOff, Images, Save, Scissors } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, ImageOff, Images, Save, Scissors, X } from 'lucide-react'
 import { VideoTrimmer } from '../../components/pipeline/VideoTrimmer'
 import type { ProjectMediaItem, ProjectTrack, TrackSettingsPatch } from '../../lib/contracts'
 import { assetSource } from '../../lib/assetSource'
 import { joinDisplayPath } from '../../lib/paths'
 import { framesPerSecondForLimit } from '../../lib/extractionRate'
 import { PhotoFolderPreview } from './PhotoFolderPreview'
+import { ColorLutField } from './ColorLutField'
+import { builtinColorLutPresetForSource, isStyleLutSupported } from './colorLut'
 
 interface TrackEditorProps {
   track: ProjectTrack | null
@@ -13,6 +15,8 @@ interface TrackEditorProps {
   onSave: (trackId: string, patch: TrackSettingsPatch) => Promise<boolean>
   onSelection: (trackId: string, itemIds: string[], selected: boolean) => Promise<boolean>
   selectionDisabled?: boolean
+  settingsDisabled?: boolean
+  settingsDisabledReason?: string
 }
 
 const PAGE_SIZE = 120
@@ -71,18 +75,24 @@ function ItemGrid({ track, projectRoot, onSelection, selectionDisabled }: Pick<T
   )
 }
 
-export function TrackEditor({ track, projectRoot, onSave, onSelection, selectionDisabled = false }: TrackEditorProps) {
+export function TrackEditor({ track, projectRoot, onSave, onSelection, selectionDisabled = false, settingsDisabled = false, settingsDisabledReason }: TrackEditorProps) {
   const [trim, setTrim] = useState<{ start: number; end: number } | null>(track?.trim ?? null)
   const [framesPerSecond, setFramesPerSecond] = useState(track?.extraction.framesPerSecond ?? 1)
   const [frameLimit, setFrameLimit] = useState(track?.extraction.frameLimit ?? 0)
+  const [styleLutPath, setStyleLutPath] = useState<string | null>(track?.extraction.styleLutPath ?? null)
+  const [colorLutPreset, setColorLutPreset] = useState<string | null>(track?.extraction.colorLutPreset ?? null)
   const [cameraProfile, setCameraProfile] = useState<'wide' | 'standard'>(track?.cameraProfile === 'standard' ? 'standard' : 'wide')
   const [saving, setSaving] = useState(false)
+  const [editingExisting, setEditingExisting] = useState(false)
 
   useEffect(() => {
     setTrim(track?.trim ?? null)
     setFramesPerSecond(track?.extraction.framesPerSecond ?? 1)
     setFrameLimit(track?.extraction.frameLimit ?? 0)
+    setStyleLutPath(track?.extraction.styleLutPath ?? null)
+    setColorLutPreset(track?.extraction.colorLutPreset ?? null)
     setCameraProfile(track?.cameraProfile === 'standard' ? 'standard' : 'wide')
+    setEditingExisting(false)
   }, [track])
 
   if (!track) {
@@ -93,26 +103,52 @@ export function TrackEditor({ track, projectRoot, onSave, onSelection, selection
     )
   }
 
-  if (track.items.length > 0) {
+  const video = track.type === 'panoramic_video' || track.type === 'ordinary_video'
+  const styleSupported = isStyleLutSupported(track.type)
+  const cancelEditing = () => {
+    setTrim(track.trim)
+    setFramesPerSecond(track.extraction.framesPerSecond)
+    setFrameLimit(track.extraction.frameLimit)
+    setStyleLutPath(track.extraction.styleLutPath ?? null)
+    setColorLutPreset(track.extraction.colorLutPreset ?? null)
+    setCameraProfile(track.cameraProfile === 'standard' ? 'standard' : 'wide')
+    setEditingExisting(false)
+  }
+
+  if (settingsDisabled) {
     return (
       <section className="liquid-panel flex min-h-0 flex-col overflow-hidden p-0">
         <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--xp-line)] px-4">
           <div className="min-w-0"><h2 className="truncate text-[13px] font-semibold text-ink">{track.label}</h2><p className="truncate font-mono text-[10px] text-muted">{track.sourcePath}</p></div>
-          <button type="button" className="glass-control motion-press flex h-8 items-center gap-1.5 rounded-comfortable px-3 text-[11px] font-medium text-muted hover:text-brand"><Scissors className="h-3.5 w-3.5" /> 修改抽帧范围</button>
+          <span className="rounded-full bg-warning/10 px-2 py-1 text-[10px] text-warning" title={settingsDisabledReason}>参数已锁定</span>
+        </header>
+        {track.items.length > 0
+          ? <ItemGrid track={track} projectRoot={projectRoot} onSelection={onSelection} selectionDisabled />
+          : <div className="grid min-h-0 flex-1 place-items-center px-6 text-center text-[11px] leading-5 text-muted">{settingsDisabledReason || '该任务的素材参数已锁定'}</div>}
+      </section>
+    )
+  }
+
+  if (track.items.length > 0 && !editingExisting) {
+    return (
+      <section className="liquid-panel flex min-h-0 flex-col overflow-hidden p-0">
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--xp-line)] px-4">
+          <div className="min-w-0"><h2 className="truncate text-[13px] font-semibold text-ink">{track.label}</h2><p className="truncate font-mono text-[10px] text-muted">{track.sourcePath}</p></div>
+          {styleSupported && <button type="button" onClick={() => setEditingExisting(true)} className="glass-control motion-press flex h-8 items-center gap-1.5 rounded-comfortable px-3 text-[11px] font-medium text-muted hover:text-brand"><Scissors className="h-3.5 w-3.5" /> 修改素材设置</button>}
         </header>
         <ItemGrid track={track} projectRoot={projectRoot} onSelection={onSelection} selectionDisabled={selectionDisabled} />
       </section>
     )
   }
 
-  const video = track.type === 'panoramic_video' || track.type === 'ordinary_video'
   const save = async () => {
     setSaving(true)
-    await onSave(track.id, {
-      ...(video ? { trim, extraction: { framesPerSecond, frameLimit } } : {}),
+    const saved = await onSave(track.id, {
+      ...(styleSupported ? { trim, extraction: { framesPerSecond, frameLimit, styleLutPath, colorLutPreset } } : {}),
       ...(track.type === 'ordinary_video' ? { cameraProfile } : {}),
     })
     setSaving(false)
+    if (saved) setEditingExisting(false)
   }
 
   return (
@@ -135,13 +171,34 @@ export function TrackEditor({ track, projectRoot, onSave, onSelection, selection
               if (next > 0 && trim) setFramesPerSecond(framesPerSecondForLimit(trim.end - trim.start, next, framesPerSecond))
             }} className="theme-input mt-1.5 h-10 w-full rounded-comfortable border px-3 font-mono text-[12px] text-ink outline-none" /></label>
           </div>
+          {builtinColorLutPresetForSource(track.type, track.sourcePath) && (
+            <ColorLutField
+              value={null}
+              preset={colorLutPreset}
+              builtinPreset={builtinColorLutPresetForSource(track.type, track.sourcePath)}
+              onChange={() => {}}
+              onPresetChange={setColorLutPreset}
+              disabled={saving}
+            />
+          )}
+          <ColorLutField value={styleLutPath} onChange={setStyleLutPath} disabled={saving} />
           {track.type === 'ordinary_video' && (
             <div><p className="mb-2 text-[11px] font-medium text-muted">初始相机视角</p><div className="grid grid-cols-2 gap-2">{(['wide', 'standard'] as const).map((profile) => <button key={profile} type="button" onClick={() => setCameraProfile(profile)} className={`motion-press h-10 rounded-comfortable border text-[12px] font-medium ${cameraProfile === profile ? 'border-brand bg-brand text-white' : 'border-[var(--xp-line)] text-muted hover:text-ink'}`}>{profile === 'wide' ? '广角视角' : '标准视角'}</button>)}</div></div>
           )}
-          <div className="flex justify-end"><button type="button" onClick={save} disabled={saving} className="glass-control motion-press flex h-9 items-center gap-2 rounded-comfortable px-4 text-[12px] font-medium text-ink/75 hover:text-brand disabled:opacity-45"><Save className="h-3.5 w-3.5" /> {saving ? '保存中' : '保存参数'}</button></div>
+          <div className="flex justify-end gap-2">
+            {editingExisting && <button type="button" onClick={cancelEditing} disabled={saving} className="glass-control motion-press flex h-9 items-center gap-2 rounded-comfortable px-4 text-[12px] font-medium text-muted hover:text-ink disabled:opacity-45"><X className="h-3.5 w-3.5" /> 取消</button>}
+            <button type="button" onClick={save} disabled={saving} className="glass-control motion-press flex h-9 items-center gap-2 rounded-comfortable px-4 text-[12px] font-medium text-ink/75 hover:text-brand disabled:opacity-45"><Save className="h-3.5 w-3.5" /> {saving ? '保存中' : '保存参数'}</button>
+          </div>
         </div>
       ) : (
-        <PhotoFolderPreview path={track.sourcePath} />
+        <div className="space-y-4">
+          <PhotoFolderPreview path={track.sourcePath} />
+          <ColorLutField value={styleLutPath} onChange={setStyleLutPath} disabled={saving} />
+          <div className="flex justify-end gap-2">
+            {editingExisting && <button type="button" onClick={cancelEditing} disabled={saving} className="glass-control motion-press flex h-9 items-center gap-2 rounded-comfortable px-4 text-[12px] font-medium text-muted hover:text-ink disabled:opacity-45"><X className="h-3.5 w-3.5" /> 取消</button>}
+            <button type="button" onClick={save} disabled={saving} className="glass-control motion-press flex h-9 items-center gap-2 rounded-comfortable px-4 text-[12px] font-medium text-ink/75 hover:text-brand disabled:opacity-45"><Save className="h-3.5 w-3.5" /> {saving ? '保存中' : '保存参数'}</button>
+          </div>
+        </div>
       )}
     </section>
   )

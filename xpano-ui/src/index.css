@@ -2,6 +2,20 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .batch-task-row { min-height: 78px; transition: background-color var(--xp-motion-fast) ease; }
+  .batch-task-row:hover { background: rgb(var(--xp-ink-rgb) / 0.025); }
+  .batch-task-row.is-running { background: rgb(var(--xp-brand-rgb) / 0.045); box-shadow: inset 3px 0 0 rgb(var(--xp-brand-rgb) / 0.72); }
+  .batch-stage-dot { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; color: rgb(var(--xp-muted-rgb) / 0.8); background: rgb(var(--xp-ink-rgb) / 0.06); }
+  .batch-stage-dot.active { color: var(--xp-brand); background: rgb(var(--xp-brand-rgb) / 0.12); }
+  .batch-stage-dot.done { color: var(--xp-success); background: rgb(var(--xp-success-rgb) / 0.12); }
+  .batch-stage-dot.error { color: var(--xp-danger); background: rgb(var(--xp-danger-rgb) / 0.12); }
+  .batch-status-pill { display: inline-flex; align-items: center; justify-content: center; min-width: 54px; height: 22px; padding: 0 8px; border-radius: 999px; font-size: 10px; font-weight: 600; background: rgb(var(--xp-ink-rgb) / 0.06); color: var(--xp-muted); }
+  .batch-status-pill.state-running { color: var(--xp-brand); background: rgb(var(--xp-brand-rgb) / 0.12); }
+  .batch-status-pill.state-completed { color: var(--xp-success); background: rgb(var(--xp-success-rgb) / 0.12); }
+  .batch-status-pill.state-failed { color: var(--xp-danger); background: rgb(var(--xp-danger-rgb) / 0.12); }
+}
+
 /* ============================================================
    xPano Design System — 知天下品牌色系
    浅色 = 知天下主站风格 / 深色 = 知天下三维观测模式
@@ -592,6 +606,15 @@ html.theme-is-switching::before {
   border-radius: 10px;
 }
 
+.app-bottom-dock.batch-bottom-dock {
+  grid-template-columns: minmax(0, 1fr);
+  padding-inline: 12px;
+}
+
+.batch-bottom-dock .global-job-bar {
+  grid-template-columns: minmax(210px, 1.3fr) minmax(150px, 240px) auto auto;
+}
+
 .titlebar-section-divider,
 .bottom-dock-divider {
   display: block;
@@ -781,6 +804,44 @@ html.theme-is-switching::before {
 
 .liquid-panel {
   border-radius: 14px;
+}
+
+.liquid-panel.batch-task-editor-panel {
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.batch-editor-workspace > .batch-task-editor-panel {
+  height: auto;
+  min-height: 100%;
+}
+
+.batch-task-editor-panel .glass-inset {
+  border-color: color-mix(in srgb, var(--xp-line-muted) 72%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--xp-highlight) 32%, transparent);
+}
+
+.batch-task-editor-panel .batch-form-control {
+  box-sizing: border-box;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 11px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.batch-task-editor-panel select.batch-form-control {
+  padding-right: 30px;
+}
+
+.batch-task-editor-panel label > span:first-child {
+  display: block;
+  line-height: 14px;
+}
+
+.batch-task-editor-panel .batch-stage-toggle > span:nth-child(2) {
+  overflow: hidden;
 }
 
 .liquid-card {

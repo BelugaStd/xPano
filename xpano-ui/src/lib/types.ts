@@ -10,8 +10,8 @@ export interface MaterialTrack {
   path: string
   /** Optional time window (seconds) for video trimming. */
   trim?: { start: number; end: number }
-  /** Per-video extraction settings. */
-  extract?: { framesPerSecond: number; frameLimit: number }
+  /** Per-track preparation settings. */
+  extract?: { framesPerSecond: number; frameLimit: number; styleLutPath?: string | null; colorLutPreset?: string | null }
   /** Ordinary-video view preset used to initialize flat camera intrinsics. */
   cameraProfile?: CameraProfile
   /** Counts restored from an existing xPano manifest. */
@@ -60,6 +60,7 @@ export interface ProjectRunOptions {
 export type PipelinePhase = 'idle' | 'extract' | 'align' | 'export' | 'train' | 'complete' | 'error'
 
 export interface PipelineProgress {
+  projectRoot?: string | null; jobId?: string | null; taskId?: string | null
   phase: PipelinePhase; stage?: string; trackId?: string
   percent: number; message: string; elapsed: number
   phasePercents: { extract: number; align: number; export: number }
@@ -69,8 +70,8 @@ export interface PipelineProgress {
   heartbeat?: boolean
 }
 
-export interface PipelineComplete { outputPath: string; jobKind?: 'media' | 'reconstruction' | 'training' }
-export interface PipelineError { error: string; jobKind?: 'media' | 'reconstruction' | 'training' }
+export interface PipelineComplete { outputPath: string; jobKind?: 'media' | 'reconstruction' | 'training'; projectRoot?: string | null; jobId?: string | null; taskId?: string | null }
+export interface PipelineError { error: string; jobKind?: 'media' | 'reconstruction' | 'training'; projectRoot?: string | null; jobId?: string | null; taskId?: string | null }
 
 export interface PointCloudData {
   points: Float32Array; colors: Float32Array; numPoints: number; cameras: CameraPose[]

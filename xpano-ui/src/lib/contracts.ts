@@ -51,6 +51,13 @@ export interface SourceFingerprint {
   mtimeNs: number
 }
 
+export interface ExtractionSettings {
+  framesPerSecond: number
+  frameLimit: number
+  styleLutPath?: string | null
+  colorLutPreset?: string | null
+}
+
 export interface ProjectMediaItem {
   id: string
   timestamp?: number | null
@@ -71,7 +78,7 @@ export interface ProjectTrack {
   sourceFingerprint: SourceFingerprint
   cameraProfile: 'standard' | 'wide' | null
   trim: { start: number; end: number } | null
-  extraction: { framesPerSecond: number; frameLimit: number }
+  extraction: ExtractionSettings
   status: ProjectTrackStatus
   items: ProjectMediaItem[]
 }
@@ -126,6 +133,8 @@ export interface GeometryState {
 
 export interface JobSnapshot {
   jobId: string
+  projectRoot?: string | null
+  taskId?: string | null
   workspace: ProjectWorkspace
   state: JobState
   stageId: string | null
@@ -170,7 +179,9 @@ export interface JobEvent {
   sequence: number
   timestamp: string
   projectId: string
+  projectRoot?: string | null
   jobId: string
+  taskId?: string | null
   workspace: ProjectWorkspace
   kind: JobEventKind
   stageId: string | null
@@ -228,12 +239,12 @@ export interface MediaImportDraftInput {
   sourcePath: string
   cameraProfile: 'standard' | 'wide' | null
   trim: { start: number; end: number } | null
-  extraction: { framesPerSecond: number; frameLimit: number }
+  extraction: ExtractionSettings
 }
 
 export interface TrackSettingsPatch {
   trim?: { start: number; end: number } | null
-  extraction?: { framesPerSecond: number; frameLimit: number }
+  extraction?: ExtractionSettings
   cameraProfile?: 'standard' | 'wide' | null
 }
 

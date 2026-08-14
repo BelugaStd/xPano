@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 import warnings
+from contextlib import nullcontext
 from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,8 @@ if str(APP_ROOT) not in sys.path:
 from PIL import Image, ImageOps
 
 from scripts import xpano_tracks
+from scripts.xpano_extract import apply_style_lut_to_image, prepare_lut_chain
+from scripts.xpano_lut_presets import resolve_lut_paths
 from scripts.xpano_tracks import (
     build_ordinary_video_track,
     build_panorama_track,
@@ -125,7 +128,8 @@ def stage_photo_item(project_root, track_id, source, index, selected=True):
     item_id = f"photo_{index:05d}"
     staged = project_root / "work" / "media" / track_id / f"{item_id}{extension}"
     thumbnail = project_root / "work" / "thumbnails" / track_id / f"{item_id}.jpg"
-    _stage_source(source, staged)
+    if source != staged:
+        _stage_source(source, staged)
     _write_thumbnail(staged, thumbnail)
     return {
         "id": item_id,
@@ -260,6 +264,7 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
         trim = track.get("trim") or {}
         frames_per_second = _frames_per_second(extraction)
         frame_limit = int(extraction.get("frameLimit") or 0)
+        lut_paths = resolve_lut_paths(APP_ROOT, extraction, track_type, source)
         start_time = float(trim.get("start") or 0.0)
         end_time = float(trim.get("end") or 0.0)
         base_fraction = target_index / total_tracks
@@ -298,6 +303,8 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
                 preview_cb=preview_pair,
                 progress_cb=progress,
                 log_cb=emit_line,
+                restoration_lut_path=str(lut_paths.restoration) if lut_paths.restoration else None,
+                style_lut_path=str(lut_paths.style) if lut_paths.style else None,
             )
             source_items = manifest_track["frames"]
             old_selection = {item["id"]: item.get("selected", True) for item in track.get("items", [])}
@@ -329,6 +336,7 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
                 progress_cb=progress,
                 log_cb=emit_line,
                 camera_profile=track.get("cameraProfile") or "wide",
+                style_lut_path=str(lut_paths.style) if lut_paths.style else None,
             )
             source_items = manifest_track["photos"]
             old_selection = {item["id"]: item.get("selected", True) for item in track.get("items", [])}
@@ -355,24 +363,36 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
             )
             old_selection = {item["id"]: item.get("selected", True) for item in track.get("items", [])}
             items = []
+            manifest_photos = []
             sensor_label = f"{make_track_id(legacy_index, track['label'])}_frame"
             sensor_groups = {}
-            for index, image_path in enumerate(source_items, 1):
-                item_id = f"photo_{index:05d}"
-                identity = xpano_tracks.read_photo_identity(image_path)
-                _append_photo_sensor(sensor_groups, sensor_label, image_path, identity)
-                items.append(
-                    stage_photo_item(
-                        project_root,
-                        track_id,
-                        image_path,
-                        index,
-                        old_selection.get(item_id, True),
+            photo_lut_context = (
+                prepare_lut_chain(style_lut_path=str(lut_paths.style))
+                if lut_paths.style
+                else nullcontext(None)
+            )
+            with photo_lut_context as prepared_luts:
+                for index, source_path in enumerate(source_items, 1):
+                    item_id = f"photo_{index:05d}"
+                    image_path = source_path
+                    if prepared_luts:
+                        image_path = project_root / "work" / "media" / track_id / f"{item_id}.jpg"
+                        apply_style_lut_to_image(source_path, image_path, prepared_luts)
+                    manifest_photos.append(image_path)
+                    identity = xpano_tracks.read_photo_identity(image_path)
+                    _append_photo_sensor(sensor_groups, sensor_label, image_path, identity)
+                    items.append(
+                        stage_photo_item(
+                            project_root,
+                            track_id,
+                            image_path,
+                            index,
+                            old_selection.get(item_id, True),
+                        )
                     )
-                )
-                emit_media_item(track_id, items[-1])
-                fraction = (target_index + index / max(1, len(source_items))) / total_tracks
-                emit_event(fraction * 100, f"正在索引 {track['label']} {index}/{len(source_items)}", "media.thumbnail", track_id, index, len(source_items), _eta_seconds(started, fraction))
+                    emit_media_item(track_id, items[-1])
+                    fraction = (target_index + index / max(1, len(source_items))) / total_tracks
+                    emit_event(fraction * 100, f"正在索引 {track['label']} {index}/{len(source_items)}", "media.thumbnail", track_id, index, len(source_items), _eta_seconds(started, fraction))
             manifest_track_id = make_track_id(legacy_index, track["label"])
             manifest_track = {
                 "track_id": manifest_track_id,
@@ -384,7 +404,7 @@ def prepare_project(project_root, expected_revision, target_track_ids=None):
                 "group_label": f"{manifest_track_id}_photos",
                 "sensor_label": sensor_label,
                 "photo_sensors": list(sensor_groups.values()),
-                "photos": [str(path) for path in source_items],
+                "photos": [str(path) for path in manifest_photos],
                 "photo_count_total": len(all_photos),
                 "photo_count_selected": len(source_items),
             }

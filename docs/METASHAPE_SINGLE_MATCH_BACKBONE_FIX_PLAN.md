@@ -1,5 +1,7 @@
 # Metashape mixed-resolution backbone stability plan
 
+> Superseded on 2026-07-17. Runtime evidence showed that this proposed single-pass strategy regressed alignment quality versus xPano 0.1.0. The implemented contract is now the restored panorama-first, retained-keypoint, incremental Frame workflow documented in `VERIFIED_WORKFLOW.md`.
+
 ## 1. Purpose and delivery boundary
 
 This plan repairs the Metashape native assertion reported on build 22170 when a project combines a panorama-video backbone with roughly 4,600 flat photos. The failure occurs after feature detection, inside the second `Chunk.matchPhotos` call, with an assertion containing both image sizes (`2880 2880 6000 4000`).

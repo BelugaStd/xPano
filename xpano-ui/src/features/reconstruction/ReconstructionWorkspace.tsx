@@ -4,6 +4,8 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { useNavigate } from 'react-router-dom'
 import { FolderOpen, Images } from 'lucide-react'
 import { useProject } from '../../app/useProject'
+import { useBatch } from '../../app/useBatch'
+import { useBatchTaskLock } from '../batch/useBatchTaskLock'
 import { useJob } from '../../app/useJob'
 import { ToastContainer } from '../../components/shared/Toast'
 import { useToast } from '../../hooks/useToast'
@@ -13,11 +15,13 @@ import { evaluateMediaReadiness } from '../../lib/mediaReadiness'
 import { joinDisplayPath, normalizeDisplayPath } from '../../lib/paths'
 import { commandErrorMessage } from '../../lib/commandError'
 import { BackendSettings } from './BackendSettings'
+import { ComponentSelectionDialog } from './ComponentSelectionDialog'
 import { ExecutionGraph } from './ExecutionGraph'
 import { ReconstructionMonitor } from './ReconstructionMonitor'
 import { ReconstructionSetupDialog } from './ReconstructionSetupDialog'
 import { shouldAutoOpenResults } from './reconstructionCompletion'
 import { psxReexportAvailability } from './reconstructionReexport'
+import { prepareComponentSelection, type ComponentInspection, type ComponentSelectionDecision } from './reconstructionComponents'
 import { configFromProject, defaultReconstructionConfig, normalizeExecutablePath, persistedReconstructionConfig, type BackendProbe, type ReconstructionConfigDraft } from './reconstructionTypes'
 
 function isTauriRuntime() {
@@ -79,15 +83,17 @@ function devPreviewPlan(projectId: string, inputRevision: number): ExecutionPlan
     ['input.validate', '校验输入', 'counted', false],
     ['metashape.project.create', '创建 Metashape 工程', 'indeterminate', false],
     ['metashape.pano.import', '导入全景双鱼眼与站点', 'counted', false],
-    ['metashape.frame.import', '导入普通帧与照片', 'counted', false],
     ['metashape.pano.station', '设置全景站点', 'counted', false],
-    ['metashape.all.match', '联合匹配全部素材', 'indeterminate', true],
+    ['metashape.pano.match', '匹配全景素材', 'indeterminate', true],
     ['metashape.pano.align', '求解全景骨架', 'indeterminate', true],
-    ['metashape.pano.release', '处理全景站点约束', 'counted', false],
+    ['metashape.pano.release', '释放全景站点以优化外参', 'counted', false],
     ['metashape.pano.optimize', '优化全景骨架', 'indeterminate', true],
-    ['metashape.frame.align', '增量求解平面相机', 'indeterminate', true],
+    ['metashape.frame.import', '导入普通帧与照片', 'counted', false],
+    ['metashape.frame.match', '匹配新增普通素材', 'indeterminate', true],
+    ['metashape.frame.align', '增量接入普通相机', 'indeterminate', true],
     ['metashape.all.optimize', '全局相机优化', 'indeterminate', true],
     ['metashape.project.save', '保存 Metashape 工程', 'indeterminate', false],
+    ['metashape.component.select', '检查并选择主 Component', 'counted', false],
     ['coordinate.auto_level', '自动校正地面方向', 'indeterminate', false],
     ['export.images', '导出训练图像', 'counted', false],
     ['export.colmap', '写出 COLMAP 模型', 'counted', false],
@@ -113,6 +119,9 @@ function devPreviewPlan(projectId: string, inputRevision: number): ExecutionPlan
 }
 
 export function ReconstructionWorkspace() {
+  const { queue: batchQueue } = useBatch()
+  const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
+  const { locked: taskInputLocked, reason: taskInputLockReason } = useBatchTaskLock()
   const navigate = useNavigate()
   const { project, projectRoot, saveReconstructionConfig } = useProject()
   const { running, progress, logs, start, cancel } = useJob()
@@ -123,7 +132,8 @@ export function ReconstructionWorkspace() {
   const [probes, setProbes] = useState<BackendProbe[]>([])
   const [showMonitor, setShowMonitor] = useState(false)
   const [wizardOpen, setWizardOpen] = useState(false)
-  const [selectedComponentKey, setSelectedComponentKey] = useState('')
+  const [inspectingComponents, setInspectingComponents] = useState(false)
+  const [componentSelection, setComponentSelection] = useState<ComponentSelectionDecision | null>(null)
   const projectIdRef = useRef('')
   const startedReconstructionRef = useRef(false)
 
@@ -138,6 +148,11 @@ export function ReconstructionWorkspace() {
   const currentPsx = Boolean(project && project.reconstruction.inputRevision === project.revisions.alignmentInput && project.reconstruction.projectPath)
   const alignmentReport = (project?.reconstruction.config.alignmentReport ?? null) as AlignmentReportSummary | null
   const alignmentComponents = Array.isArray(alignmentReport?.components) ? alignmentReport.components : []
+  const exportedComponentKey = typeof alignmentReport?.selectedComponentKey === 'string'
+    ? alignmentReport.selectedComponentKey
+    : typeof project?.reconstruction.config.selectedComponentKey === 'string'
+      ? project.reconstruction.config.selectedComponentKey
+      : ''
   const projectComplete = alignedProjectComplete && !dirty
   const reexportAvailability = psxReexportAvailability({
     backend: project?.reconstruction.backend ?? config.backend,
@@ -154,20 +169,10 @@ export function ReconstructionWorkspace() {
     projectIdRef.current = project.projectId
     const initial = configFromProject(project.reconstruction.backend, project.reconstruction.config)
     setConfig(initial)
-    setSelectedComponentKey(
-      typeof project.reconstruction.config.selectedComponentKey === 'string'
-        ? project.reconstruction.config.selectedComponentKey
-        : '',
-    )
+    setComponentSelection(null)
     const previewWizard = import.meta.env.DEV && new URLSearchParams(window.location.search).get('wizard') === '1'
     setWizardOpen(previewWizard || typeof project.reconstruction.config.alignmentMode !== 'string')
   }, [project])
-
-  useEffect(() => {
-    if (typeof alignmentReport?.selectedComponentKey === 'string') {
-      setSelectedComponentKey(alignmentReport.selectedComponentKey)
-    }
-  }, [alignmentReport?.selectedComponentKey])
 
   useEffect(() => {
     if (!project || running) return
@@ -280,7 +285,7 @@ export function ReconstructionWorkspace() {
     }
   }, [activeManifest, config, effectiveMetashapePath, plan, probes, project, projectRoot, saveReconstructionConfig, start, toast])
 
-  const reexportFromPsx = useCallback(async () => {
+  const startPsxReexport = useCallback(async (componentKey: string) => {
     if (!project || !projectRoot || !activeManifest || !project.reconstruction.projectPath) return
     if (!reexportAvailability.allowed) {
       toast.error(reexportAvailability.reason)
@@ -305,7 +310,7 @@ export function ReconstructionWorkspace() {
     startedReconstructionRef.current = true
     const started = await start(
       projectTracksToPipeline(project.tracks),
-      pipelineConfig(config, projectRoot, probes, selectedComponentKey || undefined),
+      pipelineConfig(config, projectRoot, probes, componentKey),
       {
         skipExtract: true,
         reexportOnly: true,
@@ -321,13 +326,48 @@ export function ReconstructionWorkspace() {
     if (started === false) {
       startedReconstructionRef.current = false
     } else {
-      toast.info('已启动 PSX 重新导出，不会重新匹配或对齐相机')
+      toast.info(`已启动 Component #${componentKey} 重新导出，不会重新匹配或对齐相机`)
     }
-  }, [activeManifest, config, effectiveMetashapePath, probes, project, projectRoot, reexportAvailability, selectedComponentKey, start, toast])
+  }, [activeManifest, config, effectiveMetashapePath, probes, project, projectRoot, reexportAvailability, start, toast])
 
-  const canStart = Boolean(project && projectRoot && plan && readiness.canContinue && selectedProbe?.available && !(config.backend === 'colmap' && hasFlatMedia) && !planError)
+  const reexportFromPsx = useCallback(async () => {
+    if (!project || !projectRoot || !activeManifest || !project.reconstruction.projectPath) return
+    if (!reexportAvailability.allowed) {
+      toast.error(reexportAvailability.reason)
+      return
+    }
+    setInspectingComponents(true)
+    try {
+      const inspection = await invoke<ComponentInspection>('inspect_metashape_components', {
+        projectRoot,
+        expectedRevision: project.revision,
+        metashapePath: effectiveMetashapePath,
+      })
+      const decision = prepareComponentSelection(inspection, exportedComponentKey)
+      if (decision.mode === 'direct') {
+        await startPsxReexport(decision.selectedComponentKey)
+      } else {
+        setComponentSelection(decision)
+      }
+    } catch (error) {
+      toast.error(`无法读取 PSX Component：${commandErrorMessage(error)}`)
+    } finally {
+      setInspectingComponents(false)
+    }
+  }, [activeManifest, effectiveMetashapePath, exportedComponentKey, project, projectRoot, reexportAvailability, startPsxReexport, toast])
+
+  const confirmComponentReexport = useCallback(async () => {
+    if (!componentSelection) return
+    const key = componentSelection.selectedComponentKey
+    setComponentSelection(null)
+    await startPsxReexport(key)
+  }, [componentSelection, startPsxReexport])
+
+  const canStart = Boolean(project && projectRoot && plan && readiness.canContinue && selectedProbe?.available && !(config.backend === 'colmap' && hasFlatMedia) && !planError && !batchActive && !taskInputLocked)
   let blockReason = planError || '正在生成执行流程'
-  if (!project) blockReason = '请先创建或打开 xPano 工程'
+  if (batchActive) blockReason = '批量队列正在运行，请先停止队列'
+  else if (taskInputLocked) blockReason = taskInputLockReason
+  else if (!project) blockReason = '请先创建或打开 xPano 工程'
   else if (!readiness.canContinue) blockReason = readiness.blockReason
   else if (config.backend === 'colmap' && hasFlatMedia) blockReason = 'COLMAP 混合素材流程尚未通过回归验证'
   else if (selectedProbe?.available === false) blockReason = `${config.backend === 'metashape' ? 'Metashape' : 'COLMAP'} 当前不可用`
@@ -346,15 +386,19 @@ export function ReconstructionWorkspace() {
 
   return (
     <>
-      <div className="reconstruction-workspace-grid grid h-full min-h-0 gap-2">
-        <BackendSettings config={config} probes={probes} tracks={project.tracks} running={running} dirty={dirty} onChange={setConfig} onBrowseMetashape={browseMetashape} onReconfigure={() => setWizardOpen(true)} onReset={() => setConfig(appliedConfig)} />
+      <div className="flex h-full min-h-0 flex-col gap-2">
+        {taskInputLocked && <div className="shrink-0 rounded-comfortable border border-warning/20 bg-warning/8 px-3 py-2 text-[10px] text-warning">{taskInputLockReason}</div>}
+        <div className="reconstruction-workspace-grid grid min-h-0 flex-1 gap-2">
+        <BackendSettings config={config} probes={probes} tracks={project.tracks} running={running || taskInputLocked} dirty={dirty} onChange={setConfig} onBrowseMetashape={browseMetashape} onReconfigure={() => setWizardOpen(true)} onReset={() => setConfig(appliedConfig)} />
         <ExecutionGraph plan={plan} error={planError} running={running} progress={progress} projectComplete={projectComplete} onToggleMonitor={() => setShowMonitor((value) => !value)} />
-        <ReconstructionMonitor plan={plan} progress={progress} logs={logs} running={running} canStart={canStart} blockReason={blockReason} showReexport={currentPsx && project.reconstruction.backend === 'metashape'} canReexport={reexportAvailability.allowed} reexportReason={reexportAvailability.reason} onStart={startReconstruction} onReexport={reexportFromPsx} onStop={cancel} onOpenOutput={openOutput} onOpenProject={openMetashapeProject} onViewResults={() => navigate('/project/results')} alignmentReport={alignmentReport} components={alignmentComponents} selectedComponentKey={selectedComponentKey} onSelectComponent={setSelectedComponentKey} />
+        <ReconstructionMonitor plan={plan} progress={progress} logs={logs} running={running} canStart={canStart} blockReason={blockReason} showReexport={currentPsx && project.reconstruction.backend === 'metashape'} canReexport={reexportAvailability.allowed} reexportBusy={inspectingComponents} reexportReason={reexportAvailability.reason} onStart={startReconstruction} onReexport={reexportFromPsx} onStop={cancel} onOpenOutput={openOutput} onOpenProject={openMetashapeProject} onViewResults={() => navigate('/project/results')} alignmentReport={alignmentReport} components={alignmentComponents} exportedComponentKey={exportedComponentKey} />
+        </div>
       </div>
 
-      {showMonitor && <div className="reconstruction-monitor-backdrop fixed inset-0 z-[115] bg-black/20 xl:hidden" onClick={() => setShowMonitor(false)}><div className="absolute bottom-[60px] right-2 top-[132px] w-[320px] max-w-[calc(100vw-16px)]" onClick={(event) => event.stopPropagation()}><ReconstructionMonitor overlay onClose={() => setShowMonitor(false)} plan={plan} progress={progress} logs={logs} running={running} canStart={canStart} blockReason={blockReason} showReexport={currentPsx && project.reconstruction.backend === 'metashape'} canReexport={reexportAvailability.allowed} reexportReason={reexportAvailability.reason} onStart={startReconstruction} onReexport={reexportFromPsx} onStop={cancel} onOpenOutput={openOutput} onOpenProject={openMetashapeProject} onViewResults={() => navigate('/project/results')} alignmentReport={alignmentReport} components={alignmentComponents} selectedComponentKey={selectedComponentKey} onSelectComponent={setSelectedComponentKey} /></div></div>}
+      {showMonitor && <div className="reconstruction-monitor-backdrop fixed inset-0 z-[115] bg-black/20 xl:hidden" onClick={() => setShowMonitor(false)}><div className="absolute bottom-[60px] right-2 top-[132px] w-[320px] max-w-[calc(100vw-16px)]" onClick={(event) => event.stopPropagation()}><ReconstructionMonitor overlay onClose={() => setShowMonitor(false)} plan={plan} progress={progress} logs={logs} running={running} canStart={canStart} blockReason={blockReason} showReexport={currentPsx && project.reconstruction.backend === 'metashape'} canReexport={reexportAvailability.allowed} reexportBusy={inspectingComponents} reexportReason={reexportAvailability.reason} onStart={startReconstruction} onReexport={reexportFromPsx} onStop={cancel} onOpenOutput={openOutput} onOpenProject={openMetashapeProject} onViewResults={() => navigate('/project/results')} alignmentReport={alignmentReport} components={alignmentComponents} exportedComponentKey={exportedComponentKey} /></div></div>}
 
-      <ReconstructionSetupDialog open={wizardOpen} config={config} probes={probes} tracks={project.tracks} projectRoot={projectRoot} onChange={setConfig} onBrowseMetashape={browseMetashape} onClose={() => setWizardOpen(false)} onStart={startReconstruction} />
+      <ReconstructionSetupDialog open={wizardOpen && !taskInputLocked} config={config} probes={probes} tracks={project.tracks} projectRoot={projectRoot} onChange={setConfig} onBrowseMetashape={browseMetashape} onClose={() => setWizardOpen(false)} onStart={startReconstruction} />
+      {componentSelection && <ComponentSelectionDialog inspection={componentSelection.inspection} currentExportedComponentKey={componentSelection.currentExportedComponentKey} selectedComponentKey={componentSelection.selectedComponentKey} onSelect={(selectedComponentKey) => setComponentSelection((current) => current ? { ...current, selectedComponentKey } : current)} onCancel={() => setComponentSelection(null)} onConfirm={confirmComponentReexport} />}
       <ToastContainer toasts={toasts} onRemove={removeToast} />
     </>
   )

@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { FolderOpen, Images, Box, ScanLine, ShieldCheck, ShieldQuestion, ShieldX, Sparkles } from 'lucide-react'
+import { ArrowLeft, FolderOpen, Images, Box, ScanLine, Sparkles } from 'lucide-react'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import gsap from 'gsap'
 import { ThemeControls } from '../components/layout/ThemeControls'
+import { BrandAboutButton } from '../components/layout/BrandAboutButton'
 import { WindowControls } from '../components/layout/WindowControls'
+import { RuntimeReadinessBadge } from '../components/layout/RuntimeReadinessBadge'
 import { JobBar } from '../features/jobs/JobBar'
 import { ResultsWorkspace } from '../features/results/ResultsWorkspace'
 import { normalizeDisplayPath } from '../lib/paths'
-import { runtimeReadinessPresentation, type RuntimeReadinessStatus } from '../lib/runtimeReadiness'
 import type { ProjectWorkspace } from '../lib/contracts'
 import type { ResolvedTheme, ThemeMode } from '../lib/types'
 import { useProject } from './useProject'
@@ -50,9 +51,9 @@ export function AppShell({ themeMode, resolvedTheme, onThemeModeChange }: AppShe
     queueDropPaths,
   } = useProject()
   const [nameDraft, setNameDraft] = useState(displayName)
-  const [environment, setEnvironment] = useState<RuntimeReadinessStatus | null>(null)
   const [resultsMounted, setResultsMounted] = useState(location.pathname === '/project/results')
   const resultsState = resultsWorkspaceState(resultsMounted, location.pathname)
+  const batchTaskId = new URLSearchParams(location.search).get('batchTask')
 
   useEffect(() => {
     if (resultsState.mounted && !resultsMounted) setResultsMounted(true)
@@ -68,16 +69,6 @@ export function AppShell({ themeMode, resolvedTheme, onThemeModeChange }: AppShe
     }, node)
     return () => context.revert()
   }, [location.pathname])
-
-  useEffect(() => {
-    if (!isTauriRuntime()) {
-      setEnvironment({ bundled: 'ready', metashape: 'ready', densification: 'downloadable', detail: '' })
-      return
-    }
-    invoke<RuntimeReadinessStatus>('probe_runtime_readiness')
-      .then(setEnvironment)
-      .catch((error) => setEnvironment({ bundled: 'corrupt', metashape: 'error', densification: 'downloadable', detail: String(error) }))
-  }, [])
 
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -118,7 +109,7 @@ export function AppShell({ themeMode, resolvedTheme, onThemeModeChange }: AppShe
   }
 
   const navigateWorkspace = async (workspace: ProjectWorkspace, path: string) => {
-    navigate(path)
+    navigate(batchTaskId ? `${path}?batchTask=${encodeURIComponent(batchTaskId)}` : path)
     await setWorkspace(workspace)
   }
 
@@ -131,13 +122,6 @@ export function AppShell({ themeMode, resolvedTheme, onThemeModeChange }: AppShe
     await renameProject(next)
   }
 
-  const presentation = environment ? runtimeReadinessPresentation(environment) : null
-  const environmentMeta = presentation?.tone === 'ready'
-    ? { label: presentation.label, icon: ShieldCheck, className: 'text-success' }
-    : presentation?.tone === 'error'
-      ? { label: presentation.label, icon: ShieldX, className: 'text-danger' }
-      : { label: presentation?.label || '环境检查中', icon: ShieldQuestion, className: 'text-warning' }
-  const EnvironmentIcon = environmentMeta.icon
   let projectStateLabel = '未打开工程'
   let projectStateClass = 'bg-ink/25'
   if (project) {
@@ -149,8 +133,7 @@ export function AppShell({ themeMode, resolvedTheme, onThemeModeChange }: AppShe
     <div className="app-shell relative z-10 h-screen min-h-[720px] min-w-[1024px] overflow-hidden text-ink">
       <header className="liquid-topbar app-titlebar drag-region flex min-w-0 items-center justify-between px-3.5">
         <div className="flex min-w-0 items-center gap-2.5">
-          <img src="/icon.png" alt="xPano" className="h-6 w-6 rounded-subtle" />
-          <span className="text-[13px] font-semibold text-ink">xPano</span>
+          <BrandAboutButton />
           <span className="titlebar-section-divider" />
           <div className="no-drag flex min-w-0 items-center gap-2" title={displayPath ? `${projectStateLabel} · ${displayPath}` : projectStateLabel}>
             <span className={`h-2 w-2 shrink-0 rounded-full ${projectStateClass}`} />
@@ -164,12 +147,19 @@ export function AppShell({ themeMode, resolvedTheme, onThemeModeChange }: AppShe
               aria-label="工程名称"
             />
           </div>
+          {batchTaskId && (
+            <button
+              type="button"
+              onClick={() => navigate('/batch')}
+              className="no-drag glass-control motion-press flex h-7 shrink-0 items-center gap-1 rounded-subtle px-2 text-[10px] text-muted hover:text-brand"
+            >
+              <ArrowLeft className="h-3 w-3" />
+              返回批量任务
+            </button>
+          )}
         </div>
         <div className="topbar-control-group no-drag flex shrink-0 items-center gap-1">
-          <span className={`titlebar-environment flex h-7 items-center gap-1.5 px-2 text-[10px] font-medium ${environmentMeta.className}`} title={environment?.detail || `${environmentMeta.label}；致密化环境${environment?.densification === 'ready' ? '已就绪' : '可按需下载'}`}>
-            <EnvironmentIcon className="h-3.5 w-3.5" />
-            <span className="hidden xl:inline">{environmentMeta.label}</span>
-          </span>
+          <RuntimeReadinessBadge />
           <button type="button" onClick={browseProject} className="glass-control motion-press flex h-8 shrink-0 items-center gap-1.5 rounded-comfortable px-3 text-[11px] font-medium text-ink/70 hover:text-brand">
             <FolderOpen className="h-3.5 w-3.5" /> 打开工程
           </button>

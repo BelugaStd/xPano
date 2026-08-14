@@ -10,10 +10,12 @@ from scripts.verify_xpano_output import verify_output
 
 
 MIXED_BACKBONE_STAGES = (
-    "metashape.all.match",
+    "metashape.pano.match",
     "metashape.pano.align",
     "metashape.pano.release",
     "metashape.pano.optimize",
+    "metashape.frame.import",
+    "metashape.frame.match",
     "metashape.frame.align",
     "metashape.all.optimize",
     "output.validate",
@@ -57,15 +59,15 @@ def verify_native_log(log_path):
             raise RuntimeError(f"Metashape native failure marker {marker!r} at {log_path}:{line_number}: {line}")
 
     match_calls = sum(line.lstrip().startswith("MatchPhotos:") for line in lines)
-    if match_calls != 1:
-        raise RuntimeError(f"Expected exactly one native MatchPhotos call, got {match_calls}: {log_path}")
+    if match_calls != 2:
+        raise RuntimeError(f"Expected exactly two native MatchPhotos calls, got {match_calls}: {log_path}")
 
     stages = read_pipeline_stages(log_path)
-    if stages.count("metashape.all.match") != 1:
-        raise RuntimeError(
-            "Expected exactly one metashape.all.match stage, "
-            f"got {stages.count('metashape.all.match')}: {log_path}"
-        )
+    for match_stage in ("metashape.pano.match", "metashape.frame.match"):
+        if stages.count(match_stage) != 1:
+            raise RuntimeError(
+                f"Expected exactly one {match_stage} stage, got {stages.count(match_stage)}: {log_path}"
+            )
     cursor = -1
     for required_stage in MIXED_BACKBONE_STAGES:
         try:

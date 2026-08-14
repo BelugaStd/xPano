@@ -1,12 +1,13 @@
 use crate::contracts::{
     ExtractionSettings, JobState, ProjectMediaItem, ProjectTrack, ProjectTrackStatus,
     ProjectTrackType, ProjectTrim, ProjectWorkspace, ReconstructionStatus, SourceFingerprint,
-    XpanoProjectV2,
+    XpanoProjectV2, DJI_OSMO_360_DLOGM_REC709_PRESET,
 };
 use crate::project::{
     read_project, touch_project, write_json_value_atomic, write_project_atomic, ProjectCommandError,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -15,6 +16,9 @@ use uuid::Uuid;
 
 const MEDIA_RESULT_RELATIVE_PATH: &str = "work/media_prepare_result.json";
 const MEDIA_JOB_RELATIVE_PATH: &str = "work/media_job.json";
+const DJI_OSMO_360_DLOGM_REC709_RELATIVE_PATH: &str = "luts/dji-osmo360-dlogm-rec709-v1.cube";
+const DJI_OSMO_360_DLOGM_REC709_SHA256: &str =
+    "b18162854ab47702068410c33afa98a8cb6eef159fc5a04ce0e65fad0fd8947e";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -136,6 +140,79 @@ fn is_photo_extension(extension: &str) -> bool {
     )
 }
 
+fn normalize_color_lut_settings(extraction: &mut ExtractionSettings) {
+    extraction.style_lut_path = extraction
+        .style_lut_path
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    extraction.color_lut_preset = extraction
+        .color_lut_preset
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+}
+
+fn validate_style_lut_file(extraction: &ExtractionSettings) -> Result<(), ProjectCommandError> {
+    let Some(value) = extraction.style_lut_path.as_deref() else {
+        return Ok(());
+    };
+    let path = Path::new(value);
+    if file_extension(path) != "cube" {
+        return Err(ProjectCommandError::new(
+            "invalid_media_type",
+            "style LUT must be a .cube file",
+        ));
+    }
+    if !path.is_file() {
+        return Err(ProjectCommandError::new(
+            "missing_source",
+            format!("style LUT does not exist or is not a file: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_builtin_color_lut_preset(preset: &str) -> Result<PathBuf, ProjectCommandError> {
+    if preset != DJI_OSMO_360_DLOGM_REC709_PRESET {
+        return Err(ProjectCommandError::new("invalid_media_type", "unknown color LUT preset"));
+    }
+    let path = crate::tool_resolver::resolve_resource_path(DJI_OSMO_360_DLOGM_REC709_RELATIVE_PATH);
+    let bytes = std::fs::read(&path).map_err(|error| {
+        ProjectCommandError::new(
+            "missing_source",
+            format!("bundled DJI color LUT is missing: {}", error),
+        )
+    })?;
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    if digest != DJI_OSMO_360_DLOGM_REC709_SHA256 {
+        return Err(ProjectCommandError::new(
+            "artifact_corrupt",
+            "bundled DJI color LUT checksum does not match",
+        ));
+    }
+    Ok(path)
+}
+
+fn validate_color_lut_settings(
+    track_type: ProjectTrackType,
+    source_path: &str,
+    extraction: &ExtractionSettings,
+) -> Result<(), ProjectCommandError> {
+    if let Some(preset) = extraction.color_lut_preset.as_deref() {
+        let is_osv_panorama = track_type == ProjectTrackType::PanoramicVideo
+            && file_extension(Path::new(source_path)) == "osv";
+        if !is_osv_panorama {
+            return Err(ProjectCommandError::new(
+                "invalid_media_type",
+                "bundled DJI color LUT is only valid for .osv panorama tracks",
+            ));
+        }
+        resolve_builtin_color_lut_preset(preset)?;
+    }
+    validate_style_lut_file(extraction)
+}
+
 fn source_fingerprint(path: &Path) -> Result<SourceFingerprint, ProjectCommandError> {
     let metadata = std::fs::metadata(path).map_err(|error| {
         ProjectCommandError::new(
@@ -210,6 +287,7 @@ fn validate_import_draft(draft: &MediaImportDraft) -> Result<(), ProjectCommandE
             "frames per second must be greater than zero",
         ));
     }
+    validate_color_lut_settings(draft.track_type, &draft.source_path, &draft.extraction)?;
     Ok(())
 }
 
@@ -535,7 +613,7 @@ fn refresh_alignment_manifest(
 pub fn commit_import_impl(
     project_root: &Path,
     expected_revision: u64,
-    drafts: Vec<MediaImportDraft>,
+    mut drafts: Vec<MediaImportDraft>,
 ) -> Result<XpanoProjectV2, ProjectCommandError> {
     if drafts.is_empty() {
         return Err(ProjectCommandError::new(
@@ -543,7 +621,8 @@ pub fn commit_import_impl(
             "at least one media draft is required",
         ));
     }
-    for draft in &drafts {
+    for draft in &mut drafts {
+        normalize_color_lut_settings(&mut draft.extraction);
         validate_import_draft(draft)?;
     }
     let mut project = read_project(project_root)?;
@@ -613,7 +692,9 @@ pub fn update_track_settings_impl(
             media_changed = true;
         }
     }
-    if let Some(extraction) = patch.extraction {
+    if let Some(mut extraction) = patch.extraction {
+        normalize_color_lut_settings(&mut extraction);
+        validate_color_lut_settings(track.track_type, &track.source_path, &extraction)?;
         if track.extraction != extraction {
             track.extraction = extraction;
             media_changed = true;
@@ -980,6 +1061,13 @@ fn begin_media_job_impl(
             "one or more requested media tracks were not found",
         ));
     }
+    for track in project
+        .tracks
+        .iter()
+        .filter(|track| requested.contains(track.id.as_str()))
+    {
+        validate_color_lut_settings(track.track_type, &track.source_path, &track.extraction)?;
+    }
 
     let marker = MediaJobMarker {
         schema_version: 1,
@@ -1103,6 +1191,18 @@ pub fn start_media_job(
     expected_revision: u64,
     target_track_ids: Vec<String>,
 ) -> Result<XpanoProjectV2, ProjectCommandError> {
+    crate::batch::ensure_manual_startable(&app, state.inner())?;
+    start_media_job_blocking(&app, state.inner(), project_root, expected_revision, target_track_ids, None)
+}
+
+pub(crate) fn start_media_job_blocking(
+    app: &AppHandle,
+    state: &crate::AppState,
+    project_root: String,
+    expected_revision: u64,
+    target_track_ids: Vec<String>,
+    task_id: Option<String>,
+) -> Result<XpanoProjectV2, ProjectCommandError> {
     let root = Path::new(&project_root);
     let stale_result = root.join(MEDIA_RESULT_RELATIVE_PATH);
     if stale_result.exists() {
@@ -1113,7 +1213,15 @@ pub fn start_media_job(
             )
         })?;
     }
-    let project = begin_media_job_impl(root, expected_revision, &target_track_ids)?;
+    begin_media_job_impl(root, expected_revision, &target_track_ids)?;
+    let (job_context, _) = match crate::job::begin_job_with_task_impl(root, ProjectWorkspace::Media, task_id) {
+        Ok(started) => started,
+        Err(error) => {
+            let _ = fail_media_job_impl(root);
+            return Err(error);
+        }
+    };
+    let project = read_project(root)?;
     let _ = app.emit(
         "project:updated",
         ProjectUpdatedEvent {
@@ -1148,8 +1256,15 @@ pub fn start_media_job(
             ));
         }
     };
-    if let Err(error) = pipeline.start(app.clone(), "", "scripts/run_xpano_prepare_project.py", &args) {
+    if let Err(error) = pipeline.start_registered_job(
+        app.clone(),
+        "",
+        "scripts/run_xpano_prepare_project.py",
+        &args,
+        job_context.clone(),
+    ) {
         let failed = fail_media_job_impl(root)?;
+        let _ = crate::job::finish_job_impl(&job_context, JobState::Failed, &error);
         let _ = app.emit(
             "project:updated",
             ProjectUpdatedEvent {
@@ -1270,7 +1385,9 @@ mod tests {
     fn commit_import_persists_tracks_and_invalidates_alignment_input() {
         let root = temp_case("commit");
         let source = root.join("capture.osv");
+        let lut = root.join("camera.CUBE");
         std::fs::write(&source, b"capture").unwrap();
+        std::fs::write(&lut, b"LUT_3D_SIZE 2").unwrap();
         let mut project = fixture_project();
         project.tracks.clear();
         project.reconstruction.status = ReconstructionStatus::Complete;
@@ -1291,6 +1408,8 @@ mod tests {
                 extraction: ExtractionSettings {
                     frames_per_second: 1.0,
                     frame_limit: 20,
+                    style_lut_path: Some(lut.to_string_lossy().to_string()),
+                    color_lut_preset: None,
                 },
             }],
         )
@@ -1300,6 +1419,10 @@ mod tests {
         assert_eq!(updated.tracks[0].label, "Main panorama");
         assert_eq!(updated.tracks[0].status, ProjectTrackStatus::Draft);
         assert_eq!(updated.tracks[0].source_fingerprint.size, 7);
+        assert_eq!(
+            updated.tracks[0].extraction.style_lut_path.as_deref(),
+            Some(lut.to_string_lossy().as_ref())
+        );
         assert_eq!(updated.revisions.media, project.revisions.media + 1);
         assert_eq!(
             updated.revisions.alignment_input,
@@ -1330,6 +1453,8 @@ mod tests {
                 extraction: ExtractionSettings {
                     frames_per_second: 1.0,
                     frame_limit: 0,
+                    style_lut_path: None,
+                    color_lut_preset: None,
                 },
             }],
         )
@@ -1385,6 +1510,8 @@ mod tests {
                 extraction: Some(ExtractionSettings {
                     frames_per_second: 2.0,
                     frame_limit: 10,
+                    style_lut_path: None,
+                    color_lut_preset: None,
                 }),
                 camera_profile: None,
             },
@@ -1397,6 +1524,136 @@ mod tests {
             updated.revisions.alignment_input,
             project.revisions.alignment_input + 1
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn photo_import_accepts_style_lut_and_marks_project_stale() {
+        let root = temp_case("photo-color-lut");
+        let photos = root.join("photos");
+        let lut = root.join("restore.cube");
+        std::fs::create_dir_all(&photos).unwrap();
+        std::fs::write(photos.join("capture.jpg"), b"photo").unwrap();
+        std::fs::write(&lut, b"LUT_3D_SIZE 2").unwrap();
+        let mut project = fixture_project();
+        project.reconstruction.status = ReconstructionStatus::Complete;
+        write_project_atomic(&root, &project).unwrap();
+
+        let updated = commit_import_impl(
+            &root,
+            project.revision,
+            vec![MediaImportDraft {
+                track_type: ProjectTrackType::StandardPhotos,
+                label: "Photos".to_string(),
+                source_path: photos.to_string_lossy().to_string(),
+                camera_profile: None,
+                trim: None,
+                extraction: ExtractionSettings {
+                    frames_per_second: 1.0,
+                    frame_limit: 0,
+                    style_lut_path: Some(lut.to_string_lossy().to_string()),
+                    color_lut_preset: None,
+                },
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(updated.tracks.len(), project.tracks.len() + 1);
+        let imported = updated.tracks.last().unwrap();
+        assert_eq!(imported.track_type, ProjectTrackType::StandardPhotos);
+        assert_eq!(
+            imported.extraction.style_lut_path.as_deref(),
+            Some(lut.to_string_lossy().as_ref())
+        );
+        assert_eq!(updated.revisions.media, project.revisions.media + 1);
+        assert_eq!(
+            updated.revisions.alignment_input,
+            project.revisions.alignment_input + 1
+        );
+        assert_eq!(updated.reconstruction.status, ReconstructionStatus::Stale);
+        assert_eq!(read_project(&root).unwrap(), updated);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changing_style_lut_marks_only_the_target_track_stale() {
+        let root = temp_case("color-lut-change");
+        let lut = root.join("restore.cube");
+        std::fs::write(&lut, b"LUT_3D_SIZE 2").unwrap();
+        let mut project = fixture_project();
+        project.tracks[0].status = ProjectTrackStatus::Ready;
+        let mut second = project.tracks[0].clone();
+        second.id = "second-track".to_string();
+        project.tracks.push(second);
+        write_project_atomic(&root, &project).unwrap();
+
+        let updated = update_track_settings_impl(
+            &root,
+            project.revision,
+            &project.tracks[0].id,
+            TrackSettingsPatch {
+                trim: None,
+                extraction: Some(ExtractionSettings {
+                    frames_per_second: project.tracks[0].extraction.frames_per_second,
+                    frame_limit: project.tracks[0].extraction.frame_limit,
+                    style_lut_path: Some(lut.to_string_lossy().to_string()),
+                    color_lut_preset: None,
+                }),
+                camera_profile: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.tracks[0].status, ProjectTrackStatus::Stale);
+        assert_eq!(updated.tracks[1].status, ProjectTrackStatus::Ready);
+        assert_eq!(updated.revisions.media, project.revisions.media + 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_style_lut_rejects_media_job_before_state_mutation() {
+        let root = temp_case("missing-color-lut");
+        let mut project = fixture_project();
+        project.tracks[0].status = ProjectTrackStatus::Draft;
+        project.tracks[0].extraction.style_lut_path = Some(
+            root.join("removed.cube").to_string_lossy().to_string(),
+        );
+        write_project_atomic(&root, &project).unwrap();
+        let target_id = project.tracks[0].id.clone();
+
+        let error = begin_media_job_impl(
+            &root,
+            project.revision,
+            std::slice::from_ref(&target_id),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "missing_source");
+        assert_eq!(read_project(&root).unwrap(), project);
+        assert!(!root.join(MEDIA_JOB_RELATIVE_PATH).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bundled_osv_lut_preset_is_verified_before_media_job_starts() {
+        let root = temp_case("bundled-osv-lut");
+        let mut project = fixture_project();
+        project.tracks[0].status = ProjectTrackStatus::Draft;
+        project.tracks[0].source_path = root.join("DJI_0001.osv").to_string_lossy().to_string();
+        project.tracks[0].extraction.color_lut_preset =
+            Some(DJI_OSMO_360_DLOGM_REC709_PRESET.to_string());
+        write_project_atomic(&root, &project).unwrap();
+        let target_id = project.tracks[0].id.clone();
+
+        let updated = begin_media_job_impl(
+            &root,
+            project.revision,
+            std::slice::from_ref(&target_id),
+        )
+        .unwrap();
+
+        assert_eq!(updated.tracks[0].status, ProjectTrackStatus::Running);
+        assert!(root.join(MEDIA_JOB_RELATIVE_PATH).is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1823,6 +2080,8 @@ mod tests {
                 extraction: Some(ExtractionSettings {
                     frames_per_second: 2.0,
                     frame_limit: 10,
+                    style_lut_path: None,
+                    color_lut_preset: None,
                 }),
                 camera_profile: None,
             },

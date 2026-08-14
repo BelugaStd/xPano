@@ -50,7 +50,7 @@ impl Default for TrainingConfig {
     }
 }
 
-fn validate_config(config: &TrainingConfig) -> Result<(), ProjectCommandError> {
+pub(crate) fn validate_config(config: &TrainingConfig) -> Result<(), ProjectCommandError> {
     if config.iterations == 0 {
         return Err(ProjectCommandError::new("invalid_training_config", "iterations must be greater than 0"));
     }
@@ -103,6 +103,54 @@ pub fn resolve_training_dataset(project_root: &Path, project: &XpanoProjectV2) -
     ))
 }
 
+pub(crate) fn save_training_config_impl(
+    project_root: &Path,
+    expected_revision: u64,
+    config: &TrainingConfig,
+) -> Result<XpanoProjectV2, ProjectCommandError> {
+    validate_config(config)?;
+    let mut project = crate::project::read_project(project_root)?;
+    if project.revision != expected_revision {
+        return Err(crate::project::ProjectCommandError::revision_conflict(expected_revision, project.revision));
+    }
+    if project.training.status == crate::contracts::TrainingStatus::Running {
+        return Err(crate::project::ProjectCommandError::new("job_conflict", "training configuration is locked while training is running"));
+    }
+    let value = serde_json::to_value(config).map_err(|error| crate::project::ProjectCommandError::new("invalid_training_config", error.to_string()))?;
+    if project.training.config == value && project.training.total_iterations == config.iterations {
+        return Ok(project);
+    }
+    project.training.config = value;
+    project.training.total_iterations = config.iterations;
+    project.revision += 1;
+    crate::project::touch_project(&mut project);
+    crate::project::write_project_atomic(project_root, &project)?;
+    Ok(project)
+}
+
+pub fn validate_training_start_inputs(
+    project_root: &Path,
+    project: &XpanoProjectV2,
+    config: &TrainingConfig,
+) -> Result<PathBuf, ProjectCommandError> {
+    validate_config(config)?;
+    let dataset = resolve_training_dataset(project_root, project)?;
+    let geometry_ready = matches!(
+        project.reconstruction.status,
+        crate::contracts::ReconstructionStatus::Complete | crate::contracts::ReconstructionStatus::Stale
+    ) && project.geometry.variants.iter().any(|variant| {
+        variant.id == project.geometry.active_variant_id
+            && variant.status == crate::contracts::PointVariantStatus::Ready
+    });
+    if !geometry_ready {
+        return Err(ProjectCommandError::new(
+            "training_not_ready",
+            "reconstruction geometry is not ready",
+        ));
+    }
+    Ok(dataset)
+}
+
 fn normalized_relative(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -138,20 +186,11 @@ pub fn begin_training_impl(
     job_id: &str,
     config: &TrainingConfig,
 ) -> Result<XpanoProjectV2, ProjectCommandError> {
-    validate_config(config)?;
     let mut project = crate::project::read_project(project_root)?;
     if project.revision != expected_revision {
         return Err(ProjectCommandError::revision_conflict(expected_revision, project.revision));
     }
-    resolve_training_dataset(project_root, &project)?;
-    if !matches!(project.reconstruction.status, crate::contracts::ReconstructionStatus::Complete | crate::contracts::ReconstructionStatus::Stale)
-        || !project.geometry.variants.iter().any(|variant| {
-            variant.id == project.geometry.active_variant_id
-                && variant.status == crate::contracts::PointVariantStatus::Ready
-        })
-    {
-        return Err(ProjectCommandError::new("training_not_ready", "reconstruction geometry is not ready"));
-    }
+    validate_training_start_inputs(project_root, &project, config)?;
     let output_relative = PathBuf::from("work")
         .join("training")
         .join("runs")
@@ -265,6 +304,37 @@ mod tests {
         assert_eq!(updated.training.source_job_id.as_deref(), Some("training-job-1"));
         assert_eq!(updated.training.total_iterations, 30_000);
         assert!(updated.training.output_path.as_deref().unwrap().contains("training-job-1"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(root.with_extension("jpg"));
+    }
+
+    #[test]
+    fn validates_training_inputs_without_marking_the_project_running() {
+        let root = training_project("preflight-inputs");
+        let before = crate::project::read_project(&root).unwrap();
+
+        let dataset = validate_training_start_inputs(&root, &before, &TrainingConfig::default()).unwrap();
+        let after = crate::project::read_project(&root).unwrap();
+
+        assert_eq!(dataset, root.canonicalize().unwrap());
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.training.status, TrainingStatus::Idle);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(root.with_extension("jpg"));
+    }
+
+    #[test]
+    fn saves_training_config_without_starting_a_job() {
+        let root = training_project("save-config");
+        let before = crate::project::read_project(&root).unwrap();
+        let mut config = TrainingConfig::default();
+        config.iterations = 1234;
+        let updated = save_training_config_impl(&root, before.revision, &config).unwrap();
+        assert_eq!(updated.training.status, TrainingStatus::Idle);
+        assert_eq!(updated.training.total_iterations, 1234);
+        assert_eq!(updated.training.config["iterations"], serde_json::json!(1234));
+        let unchanged = save_training_config_impl(&root, updated.revision, &config).unwrap();
+        assert_eq!(unchanged.revision, updated.revision);
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(root.with_extension("jpg"));
     }

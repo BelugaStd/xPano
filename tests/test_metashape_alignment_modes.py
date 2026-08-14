@@ -4,7 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class FakeCalibration:
@@ -66,11 +66,7 @@ class FakeCamera:
 
 
 class FakeGroup:
-    _next_key = 1
-
     def __init__(self):
-        self.key = FakeGroup._next_key
-        FakeGroup._next_key += 1
         self.label = ""
         self.type = None
 
@@ -94,11 +90,11 @@ class FakeChunk:
         return group
 
     def addPhotos(self, paths, **kwargs):
-        group_key = kwargs.get("group")
-        group = next((item for item in self.camera_groups if item.key == group_key), None)
-        self.operations.append(("addPhotos", [Path(path).name for path in paths], group.label if group else None))
+        if "group" in kwargs:
+            raise AssertionError("This fake Metashape version does not expose CameraGroup.key")
+        self.operations.append(("addPhotos", [Path(path).name for path in paths], None))
         for path in paths:
-            self.cameras.append(FakeCamera(path, group))
+            self.cameras.append(FakeCamera(path, None))
 
     def remove(self, sensor):
         if sensor in self.sensors:
@@ -139,9 +135,14 @@ class ReorderingFakeChunk(FakeChunk):
 
 def fake_metashape_module():
     return types.SimpleNamespace(
-        Sensor=types.SimpleNamespace(Type=types.SimpleNamespace(Frame="Frame", Fisheye="Fisheye")),
+        Sensor=types.SimpleNamespace(Type=types.SimpleNamespace(
+            Frame="Frame",
+            Fisheye="Fisheye",
+            EquidistantFisheye="EquidistantFisheye",
+        )),
         CameraGroup=types.SimpleNamespace(Type=types.SimpleNamespace(Station="Station", Folder="Folder")),
         Calibration=FakeCalibration,
+        Chunk=FakeChunk,
         app=types.SimpleNamespace(document=types.SimpleNamespace()),
     )
 
@@ -157,21 +158,42 @@ def import_pipeline_with_fake_metashape():
         return importlib.import_module("scripts.metashape_pipeline")
 
 
+def import_alignment_variants_with_fake_metashape():
+    with patch.dict(sys.modules, {"Metashape": fake_metashape_module()}):
+        sys.modules.pop("scripts.run_alignment_variants", None)
+        return importlib.import_module("scripts.run_alignment_variants")
+
+
 class MetashapeAlignmentModeTests(unittest.TestCase):
-    def test_fisheye_sensor_initializes_sensor_and_calibration_projection_types(self):
+    def test_4k_panorama_sensor_uses_resolution_normalized_initial_calibration(self):
         pipeline = import_pipeline_with_fake_metashape()
-        sensor = FakeSensor()
+        chunk = FakeChunk()
+        source_camera = FakeCamera("pano_left.jpg", None)
+        source_camera.sensor.width = 1920
+        source_camera.sensor.height = 1920
+        source_camera.sensor.calibration.f = 6275.7
 
-        pipeline.configure_fisheye_sensor(sensor)
+        sensor = pipeline.make_track_sensor(
+            chunk,
+            source_camera,
+            "pano_left",
+            pipeline.panorama_sensor_type(),
+        )
 
-        self.assertEqual(sensor.type, "Fisheye")
-        self.assertEqual(sensor.calibration.type, "Fisheye")
+        self.assertEqual(sensor.type, "EquidistantFisheye")
+        self.assertIsNot(sensor.calibration, source_camera.sensor.calibration)
+        self.assertIsNotNone(sensor.user_calib)
+        self.assertEqual(sensor.user_calib.type, "EquidistantFisheye")
+        self.assertEqual((sensor.user_calib.width, sensor.user_calib.height), (1920, 1920))
+        self.assertAlmostEqual(sensor.user_calib.f, 520.8333333333334)
+        self.assertAlmostEqual(sensor.pixel_width, 0.0048)
+        self.assertAlmostEqual(sensor.pixel_height, 0.0048)
+        self.assertEqual(sensor.focal_length, 2.5)
 
     def test_alignment_summary_reports_panorama_and_frame_quality_separately(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["pano_left.jpg", "pano_right.jpg", "frame_one.jpg", "frame_two.jpg"], group=group.key)
+        chunk.addPhotos(["pano_left.jpg", "pano_right.jpg", "frame_one.jpg", "frame_two.jpg"])
         for camera in chunk.cameras[:2]:
             camera.sensor.type = "Fisheye"
             camera.transform = object()
@@ -199,8 +221,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
     def test_match_kwargs_converts_camera_objects_to_metashape_keys_and_preserves_keypoints(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["a.jpg", "b.jpg"], group=group.key)
+        chunk.addPhotos(["a.jpg", "b.jpg"])
         args = types.SimpleNamespace(keypoint_limit=40000, tiepoint_limit=0)
 
         kwargs = pipeline._match_kwargs(args, cameras=chunk.cameras)
@@ -209,6 +230,21 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         self.assertTrue(kwargs["keep_keypoints"])
         self.assertFalse(kwargs["reset_matches"])
         self.assertNotIn("pairs", kwargs)
+
+    def test_incremental_alignment_preserves_the_existing_panorama_solution_when_supported(self):
+        pipeline = import_pipeline_with_fake_metashape()
+        chunk = types.SimpleNamespace(alignCameras=Mock())
+
+        with patch.object(pipeline, "_supports_reset_alignment", return_value=True):
+            pipeline._align_cameras(chunk, preserve_alignment=True)
+
+        chunk.alignCameras.assert_called_once_with(adaptive_fitting=True, reset_alignment=False)
+
+    def test_legacy_mixed_mode_normalizes_to_the_restored_staged_workflow(self):
+        from scripts.metashape_alignment_modes import normalize_alignment_mode
+
+        self.assertEqual(normalize_alignment_mode("mixed"), "backbone")
+        self.assertEqual(normalize_alignment_mode("legacy"), "backbone")
 
     def test_add_photos_rejects_an_incomplete_metashape_import(self):
         pipeline = import_pipeline_with_fake_metashape()
@@ -238,6 +274,64 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "photo paths"):
             pipeline.add_photos_get_new(chunk, ["expected.jpg"])
 
+    def test_add_photos_assigns_imported_cameras_to_group_without_group_key(self):
+        pipeline = import_pipeline_with_fake_metashape()
+        chunk = FakeChunk()
+        group = chunk.addCameraGroup()
+
+        cameras = pipeline.add_photos_get_new(chunk, ["grouped.jpg"], group=group)
+
+        self.assertEqual(len(cameras), 1)
+        self.assertIs(cameras[0].group, group)
+
+    def test_panorama_import_supports_camera_groups_without_group_key(self):
+        pipeline = import_pipeline_with_fake_metashape()
+        chunk = FakeChunk()
+        track = {
+            "track_id": "pano",
+            "frames": [
+                {
+                    "frame_id": "pano_0001",
+                    "left": "pano_0001_left.jpg",
+                    "right": "pano_0001_right.jpg",
+                }
+            ],
+        }
+
+        groups, cameras = pipeline.import_panorama_track(chunk, track)
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(cameras), 2)
+        self.assertTrue(all(camera.group is groups[0] for camera in cameras))
+
+    def test_legacy_import_supports_camera_groups_without_group_key(self):
+        pipeline = import_pipeline_with_fake_metashape()
+        chunk = FakeChunk()
+        with tempfile.TemporaryDirectory() as tmp:
+            frame_dir = Path(tmp) / "frame_0001"
+            frame_dir.mkdir()
+            (frame_dir / "left.jpg").touch()
+            (frame_dir / "right.jpg").touch()
+
+            groups = pipeline.import_legacy_frames(chunk, Path(tmp), max_frames=0)
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(chunk.cameras), 2)
+        self.assertTrue(all(camera.group is groups[0] for camera in chunk.cameras))
+
+    def test_variant_folder_group_import_supports_camera_groups_without_group_key(self):
+        variants = import_alignment_variants_with_fake_metashape()
+        chunk = FakeChunk()
+        image_paths = [
+            Path("station_0001") / "left.jpg",
+            Path("station_0001") / "right.jpg",
+        ]
+
+        variants.import_images(chunk, image_paths, "folder_groups")
+
+        self.assertEqual(len(chunk.camera_groups), 1)
+        self.assertTrue(all(camera.group is chunk.camera_groups[0] for camera in chunk.cameras))
+
     def test_wide_frame_profile_uses_wider_initial_intrinsics(self):
         pipeline = import_pipeline_with_fake_metashape()
         standard = FakeSensor()
@@ -254,7 +348,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         self.assertEqual(wide.calibration.cx, 0)
         self.assertEqual(wide.calibration.cy, 0)
 
-    def test_backbone_alignment_matches_all_imported_cameras_once_then_solves_stages(self):
+    def test_backbone_alignment_restores_panorama_first_incremental_workflow(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
         manifest = {
@@ -289,30 +383,26 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         pano_keys = [camera.key for camera in chunk.cameras[:4]]
         frame_keys = [camera.key for camera in chunk.cameras[4:]]
 
-        self.assertEqual(
-            [item[1] for item in add_before_match],
-            [
-                ["pano_0001_left.jpg", "pano_0001_right.jpg"],
-                ["pano_0002_left.jpg", "pano_0002_right.jpg"],
-                ["phone_0001.jpg", "phone_0002.jpg"],
-            ],
-        )
-        self.assertEqual(len(match_calls), 1)
-        self.assertEqual(match_calls[0][1], 6)
+        self.assertEqual([item[1] for item in add_before_match], [
+            ["pano_0001_left.jpg", "pano_0001_right.jpg"],
+            ["pano_0002_left.jpg", "pano_0002_right.jpg"],
+        ])
+        self.assertEqual(len(match_calls), 2)
+        self.assertEqual(match_calls[0][1], 4)
         self.assertEqual(match_calls[0][2], 0)
         self.assertIn("Station", match_calls[0][3])
         self.assertNotIn("cameras", match_calls[0][4])
-        self.assertFalse(match_calls[0][4]["keep_keypoints"])
+        self.assertTrue(match_calls[0][4]["keep_keypoints"])
         self.assertFalse(match_calls[0][4]["reset_matches"])
         self.assertNotIn("pairs", match_calls[0][4])
-        self.assertEqual(align_calls, [("alignCameras", pano_keys), ("alignCameras", frame_keys)])
+        self.assertEqual(match_calls[1][1], 6)
+        self.assertTrue(match_calls[1][4]["keep_keypoints"])
+        self.assertEqual(align_calls, [("alignCameras", pano_keys), ("alignCameras", pano_keys + frame_keys)])
         self.assertEqual(chunk.alignment_enabled_keys[0], pano_keys)
         self.assertEqual(set(chunk.alignment_enabled_keys[1]), set(pano_keys + frame_keys))
         self.assertEqual(len(optimize_calls), 2)
-        self.assertEqual(optimize_calls[0][2][:2], ["Station", "Station"])
-        self.assertEqual(optimize_calls[1][2][:2], ["Station", "Station"])
-        self.assertTrue(all(group_type == "Folder" for group_type in optimize_calls[0][2][2:]))
-        self.assertTrue(all(group_type == "Folder" for group_type in optimize_calls[1][2][2:]))
+        self.assertTrue(all(group_type == "Folder" for group_type in optimize_calls[0][2]))
+        self.assertTrue(all(group_type == "Folder" for group_type in optimize_calls[1][2]))
 
     def test_backbone_mixed_import_tracks_cameras_by_key_when_metashape_reorders(self):
         pipeline = import_pipeline_with_fake_metashape()
@@ -350,7 +440,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
             "photo_0002.jpg",
         })
         self.assertTrue(
-            all(cameras_by_name[name].sensor.type == "Fisheye" for name in cameras_by_name if "pano_" in name)
+            all(cameras_by_name[name].sensor.type == "EquidistantFisheye" for name in cameras_by_name if "pano_" in name)
         )
         self.assertTrue(
             all(cameras_by_name[name].sensor.type == "Frame" for name in cameras_by_name if "photo_" in name)
@@ -386,12 +476,13 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
             stages,
             [
                 "metashape.pano.import",
-                "metashape.frame.import",
                 "metashape.pano.station",
-                "metashape.all.match",
+                "metashape.pano.match",
                 "metashape.pano.align",
                 "metashape.pano.release",
                 "metashape.pano.optimize",
+                "metashape.frame.import",
+                "metashape.frame.match",
                 "metashape.frame.align",
                 "metashape.all.optimize",
             ],
@@ -420,7 +511,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         )
         self.assertEqual(len([item for item in chunk.operations if item[0] == "optimizeCameras"]), 1)
         optimize = next(item for item in chunk.operations if item[0] == "optimizeCameras")
-        self.assertTrue(all(group_type == "Station" for group_type in optimize[2]))
+        self.assertTrue(all(group_type == "Folder" for group_type in optimize[2]))
 
     def test_backbone_panorama_only_reports_station_stage_before_matching(self):
         pipeline = import_pipeline_with_fake_metashape()
@@ -441,7 +532,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
             pipeline.run_backbone_alignment(chunk, manifest, args)
 
         stages = [event["stage"] for event in events]
-        self.assertLess(stages.index("metashape.pano.station"), stages.index("metashape.all.match"))
+        self.assertLess(stages.index("metashape.pano.station"), stages.index("metashape.pano.match"))
 
     def test_backbone_flat_only_matches_and_solves_flat_cameras_once(self):
         pipeline = import_pipeline_with_fake_metashape()
@@ -470,7 +561,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         )
         self.assertEqual(len([item for item in chunk.operations if item[0] == "optimizeCameras"]), 1)
 
-    def test_backbone_restores_flat_enabled_states_and_stops_after_panorama_alignment_failure(self):
+    def test_backbone_does_not_import_flat_media_after_panorama_alignment_failure(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
         manifest = {
@@ -493,20 +584,19 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
 
         def fail_panorama_alignment(**kwargs):
             chunk.alignment_enabled_keys.append([camera.key for camera in chunk.cameras if camera.enabled])
-            chunk.operations.append(("alignCameras", list(kwargs["cameras"])))
+            chunk.operations.append(("alignCameras", [camera.key for camera in chunk.cameras]))
             raise RuntimeError("native panorama alignment failure")
 
         chunk.alignCameras = fail_panorama_alignment
         with self.assertRaisesRegex(RuntimeError, "native panorama alignment failure"):
             pipeline.run_backbone_alignment(chunk, manifest, args)
 
-        frame_cameras = chunk.cameras[2:]
-        self.assertEqual([camera.enabled for camera in frame_cameras], [True, False])
+        self.assertEqual(len(chunk.cameras), 2)
         self.assertEqual(chunk.alignment_enabled_keys, [[camera.key for camera in chunk.cameras[:2]]])
         self.assertEqual(len([item for item in chunk.operations if item[0] == "alignCameras"]), 1)
         self.assertEqual([item for item in chunk.operations if item[0] == "optimizeCameras"], [])
 
-    def test_backbone_retries_only_unaligned_panorama_cameras_without_matching_again(self):
+    def test_backbone_does_not_retry_partial_panorama_alignment_before_incremental_phase(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
         manifest = {
@@ -529,7 +619,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
         align_calls = []
 
         def partially_align_first_panorama_pass(**kwargs):
-            wanted = set(kwargs["cameras"])
+            wanted = set(kwargs.get("cameras") or [camera.key for camera in chunk.cameras])
             cameras = [camera for camera in chunk.cameras if camera.key in wanted]
             align_calls.append([camera.key for camera in cameras])
             if len(align_calls) == 1:
@@ -542,9 +632,9 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
 
         pano_keys = [camera.key for camera in chunk.cameras[:2]]
         frame_keys = [camera.key for camera in chunk.cameras[2:]]
-        self.assertEqual(align_calls, [pano_keys, pano_keys[1:], frame_keys])
+        self.assertEqual(align_calls, [pano_keys, pano_keys + frame_keys])
         self.assertTrue(all(camera.transform is not None for camera in chunk.cameras))
-        self.assertEqual(len([item for item in chunk.operations if item[0] == "matchPhotos"]), 1)
+        self.assertEqual(len([item for item in chunk.operations if item[0] == "matchPhotos"]), 2)
 
     def test_import_photo_track_splits_declared_sensor_group_by_actual_geometry(self):
         pipeline = import_pipeline_with_fake_metashape()
@@ -578,8 +668,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
     def test_backbone_validation_rejects_flat_camera_with_fisheye_sensor(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["flat.jpg"], group=group.key)
+        chunk.addPhotos(["flat.jpg"])
         chunk.cameras[0].sensor.type = "Fisheye"
 
         with self.assertRaisesRegex(RuntimeError, "Flat camera has incompatible sensor type"):
@@ -588,8 +677,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
     def test_backbone_validation_rejects_duplicate_camera_keys_in_the_chunk(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["one.jpg", "two.jpg"], group=group.key)
+        chunk.addPhotos(["one.jpg", "two.jpg"])
         for camera in chunk.cameras:
             camera.sensor.type = "Frame"
         chunk.cameras[1].key = chunk.cameras[0].key
@@ -600,8 +688,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
     def test_backbone_validation_rejects_overlapping_panorama_and_frame_sets(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["shared.jpg"], group=group.key)
+        chunk.addPhotos(["shared.jpg"])
 
         with self.assertRaisesRegex(RuntimeError, "sets overlap"):
             pipeline.validate_backbone_camera_sets(chunk, list(chunk.cameras), list(chunk.cameras))
@@ -609,8 +696,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
     def test_backbone_validation_rejects_uncovered_chunk_camera(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["included.jpg", "missing.jpg"], group=group.key)
+        chunk.addPhotos(["included.jpg", "missing.jpg"])
         for camera in chunk.cameras:
             camera.sensor.type = "Frame"
 
@@ -620,8 +706,7 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
     def test_backbone_validation_rejects_camera_without_sensor(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["flat.jpg"], group=group.key)
+        chunk.addPhotos(["flat.jpg"])
         chunk.cameras[0].sensor = None
 
         with self.assertRaisesRegex(RuntimeError, "Flat camera has no sensor"):
@@ -630,43 +715,12 @@ class MetashapeAlignmentModeTests(unittest.TestCase):
     def test_backbone_validation_rejects_non_positive_sensor_dimensions(self):
         pipeline = import_pipeline_with_fake_metashape()
         chunk = FakeChunk()
-        group = chunk.addCameraGroup()
-        chunk.addPhotos(["flat.jpg"], group=group.key)
+        chunk.addPhotos(["flat.jpg"])
         chunk.cameras[0].sensor.type = "Frame"
         chunk.cameras[0].sensor.width = 0
 
         with self.assertRaisesRegex(RuntimeError, "invalid dimensions"):
             pipeline.validate_backbone_camera_sets(chunk, [], list(chunk.cameras))
-
-    def test_mixed_alignment_imports_all_tracks_before_first_match(self):
-        pipeline = import_pipeline_with_fake_metashape()
-        chunk = ReorderingFakeChunk()
-        manifest = {
-            "tracks": [
-                {
-                    "track_id": "pano",
-                    "track_type": "panorama_video",
-                    "frames": [{"frame_id": "pano_1", "left": "pano_0001_left.jpg", "right": "pano_0001_right.jpg"}],
-                },
-                {
-                    "track_id": "phone",
-                    "track_type": "ordinary_video",
-                    "group_label": "phone_frames",
-                    "sensor_label": "phone_frame",
-                    "photos": ["phone_0001.jpg"],
-                },
-            ]
-        }
-        args = types.SimpleNamespace(keypoint_limit=40000, tiepoint_limit=0)
-
-        pipeline.run_mixed_alignment(chunk, manifest, args)
-
-        first_match_index = next(index for index, item in enumerate(chunk.operations) if item[0] == "matchPhotos")
-        add_before_match = [item for item in chunk.operations[:first_match_index] if item[0] == "addPhotos"]
-        self.assertEqual([item[1] for item in add_before_match], [["pano_0001_left.jpg", "pano_0001_right.jpg"], ["phone_0001.jpg"]])
-        optimize_calls = [item for item in chunk.operations if item[0] == "optimizeCameras"]
-        self.assertEqual(len(optimize_calls), 1)
-        self.assertEqual(optimize_calls[0][2], ["Station", "Folder"])
 
     def test_export_emits_both_execution_plan_stage_ids(self):
         pipeline = import_pipeline_with_fake_metashape()

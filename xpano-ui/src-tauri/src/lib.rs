@@ -1,4 +1,5 @@
 mod contracts;
+mod batch;
 mod geometry;
 mod job;
 mod media;
@@ -1488,6 +1489,8 @@ fn run_streaming_densify_command(
 pub(crate) struct AppState {
     pipeline: Mutex<PipelineState>,
     densify_pid: Mutex<Option<u32>>,
+    lichtfeld_readiness: Mutex<LichtfeldReadinessCache>,
+    pub(crate) batch: Mutex<batch::BatchCoordinator>,
 }
 
 fn cli_arg_value(args: &[String], name: &str) -> Option<String> {
@@ -1513,6 +1516,50 @@ struct RuntimeMetashapeProbe {
 struct RuntimeReadinessFailure {
     code: String,
     message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LichtfeldDeviceReadiness {
+    status: String,
+    device_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LichtfeldInputReadiness {
+    status: String,
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LichtfeldRuntimeReadiness {
+    status: String,
+    version: String,
+    cuda: LichtfeldDeviceReadiness,
+    vulkan: LichtfeldDeviceReadiness,
+    #[serde(default)]
+    dataset: LichtfeldInputReadiness,
+    #[serde(default)]
+    output: LichtfeldInputReadiness,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrainingReadinessStatus {
+    runtime_available: bool,
+    runtime_path: String,
+    runtime_code: String,
+    runtime_message: String,
+    cuda_available: bool,
+    vulkan_available: bool,
+    dataset_available: bool,
+    dataset_message: String,
+    geometry_available: bool,
+    output_available: bool,
+    output_message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1989,6 +2036,7 @@ fn start_pipeline(
     script: String,
     args: Vec<String>,
 ) -> Result<String, String> {
+    batch::ensure_manual_startable(&app, state.inner()).map_err(|error| error.message)?;
     let environment = run_preflight_environment_check(&app, &args)?;
     let mut pipeline = state.pipeline.lock().map_err(|e| e.to_string())?;
     pipeline.start_with_metashape_runtime(
@@ -2001,7 +2049,7 @@ fn start_pipeline(
     Ok("Pipeline started".into())
 }
 
-fn start_reconstruction_job_blocking(
+pub(crate) fn start_reconstruction_job_blocking(
     app: tauri::AppHandle,
     project_root: String,
     expected_revision: u64,
@@ -2009,6 +2057,7 @@ fn start_reconstruction_job_blocking(
     python_exe: String,
     script: String,
     args: Vec<String>,
+    task_id: Option<String>,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
     let state = app.state::<AppState>();
     {
@@ -2026,9 +2075,10 @@ fn start_reconstruction_job_blocking(
         expected_revision,
         &plan_id,
     )?;
-    let (job_context, _) = match job::begin_job_impl(
+    let (job_context, _) = match job::begin_job_with_task_impl(
         root,
         contracts::ProjectWorkspace::Reconstruction,
+        task_id,
     ) {
         Ok(started) => started,
         Err(error) => {
@@ -2143,6 +2193,7 @@ async fn start_reconstruction_job(
     script: String,
     args: Vec<String>,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
+    batch::ensure_manual_startable(&app, app.state::<AppState>().inner())?;
     tauri::async_runtime::spawn_blocking(move || {
         start_reconstruction_job_blocking(
             app,
@@ -2152,6 +2203,7 @@ async fn start_reconstruction_job(
             python_exe,
             script,
             args,
+            None,
         )
     })
     .await
@@ -2169,11 +2221,427 @@ fn append_training_flag(args: &mut Vec<String>, enabled: bool, flag: &str) {
     }
 }
 
-fn start_training_job_blocking(
+fn parse_lichtfeld_readiness_result(
+    text: &str,
+) -> Result<LichtfeldRuntimeReadiness, project::ProjectCommandError> {
+    let mut result = None;
+    let mut failure = None;
+    for line in text.lines() {
+        if let Some(payload) = line.strip_prefix("LFS_READINESS_RESULT:") {
+            result = serde_json::from_str(payload).ok();
+        } else if let Some(payload) = line.strip_prefix("LFS_READINESS_ERROR:") {
+            failure = serde_json::from_str::<RuntimeReadinessFailure>(payload).ok();
+        }
+    }
+    if let Some(result) = result {
+        return Ok(result);
+    }
+    if let Some(failure) = failure {
+        return Err(project::ProjectCommandError::new(failure.code.as_str(), failure.message));
+    }
+    Err(project::ProjectCommandError::new(
+        "LFS_READINESS_FAILED",
+        "LichtFeld readiness probe returned no structured result",
+    ))
+}
+
+fn ensure_lichtfeld_training_ready(
+    readiness: &LichtfeldRuntimeReadiness,
+) -> Result<(), project::ProjectCommandError> {
+    if readiness.status == "ready" {
+        return Ok(());
+    }
+    for check in [&readiness.dataset, &readiness.output] {
+        if check.status != "ready" {
+            return Err(project::ProjectCommandError::new(
+                if check.code.is_empty() {
+                    "LFS_READINESS_FAILED"
+                } else {
+                    check.code.as_str()
+                },
+                if check.message.is_empty() {
+                    "LichtFeld training preflight did not complete"
+                } else {
+                    check.message.as_str()
+                },
+            ));
+        }
+    }
+    Err(project::ProjectCommandError::new(
+        "LFS_READINESS_FAILED",
+        "LichtFeld training preflight did not complete",
+    ))
+}
+
+#[derive(Clone, Debug)]
+struct LichtfeldRuntime {
+    resource_root: std::path::PathBuf,
+    state_root: std::path::PathBuf,
+    executable: std::path::PathBuf,
+    readiness_script: std::path::PathBuf,
+    training_script: std::path::PathBuf,
+    python: std::path::PathBuf,
+    profile_root: std::path::PathBuf,
+}
+
+fn lichtfeld_resource_root(
+    packaged_root: &std::path::Path,
+    development_fallback: Option<&std::path::Path>,
+    allow_development_fallback: bool,
+) -> Result<std::path::PathBuf, project::ProjectCommandError> {
+    let manifest = |root: &std::path::Path| root.join("runtime/lichtfeld-studio-manifest.json");
+    if manifest(packaged_root).is_file() {
+        return Ok(packaged_root.to_path_buf());
+    }
+    if allow_development_fallback {
+        if let Some(root) = development_fallback.filter(|root| manifest(root).is_file()) {
+            return Ok(root.to_path_buf());
+        }
+    }
+    Err(project::ProjectCommandError::new(
+        "LFS_RUNTIME_CORRUPT",
+        "Bundled LichtFeld runtime manifest is missing",
+    ))
+}
+
+impl LichtfeldRuntime {
+    fn resolve(app: &AppHandle) -> Result<Self, project::ProjectCommandError> {
+        let packaged_root = app.path().resource_dir().map_err(|error| {
+            project::ProjectCommandError::new(
+                "LFS_RUNTIME_CORRUPT",
+                format!("failed to resolve bundled LichtFeld resources: {error}"),
+            )
+        })?;
+        let development_manifest = cfg!(debug_assertions).then(|| {
+            tool_resolver::resolve_bundled_resource_path("runtime/lichtfeld-studio-manifest.json")
+        });
+        let development_root = development_manifest.as_deref().and_then(|manifest| {
+            manifest.parent().and_then(std::path::Path::parent)
+        });
+        let resource_root = lichtfeld_resource_root(
+            &packaged_root,
+            development_root,
+            cfg!(debug_assertions),
+        )?;
+        let state_root = app.path().app_local_data_dir().map_err(|error| {
+            project::ProjectCommandError::new(
+                "backend_unavailable",
+                format!("failed to resolve LichtFeld state directory: {error}"),
+            )
+        })?;
+        Self::from_roots(&resource_root, &state_root)
+    }
+
+    fn from_roots(
+        resource_root: &std::path::Path,
+        state_root: &std::path::Path,
+    ) -> Result<Self, project::ProjectCommandError> {
+        let resource_root = resource_root.to_path_buf();
+        let state_root = state_root.to_path_buf();
+        let manifest = resource_root.join("runtime/lichtfeld-studio-manifest.json");
+        let content = std::fs::read_to_string(&manifest).map_err(|error| {
+            project::ProjectCommandError::new(
+                "LFS_RUNTIME_CORRUPT",
+                format!("failed to read LichtFeld runtime manifest: {error}"),
+            )
+        })?;
+        let version = serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .and_then(|value| value.get("version").and_then(serde_json::Value::as_str).map(str::to_owned))
+            .filter(|value| {
+                !value.is_empty()
+                    && value.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+                    })
+            })
+            .ok_or_else(|| {
+                project::ProjectCommandError::new(
+                    "LFS_RUNTIME_CORRUPT",
+                    "LichtFeld runtime manifest has an invalid version",
+                )
+            })?;
+        let runtime = Self {
+            executable: resource_root.join("runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe"),
+            readiness_script: resource_root.join("scripts/runtime_readiness.py"),
+            training_script: resource_root.join("scripts/lichtfeld_training.py"),
+            python: resource_root.join("binaries/python/python.exe"),
+            profile_root: state_root.join("lichtfeld-studio").join(&version).join("profile"),
+            resource_root,
+            state_root,
+        };
+        for (path, label) in [
+            (&runtime.executable, "LichtFeld Studio runtime"),
+            (&runtime.readiness_script, "LichtFeld readiness supervisor"),
+            (&runtime.training_script, "LichtFeld training supervisor"),
+            (&runtime.python, "bundled xPano Python"),
+        ] {
+            if !path.is_file() {
+                return Err(project::ProjectCommandError::new(
+                    "LFS_RUNTIME_CORRUPT",
+                    format!("{} is missing: {}", label, path.display()),
+                ));
+            }
+        }
+        Ok(runtime)
+    }
+}
+
+const LFS_READINESS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LichtfeldReadinessCacheKey {
+    project_root: std::path::PathBuf,
+    project_revision: u64,
+    resource_root: std::path::PathBuf,
+    executable_size: u64,
+    executable_modified_ns: u128,
+    manifest_modified_ns: u128,
+    sentinel_metadata: Vec<(String, u64, u128)>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedLichtfeldReadiness {
+    key: LichtfeldReadinessCacheKey,
+    checked_at: std::time::Instant,
+    readiness: LichtfeldRuntimeReadiness,
+}
+
+#[derive(Default)]
+struct LichtfeldReadinessCache {
+    entry: Option<CachedLichtfeldReadiness>,
+}
+
+impl LichtfeldReadinessCache {
+    fn get(
+        &mut self,
+        key: &LichtfeldReadinessCacheKey,
+        now: std::time::Instant,
+    ) -> Option<LichtfeldRuntimeReadiness> {
+        let entry = self.entry.as_ref()?;
+        if entry.key != *key || now.duration_since(entry.checked_at) > LFS_READINESS_CACHE_TTL {
+            self.entry = None;
+            return None;
+        }
+        Some(entry.readiness.clone())
+    }
+
+    fn store(
+        &mut self,
+        key: LichtfeldReadinessCacheKey,
+        readiness: LichtfeldRuntimeReadiness,
+        checked_at: std::time::Instant,
+    ) {
+        self.entry = Some(CachedLichtfeldReadiness {
+            key,
+            checked_at,
+            readiness,
+        });
+    }
+}
+
+fn modified_ns(path: &std::path::Path) -> u128 {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or(0)
+}
+
+fn lichtfeld_readiness_cache_key(
+    project_root: &std::path::Path,
+    project_revision: u64,
+    runtime: &LichtfeldRuntime,
+) -> LichtfeldReadinessCacheKey {
+    let executable_metadata = runtime.executable.metadata().ok();
+    LichtfeldReadinessCacheKey {
+        project_root: project_root.to_path_buf(),
+        project_revision,
+        resource_root: runtime.resource_root.clone(),
+        executable_size: executable_metadata.as_ref().map(|metadata| metadata.len()).unwrap_or(0),
+        executable_modified_ns: modified_ns(&runtime.executable),
+        manifest_modified_ns: modified_ns(
+            &runtime.resource_root.join("runtime/lichtfeld-studio-manifest.json"),
+        ),
+        sentinel_metadata: lichtfeld_sentinel_metadata(&runtime.resource_root),
+    }
+}
+
+fn lichtfeld_sentinel_metadata(resource_root: &std::path::Path) -> Vec<(String, u64, u128)> {
+    let manifest_path = resource_root.join("runtime/lichtfeld-studio-manifest.json");
+    let sentinels = std::fs::read_to_string(manifest_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .and_then(|manifest| manifest.get("sentinels").and_then(serde_json::Value::as_array).cloned())
+        .unwrap_or_default();
+    let mut records = sentinels
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .filter(|relative| {
+            let path = std::path::Path::new(relative);
+            !path.is_absolute() && !path.components().any(|component| component.as_os_str() == "..")
+        })
+        .map(|relative| {
+            let path = resource_root.join("runtime/lichtfeld-studio").join(&relative);
+            let size = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            (relative, size, modified_ns(&path))
+        })
+        .collect::<Vec<_>>();
+    records.sort();
+    records
+}
+
+fn run_lichtfeld_preflight(
+    runtime: &LichtfeldRuntime,
+    dataset: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<LichtfeldRuntimeReadiness, project::ProjectCommandError> {
+    let mut command = Command::new(tool_resolver::plain_windows_path(&runtime.python));
+    command
+        .env("PYTHONIOENCODING", "utf-8:replace")
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONNOUSERSITE", "1");
+    pipeline::configure_training_supervisor_environment(&mut command, &runtime.python);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+    command
+        .arg(&runtime.readiness_script)
+        .arg("lichtfeld-probe")
+        .arg("--root")
+        .arg(&runtime.resource_root)
+        .arg("--state-root")
+        .arg(&runtime.state_root)
+        .arg("--backend")
+        .arg("colmap")
+        .arg("--lfs-executable")
+        .arg(tool_resolver::plain_windows_path(&runtime.executable))
+        .arg("--profile-root")
+        .arg(tool_resolver::plain_windows_path(&runtime.profile_root))
+        .arg("--dataset")
+        .arg(dataset)
+        .arg("--output")
+        .arg(output);
+    let process = command.output().map_err(|error| {
+        project::ProjectCommandError::new(
+            "LFS_READINESS_FAILED",
+            format!("failed to start LichtFeld readiness probe: {error}"),
+        )
+    })?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&process.stdout),
+        String::from_utf8_lossy(&process.stderr)
+    );
+    if process.status.success() {
+        parse_lichtfeld_readiness_result(&text)
+    } else {
+        match parse_lichtfeld_readiness_result(&text) {
+            Err(error) => Err(error),
+            Ok(_) => Err(project::ProjectCommandError::new(
+                "LFS_READINESS_FAILED",
+                format!("LichtFeld readiness probe exited with {}", process.status),
+            )),
+        }
+    }
+}
+
+fn training_output_root(project_root: &std::path::Path) -> std::path::PathBuf {
+    project_root.join("work").join("training").join("runs")
+}
+
+fn geometry_is_ready(project: &contracts::XpanoProjectV2) -> bool {
+    matches!(
+        project.reconstruction.status,
+        contracts::ReconstructionStatus::Complete | contracts::ReconstructionStatus::Stale
+    ) && project.geometry.variants.iter().any(|variant| {
+        variant.id == project.geometry.active_variant_id
+            && variant.status == contracts::PointVariantStatus::Ready
+    })
+}
+
+fn training_readiness_blocking(
+    app: &AppHandle,
+    project_root: &std::path::Path,
+) -> Result<TrainingReadinessStatus, project::ProjectCommandError> {
+    let project = project::read_project(project_root)?;
+    let dataset = training::resolve_training_dataset(project_root, &project);
+    let dataset_path = dataset
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|_| project_root.join(".xpano-missing-training-dataset"));
+    let output = training_output_root(project_root);
+    let geometry_available = geometry_is_ready(&project);
+    let runtime = LichtfeldRuntime::resolve(app);
+    let runtime_path = runtime
+        .as_ref()
+        .map(|runtime| tool_resolver::plain_windows_path(&runtime.executable))
+        .unwrap_or_default();
+    let readiness_result = runtime.and_then(|runtime| {
+        let key = lichtfeld_readiness_cache_key(project_root, project.revision, &runtime);
+        let now = std::time::Instant::now();
+        if let Some(cached) = app
+            .state::<AppState>()
+            .lichtfeld_readiness
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get(&key, now))
+        {
+            return Ok(cached);
+        }
+        let readiness = run_lichtfeld_preflight(&runtime, &dataset_path, &output)?;
+        if readiness.status == "ready" {
+            if let Ok(mut cache) = app.state::<AppState>().lichtfeld_readiness.lock() {
+                cache.store(key, readiness.clone(), now);
+            }
+        }
+        Ok(readiness)
+    });
+    match readiness_result {
+        Ok(runtime) => {
+            let dataset_available = dataset.is_ok() && runtime.dataset.status == "ready";
+            Ok(TrainingReadinessStatus {
+                runtime_available: runtime.cuda.status == "ready" && runtime.vulkan.status == "ready",
+                runtime_path,
+                runtime_code: String::new(),
+                runtime_message: String::new(),
+                cuda_available: runtime.cuda.status == "ready",
+                vulkan_available: runtime.vulkan.status == "ready",
+                dataset_available,
+                dataset_message: if dataset_available {
+                    String::new()
+                } else if !runtime.dataset.message.is_empty() {
+                    runtime.dataset.message
+                } else {
+                    dataset.err().map(|error| error.message).unwrap_or_default()
+                },
+                geometry_available,
+                output_available: runtime.output.status == "ready",
+                output_message: runtime.output.message,
+            })
+        }
+        Err(error) => Ok(TrainingReadinessStatus {
+            runtime_available: false,
+            runtime_path,
+            runtime_code: error.code,
+            runtime_message: error.message,
+            cuda_available: false,
+            vulkan_available: false,
+            dataset_available: dataset.is_ok(),
+            dataset_message: dataset.err().map(|value| value.message).unwrap_or_default(),
+            geometry_available,
+            output_available: false,
+            output_message: String::new(),
+        }),
+    }
+}
+
+pub(crate) fn start_training_job_blocking(
     app: tauri::AppHandle,
     project_root: String,
     expected_revision: u64,
     config: training::TrainingConfig,
+    task_id: Option<String>,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
     let state = app.state::<AppState>();
     {
@@ -2192,23 +2660,11 @@ fn start_training_job_blocking(
             current.revision,
         ));
     }
-    let dataset = training::resolve_training_dataset(root, &current)?;
-    let executable = tool_resolver::resolve_resource_path(
-        "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
-    );
-    let script = tool_resolver::resolve_script_path("scripts/lichtfeld_training.py");
-    for (path, label) in [
-        (&executable, "LichtFeld Studio runtime"),
-        (&script, "LichtFeld training supervisor"),
-    ] {
-        if !path.is_file() {
-            return Err(project::ProjectCommandError::new(
-                "backend_unavailable",
-                format!("{} is missing: {}", label, path.display()),
-            ));
-        }
-    }
-    let (job_context, _) = job::begin_job_impl(root, contracts::ProjectWorkspace::Training)?;
+    let dataset = training::validate_training_start_inputs(root, &current, &config)?;
+    let runtime = LichtfeldRuntime::resolve(&app)?;
+    let preflight = run_lichtfeld_preflight(&runtime, &dataset, &training_output_root(root))?;
+    ensure_lichtfeld_training_ready(&preflight)?;
+    let (job_context, _) = job::begin_job_with_task_impl(root, contracts::ProjectWorkspace::Training, task_id)?;
     let project_after_job = project::read_project(root)?;
     let project = match training::begin_training_impl(
         root,
@@ -2235,11 +2691,13 @@ fn start_training_job_blocking(
         project_root.clone(),
         "--executable".to_string(),
         // WARN: LichtFeld's MinGW resource lookup breaks when launched through a `\\?\` path.
-        tool_resolver::plain_windows_path(&executable),
+        tool_resolver::plain_windows_path(&runtime.executable),
         "--data-path".to_string(),
         dataset.to_string_lossy().to_string(),
         "--output-path".to_string(),
         output.to_string_lossy().to_string(),
+        "--profile-root".to_string(),
+        tool_resolver::plain_windows_path(&runtime.profile_root),
         "--iterations".to_string(),
         config.iterations.to_string(),
         "--strategy".to_string(),
@@ -2282,8 +2740,8 @@ fn start_training_job_blocking(
     })?;
     if let Err(error) = pipeline.start_registered_job(
         app.clone(),
-        "",
-        script.to_string_lossy().as_ref(),
+        tool_resolver::plain_windows_path(&runtime.python).as_str(),
+        runtime.training_script.to_string_lossy().as_ref(),
         &args,
         job_context.clone(),
     ) {
@@ -2305,8 +2763,9 @@ async fn start_training_job(
     expected_revision: u64,
     config: training::TrainingConfig,
 ) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
+    batch::ensure_manual_startable(&app, app.state::<AppState>().inner())?;
     tauri::async_runtime::spawn_blocking(move || {
-        start_training_job_blocking(app, project_root, expected_revision, config)
+        start_training_job_blocking(app, project_root, expected_revision, config, None)
     })
     .await
     .map_err(|error| {
@@ -2318,29 +2777,29 @@ async fn start_training_job(
 }
 
 #[tauri::command]
-fn get_training_readiness(
+async fn get_training_readiness(
+    app: tauri::AppHandle,
     project_root: String,
-) -> Result<serde_json::Value, project::ProjectCommandError> {
-    let root = std::path::Path::new(&project_root);
-    let project = project::read_project(root)?;
-    let runtime = tool_resolver::resolve_resource_path(
-        "runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe",
-    );
-    let dataset = training::resolve_training_dataset(root, &project).ok();
-    let geometry_available = matches!(
-        project.reconstruction.status,
-        contracts::ReconstructionStatus::Complete | contracts::ReconstructionStatus::Stale
-    ) && project.geometry.variants.iter().any(|variant| {
-        variant.id == project.geometry.active_variant_id
-            && variant.status == contracts::PointVariantStatus::Ready
-    });
-    Ok(serde_json::json!({
-        "runtimeAvailable": runtime.is_file(),
-        "runtimePath": runtime,
-        "datasetAvailable": dataset.is_some(),
-        "datasetPath": dataset,
-        "geometryAvailable": geometry_available,
-    }))
+) -> Result<TrainingReadinessStatus, project::ProjectCommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        training_readiness_blocking(&app, std::path::Path::new(&project_root))
+    })
+    .await
+    .map_err(|error| {
+        project::ProjectCommandError::new(
+            "LFS_READINESS_FAILED",
+            format!("LichtFeld readiness task stopped unexpectedly: {error}"),
+        )
+    })?
+}
+
+#[tauri::command]
+fn save_training_config(
+    project_root: String,
+    expected_revision: u64,
+    config: training::TrainingConfig,
+) -> Result<contracts::XpanoProjectV2, project::ProjectCommandError> {
+    training::save_training_config_impl(std::path::Path::new(&project_root), expected_revision, &config)
 }
 
 #[tauri::command]
@@ -2737,8 +3196,8 @@ async fn run_lfs_densify(
             "fast".to_string()
         };
         let max_points_text = max_points.max(0).to_string();
-        let num_refs_text = if num_refs > 0.0 { num_refs } else { 8.0 }.to_string();
-        let nns_per_ref_text = nns_per_ref.max(1).to_string();
+        let num_refs_text = if num_refs > 0.0 { num_refs } else { 0.75 }.to_string();
+        let nns_per_ref_text = if nns_per_ref > 0 { nns_per_ref } else { 3 }.to_string();
         let matches_per_ref_text = matches_per_ref.max(100).to_string();
         let steps_text = steps.clamp(1, 500).to_string();
         let certainty_thresh_text = certainty_thresh.clamp(0.0, 1.0).to_string();
@@ -3502,6 +3961,145 @@ mod tests {
     }
 
     #[test]
+    fn lichtfeld_readiness_result_keeps_gpu_status_and_stable_failures() {
+        let result = parse_lichtfeld_readiness_result(
+            r#"LFS_READINESS_RESULT:{"status":"ready","version":"0.5.3","cuda":{"status":"ready","deviceCount":1},"vulkan":{"status":"ready","deviceCount":1}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.version, "0.5.3");
+        assert_eq!(result.cuda.device_count, 1);
+        let error = parse_lichtfeld_readiness_result(
+            r#"LFS_READINESS_ERROR:{"code":"LFS_VULKAN_NO_DEVICE","message":"No Vulkan device"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "LFS_VULKAN_NO_DEVICE");
+    }
+
+    #[test]
+    fn lichtfeld_not_ready_result_rejects_training_with_the_input_failure_code() {
+        let result = parse_lichtfeld_readiness_result(
+            r#"LFS_READINESS_RESULT:{"status":"not_ready","version":"0.5.3","cuda":{"status":"ready","deviceCount":1},"vulkan":{"status":"ready","deviceCount":1},"dataset":{"status":"unavailable","code":"TRAINING_DATASET_INVALID","message":"dataset is incomplete"},"output":{"status":"ready","code":"","message":""}}"#,
+        )
+        .unwrap();
+
+        let error = ensure_lichtfeld_training_ready(&result).unwrap_err();
+
+        assert_eq!(error.code, "TRAINING_DATASET_INVALID");
+        assert_eq!(error.message, "dataset is incomplete");
+    }
+
+    #[test]
+    fn lichtfeld_runtime_resolution_keeps_every_child_under_one_bundled_root() {
+        let resource_root = temp_case("lichtfeld-runtime-root");
+        let state_root = temp_case("lichtfeld-runtime-state");
+        let executable = resource_root
+            .join("runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe");
+        for path in [
+            &executable,
+            &resource_root.join("scripts/runtime_readiness.py"),
+            &resource_root.join("scripts/lichtfeld_training.py"),
+            &resource_root.join("binaries/python/python.exe"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let manifest = resource_root.join("runtime/lichtfeld-studio-manifest.json");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, r#"{"version":"0.5.3"}"#).unwrap();
+
+        let runtime = LichtfeldRuntime::from_roots(&resource_root, &state_root).unwrap();
+
+        assert_eq!(runtime.resource_root, resource_root);
+        assert_eq!(runtime.executable, executable);
+        assert_eq!(runtime.profile_root, state_root.join("lichtfeld-studio/0.5.3/profile"));
+        assert_eq!(runtime.readiness_script, runtime.resource_root.join("scripts/runtime_readiness.py"));
+        assert_eq!(runtime.training_script, runtime.resource_root.join("scripts/lichtfeld_training.py"));
+        assert_eq!(runtime.python, runtime.resource_root.join("binaries/python/python.exe"));
+        let _ = std::fs::remove_dir_all(&runtime.resource_root);
+        let _ = std::fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn lichtfeld_runtime_resolution_rejects_a_missing_training_supervisor() {
+        let resource_root = temp_case("lichtfeld-runtime-missing-script");
+        let state_root = temp_case("lichtfeld-runtime-missing-script-state");
+        for path in [
+            resource_root.join("runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe"),
+            resource_root.join("scripts/runtime_readiness.py"),
+            resource_root.join("binaries/python/python.exe"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let manifest = resource_root.join("runtime/lichtfeld-studio-manifest.json");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, r#"{"version":"0.5.3"}"#).unwrap();
+
+        let error = LichtfeldRuntime::from_roots(&resource_root, &state_root).unwrap_err();
+
+        assert_eq!(error.code, "LFS_RUNTIME_CORRUPT");
+        assert!(error.message.contains("training supervisor"));
+        let _ = std::fs::remove_dir_all(&resource_root);
+        let _ = std::fs::remove_dir_all(&state_root);
+    }
+
+    #[test]
+    fn installed_lichtfeld_runtime_never_falls_back_to_development_resources() {
+        let installed_root = temp_case("lichtfeld-installed-runtime");
+        let development_root = temp_case("lichtfeld-development-runtime");
+        let manifest = development_root.join("runtime/lichtfeld-studio-manifest.json");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, r#"{"version":"0.5.3"}"#).unwrap();
+
+        let installed_error = lichtfeld_resource_root(&installed_root, Some(&development_root), false)
+            .unwrap_err();
+        assert_eq!(installed_error.code, "LFS_RUNTIME_CORRUPT");
+        assert_eq!(
+            lichtfeld_resource_root(&installed_root, Some(&development_root), true).unwrap(),
+            development_root
+        );
+
+        let _ = std::fs::remove_dir_all(&installed_root);
+        let _ = std::fs::remove_dir_all(&development_root);
+    }
+
+    #[test]
+    fn training_readiness_cache_requires_matching_runtime_and_fresh_project_state() {
+        let key = LichtfeldReadinessCacheKey {
+            project_root: std::path::PathBuf::from(r"C:\\Project"),
+            project_revision: 7,
+            resource_root: std::path::PathBuf::from(r"C:\\xPano"),
+            executable_size: 123,
+            executable_modified_ns: 456,
+            manifest_modified_ns: 789,
+            sentinel_metadata: vec![("bin/LichtFeld-Studio.exe".to_string(), 123, 456)],
+        };
+        let readiness = LichtfeldRuntimeReadiness {
+            status: "ready".to_string(),
+            version: "0.5.3".to_string(),
+            ..Default::default()
+        };
+        let now = std::time::Instant::now();
+        let mut cache = LichtfeldReadinessCache::default();
+        cache.store(key.clone(), readiness.clone(), now);
+
+        assert_eq!(
+            cache
+                .get(&key, now + std::time::Duration::from_secs(5))
+                .unwrap()
+                .status,
+            readiness.status,
+        );
+        assert!(cache.get(&key, now + std::time::Duration::from_secs(11)).is_none());
+        let changed_project = LichtfeldReadinessCacheKey {
+            project_revision: 8,
+            ..key
+        };
+        assert!(cache.get(&changed_project, now + std::time::Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
     fn densify_profile_requires_both_user_opt_in_and_nvidia_probe() {
         assert_eq!(select_densify_profile(false, false), ("cpu", None));
         assert_eq!(select_densify_profile(false, true), ("cpu", None));
@@ -3617,6 +4215,8 @@ pub fn run() {
         .manage(AppState {
             pipeline: Mutex::new(PipelineState::new()),
             densify_pid: Mutex::new(None),
+            lichtfeld_readiness: Mutex::new(LichtfeldReadinessCache::default()),
+            batch: Mutex::new(batch::BatchCoordinator::default()),
         })
         .manage(Mutex::new(ThumbgenState::new()))
         .setup(|app| {
@@ -3628,6 +4228,7 @@ pub fn run() {
                 if window.label() == "main" {
                     // Kill running pipeline and its entire process tree
                     if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        batch::interrupt_for_shutdown(window.app_handle(), state.inner());
                         let _ = state.pipeline.lock().map(|mut p| p.cancel());
                         if let Ok(mut pid) = state.densify_pid.lock() {
                             if let Some(pid) = pid.take() {
@@ -3647,6 +4248,7 @@ pub fn run() {
             start_pipeline,
             start_reconstruction_job,
             start_training_job,
+            save_training_config,
             get_training_readiness,
             get_job_snapshot,
             read_job_events,
@@ -3693,8 +4295,17 @@ pub fn run() {
             media::finalize_media_job,
             media::sync_media_job_result,
             media::fail_media_job,
+            batch::get_batch_queue,
+            batch::save_and_enqueue_batch_task,
+            batch::requeue_batch_task,
+            batch::remove_batch_task,
+            batch::reorder_batch_tasks,
+            batch::delete_batch_queue,
+            batch::start_batch_queue,
+            batch::stop_batch_queue,
             reconstruction::build_execution_plan,
             reconstruction::build_reexport_plan,
+            reconstruction::inspect_metashape_components,
             reconstruction::probe_reconstruction_backends,
             probe_runtime_readiness,
             reconstruction::update_reconstruction_config,

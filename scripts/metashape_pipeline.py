@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 import math
 import os
@@ -26,23 +27,34 @@ import align_ground_plane
 import export_colmap
 
 try:
-    from scripts.component_selection import component_inventory, select_component_key
+    from scripts.component_selection import activated_component, inspect_components, resolve_component_key
 except ImportError:
-    from component_selection import component_inventory, select_component_key
+    from component_selection import activated_component, inspect_components, resolve_component_key
 
 try:
     from scripts.metashape_alignment_modes import (
         ALIGNMENT_MODE_BACKBONE,
-        ALIGNMENT_MODE_MIXED,
         SUPPORTED_ALIGNMENT_MODES,
         normalize_alignment_mode,
     )
 except ImportError:
     from metashape_alignment_modes import (
         ALIGNMENT_MODE_BACKBONE,
-        ALIGNMENT_MODE_MIXED,
         SUPPORTED_ALIGNMENT_MODES,
         normalize_alignment_mode,
+    )
+
+try:
+    from scripts.fisheye_geometry import (
+        REFERENCE_FISHEYE_FOCAL_MM,
+        effective_fisheye_pixel_size_mm,
+        normalized_fisheye_focal_px,
+    )
+except ImportError:
+    from fisheye_geometry import (
+        REFERENCE_FISHEYE_FOCAL_MM,
+        effective_fisheye_pixel_size_mm,
+        normalized_fisheye_focal_px,
     )
 
 
@@ -93,10 +105,14 @@ def emit_stage(stage, message, percent, phase="align", current=None, total=None)
     emit_pipeline_event(payload)
 
 
-def emit_alignment_rate(chunk, percent=95):
+def emit_alignment_rate(chunk, percent=95, aligned_camera_keys=None):
     cameras = list(chunk.cameras)
     total = len(cameras)
-    aligned = len([camera for camera in cameras if camera.transform])
+    aligned = (
+        len(aligned_camera_keys)
+        if aligned_camera_keys is not None
+        else len([camera for camera in cameras if camera.transform])
+    )
     rate = (aligned / total * 100.0) if total else 0.0
     emit_pipeline_event({
         "phase": "align",
@@ -131,16 +147,33 @@ def copy_sensor_geometry(dst, src):
     dst.focal_length = src.focal_length
 
 
+def panorama_sensor_type():
+    return getattr(Metashape.Sensor.Type, "EquidistantFisheye", Metashape.Sensor.Type.Fisheye)
+
+
 def configure_fisheye_sensor(sensor):
-    sensor.type = Metashape.Sensor.Type.Fisheye
-    sensor.pixel_width = 0.0024
-    sensor.pixel_height = 0.0024
-    sensor.focal_length = 2.5
+    sensor_type = panorama_sensor_type()
+    focal_px = normalized_fisheye_focal_px(sensor.width, sensor.height)
+    pixel_size_mm = effective_fisheye_pixel_size_mm(sensor.width, sensor.height)
+    sensor.type = sensor_type
+    sensor.pixel_width = pixel_size_mm
+    sensor.pixel_height = pixel_size_mm
+    sensor.focal_length = REFERENCE_FISHEYE_FOCAL_MM
     sensor.fixed_params = ["B1", "B2", "K4"]
+
+    initial_calib = Metashape.Calibration()
+    initial_calib.type = sensor_type
+    initial_calib.width = sensor.width
+    initial_calib.height = sensor.height
+    initial_calib.f = focal_px
+    for name in ("b1", "b2", "k1", "k2", "k3", "k4", "p1", "p2"):
+        setattr(initial_calib, name, 0)
+    sensor.user_calib = initial_calib
+
     calib = sensor.calibration
     if calib:
         try:
-            calib.type = Metashape.Sensor.Type.Fisheye
+            calib.type = sensor_type
         except Exception:
             pass
         calib.b1 = 0
@@ -260,8 +293,12 @@ def make_track_sensor(chunk, source_camera, label, sensor_type, camera_profile=N
     sensor = chunk.addSensor()
     sensor.label = label
     source_sensor = source_camera.sensor if source_camera else None
+    is_panorama = sensor_type in {
+        Metashape.Sensor.Type.Fisheye,
+        panorama_sensor_type(),
+    }
     copy_sensor_geometry(sensor, source_sensor)
-    if sensor_type == Metashape.Sensor.Type.Fisheye:
+    if is_panorama:
         configure_fisheye_sensor(sensor)
     elif sensor_type == Metashape.Sensor.Type.Frame:
         configure_frame_sensor(sensor, source_sensor, camera_profile=camera_profile)
@@ -290,14 +327,11 @@ def normalized_photo_path(path):
     return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
-def add_photos_get_new(chunk, paths, group_key=None):
+def add_photos_get_new(chunk, paths, group=None):
     requested_paths = [str(path) for path in paths]
     existing_keys = {camera_key(camera) for camera in chunk.cameras}
-    kwargs = {"load_xmp_accuracy": True}
-    if group_key is not None:
-        kwargs["group"] = group_key
     # WARN: Metashape may reorder chunk.cameras during addPhotos; camera identity must come from stable keys.
-    chunk.addPhotos(requested_paths, **kwargs)
+    chunk.addPhotos(requested_paths, load_xmp_accuracy=True)
     imported = [camera for camera in chunk.cameras if camera_key(camera) not in existing_keys]
     if len(imported) != len(requested_paths):
         raise RuntimeError(
@@ -318,6 +352,10 @@ def add_photos_get_new(chunk, paths, group_key=None):
             f"missing={[Path(path).name for path in missing[:5]]} "
             f"unexpected={[Path(path).name for path in unexpected[:5]]}"
         )
+    # NOTE: Assign groups after import because CameraGroup.key was added in Metashape 2.1.1.
+    if group is not None:
+        for camera in imported:
+            camera.group = group
     return imported
 
 
@@ -336,17 +374,17 @@ def import_panorama_track(chunk, track):
         station_groups.append(group)
 
         paths = [frame["left"], frame["right"]]
-        new_cameras = add_photos_get_new(chunk, paths, group_key=group.key)
+        new_cameras = add_photos_get_new(chunk, paths, group=group)
         imported.extend(new_cameras)
         for camera in new_cameras:
             name = camera_path_name(camera)
             if name == Path(frame["left"]).name.lower() or name.endswith("_left.jpg"):
                 if left_sensor is None:
-                    left_sensor = make_track_sensor(chunk, camera, left_label, Metashape.Sensor.Type.Fisheye)
+                    left_sensor = make_track_sensor(chunk, camera, left_label, panorama_sensor_type())
                 camera.sensor = left_sensor
             elif name == Path(frame["right"]).name.lower() or name.endswith("_right.jpg"):
                 if right_sensor is None:
-                    right_sensor = make_track_sensor(chunk, camera, right_label, Metashape.Sensor.Type.Fisheye)
+                    right_sensor = make_track_sensor(chunk, camera, right_label, panorama_sensor_type())
                 camera.sensor = right_sensor
 
     return station_groups, imported
@@ -364,7 +402,7 @@ def import_photo_track(chunk, track):
             photos = sensor_group.get("photos", [])
             if not photos:
                 continue
-            new_cameras = add_photos_get_new(chunk, photos, group_key=group.key)
+            new_cameras = add_photos_get_new(chunk, photos, group=group)
             if not new_cameras:
                 continue
             cameras_by_geometry = {}
@@ -413,7 +451,7 @@ def import_photo_track(chunk, track):
     photos = track.get("photos", [])
     if not photos:
         return []
-    new_cameras = add_photos_get_new(chunk, photos, group_key=group.key)
+    new_cameras = add_photos_get_new(chunk, photos, group=group)
     sensors_by_size = {}
     base_label = track.get("sensor_label", f"{track['track_id']}_frame")
     for camera in new_cameras:
@@ -519,7 +557,7 @@ def validate_backbone_camera_sets(chunk, pano_cameras, frame_cameras):
     pano_sensor_keys = set()
     frame_sensor_keys = set()
     for cameras, expected_type, sensor_keys, kind in (
-        (pano_cameras, Metashape.Sensor.Type.Fisheye, pano_sensor_keys, "panorama"),
+        (pano_cameras, panorama_sensor_type(), pano_sensor_keys, "panorama"),
         (frame_cameras, Metashape.Sensor.Type.Frame, frame_sensor_keys, "flat"),
     ):
         for camera in cameras:
@@ -540,52 +578,25 @@ def validate_backbone_camera_sets(chunk, pano_cameras, frame_cameras):
         raise RuntimeError("Panorama and flat cameras share a Metashape sensor")
 
 
-def emit_backbone_camera_summary(chunk, pano_cameras, frame_cameras):
-    counts = {}
-    for camera in chunk.cameras:
-        sensor = camera.sensor
-        key = getattr(sensor, "key", id(sensor))
-        if key not in counts:
-            counts[key] = {"sensor": sensor, "count": 0}
-        counts[key]["count"] += 1
-    print(
-        ">>> Metashape backbone single-pass match: "
-        f"total={len(chunk.cameras)} panorama={len(pano_cameras)} flat={len(frame_cameras)} "
-        "keep_keypoints=False reset_matches=False",
-        flush=True,
-    )
-    limit = 20
-    for entry in list(counts.values())[:limit]:
-        sensor = entry["sensor"]
-        print(
-            ">>> Metashape sensor: "
-            f"label={sensor.label!r} key={sensor.key} type={sensor.type} "
-            f"size={sensor.width}x{sensor.height} cameras={entry['count']}",
-            flush=True,
-        )
-    if len(counts) > limit:
-        print(f">>> Metashape sensor summary omitted {len(counts) - limit} additional sensors", flush=True)
+_HAS_RESET_ALIGNMENT = None
 
 
-def run_mixed_alignment(chunk, manifest, args):
-    emit_stage("metashape.all.import", "正在导入全部素材", 42)
-    station_groups = import_manifest_tracks(chunk, manifest)
-    if not chunk.cameras:
-        raise RuntimeError("No extracted frame images found")
+def _supports_reset_alignment():
+    global _HAS_RESET_ALIGNMENT
+    if _HAS_RESET_ALIGNMENT is None:
+        try:
+            signature = inspect.signature(Metashape.Chunk.alignCameras)
+            _HAS_RESET_ALIGNMENT = "reset_alignment" in signature.parameters
+        except Exception:
+            _HAS_RESET_ALIGNMENT = False
+    return _HAS_RESET_ALIGNMENT
 
-    emit_stage("metashape.pano.station", "正在设置全景站点", 54)
-    set_groups_type(station_groups, Metashape.CameraGroup.Type.Station)
 
-    emit_stage("metashape.all.match", "正在联合匹配全部素材", 60)
-    chunk.matchPhotos(**_match_kwargs(args))
-    emit_stage("metashape.all.align", "正在联合求解全部相机", 75)
-    chunk.alignCameras(adaptive_fitting=True)
-
-    emit_stage("metashape.pano.release", "正在保持全景站点约束", 82)
-    # WARN: Mixed-mode optimization must not remove the dual-fisheye shared-center constraint.
-    emit_stage("metashape.all.optimize", "正在执行全局相机优化", 86)
-    chunk.optimizeCameras(fit_b1=False, fit_b2=False, fit_k4=False)
-    return station_groups
+def _align_cameras(chunk, *, preserve_alignment=False):
+    kwargs = {"adaptive_fitting": True}
+    if preserve_alignment and _supports_reset_alignment():
+        kwargs["reset_alignment"] = False
+    chunk.alignCameras(**kwargs)
 
 
 def run_backbone_alignment(chunk, manifest, args):
@@ -599,61 +610,29 @@ def run_backbone_alignment(chunk, manifest, args):
         emit_stage("metashape.pano.import", "正在导入全景双鱼眼与站点", 40)
         station_groups, pano_entries = import_manifest_tracks_by_type(chunk, manifest, {"panorama_video"})
         pano_cameras = [camera for entry in pano_entries for camera in entry["cameras"]]
+    if pano_cameras:
+        validate_backbone_camera_sets(chunk, pano_cameras, [])
+        emit_stage("metashape.pano.station", "正在设置全景站点", 48)
+        set_groups_type(station_groups, Metashape.CameraGroup.Type.Station)
+        emit_stage("metashape.pano.match", "正在匹配全景素材", 52)
+        chunk.matchPhotos(**_match_kwargs(args, keep_keypoints=True))
+        emit_stage("metashape.pano.align", "正在求解全景骨架", 66)
+        _align_cameras(chunk)
+        emit_stage("metashape.pano.release", "正在释放全景站点以优化外参", 72)
+        set_groups_type(station_groups, Metashape.CameraGroup.Type.Folder)
+        emit_stage("metashape.pano.optimize", "正在优化全景骨架", 76)
+        chunk.optimizeCameras(fit_b1=False, fit_b2=False, fit_k4=False)
+
     if has_frames:
-        emit_stage("metashape.frame.import", "正在导入普通帧与照片", 46)
+        emit_stage("metashape.frame.import", "正在导入普通帧与照片", 79 if pano_cameras else 46)
         _, frame_entries = import_manifest_tracks_by_type(chunk, manifest, FRAME_TRACK_TYPES)
         frame_cameras = [camera for entry in frame_entries for camera in entry["cameras"]]
-
-    validate_backbone_camera_sets(chunk, pano_cameras, frame_cameras)
-    if pano_cameras and not frame_cameras:
-        emit_stage("metashape.pano.station", "Setting panorama Station constraints", 52)
-        set_groups_type(station_groups, Metashape.CameraGroup.Type.Station)
-        emit_stage("metashape.all.match", "Matching panorama materials", 58)
-        chunk.matchPhotos(**_match_kwargs(args, keep_keypoints=False))
-        emit_stage("metashape.pano.align", "Solving panorama cameras", 78)
-        chunk.alignCameras(adaptive_fitting=True)
-        emit_stage("metashape.pano.release", "Retaining panorama Station constraints", 82)
-        emit_stage("metashape.pano.optimize", "Optimizing panorama cameras", 90)
-        # WARN: Dual-fisheye pairs must remain Stations so bundle adjustment cannot split their shared center.
-        chunk.optimizeCameras(fit_b1=False, fit_b2=False, fit_k4=False)
-        return station_groups
-    if pano_cameras:
-        emit_stage("metashape.pano.station", "正在设置全景站点", 52)
-        set_groups_type(station_groups, Metashape.CameraGroup.Type.Station)
-
-    emit_stage("metashape.all.match", "正在联合匹配全部素材", 55)
-    # NOTE: Match every camera once, then stage alignment so Metashape never reuses mixed-resolution match state.
-    emit_backbone_camera_summary(chunk, pano_cameras, frame_cameras)
-    chunk.matchPhotos(**_match_kwargs(args, keep_keypoints=False))
-
-    if pano_cameras:
-        frame_enabled_states = [(camera, camera.enabled) for camera in frame_cameras]
-        # NOTE: Keep unified matches but exclude flat cameras from the backbone solve on Metashape builds that otherwise alter it.
-        try:
-            for camera in frame_cameras:
-                camera.enabled = False
-            emit_stage("metashape.pano.align", "正在求解全景骨架", 74)
-            chunk.alignCameras(cameras=camera_keys(pano_cameras), adaptive_fitting=True)
-            unaligned_panoramas = [camera for camera in pano_cameras if camera.transform is None]
-            if unaligned_panoramas:
-                # NOTE: A second solve reuses existing matches; a second match would recreate the mixed-resolution crash path.
-                print(
-                    ">>> Retrying panorama solve with existing matches: "
-                    f"unaligned={len(unaligned_panoramas)}/{len(pano_cameras)}",
-                    flush=True,
-                )
-                chunk.alignCameras(cameras=camera_keys(unaligned_panoramas), adaptive_fitting=True)
-            emit_stage("metashape.pano.release", "正在保持全景站点约束", 79)
-            # WARN: Keep panorama groups as Stations while flat cameras are attached and globally optimized.
-            emit_stage("metashape.pano.optimize", "正在优化全景骨架", 81)
-            chunk.optimizeCameras(fit_b1=False, fit_b2=False, fit_k4=False)
-        finally:
-            for camera, enabled in frame_enabled_states:
-                camera.enabled = enabled
-
-    if frame_cameras:
-        emit_stage("metashape.frame.align", "正在增量求解平面相机", 87)
-        chunk.alignCameras(cameras=camera_keys(frame_cameras), adaptive_fitting=True)
+        validate_backbone_camera_sets(chunk, pano_cameras, frame_cameras)
+        emit_stage("metashape.frame.match", "正在匹配新增普通素材", 82 if pano_cameras else 55)
+        # NOTE: Keeping the initial keypoints lets Metashape attach new photos without resetting the panorama solution.
+        chunk.matchPhotos(**_match_kwargs(args, keep_keypoints=True))
+        emit_stage("metashape.frame.align", "正在增量接入普通相机", 88 if pano_cameras else 78)
+        _align_cameras(chunk, preserve_alignment=True)
         emit_stage("metashape.all.optimize", "正在执行全局相机优化", 91)
         chunk.optimizeCameras(fit_b1=False, fit_b2=False, fit_k4=False)
     return station_groups
@@ -695,7 +674,7 @@ def import_legacy_frames(chunk, input_root, max_frames):
         group.label = frame_dir.name
         group.type = Metashape.CameraGroup.Type.Folder
         station_groups.append(group)
-        chunk.addPhotos(image_paths[:2], group=group.key, load_xmp_accuracy=True)
+        add_photos_get_new(chunk, image_paths[:2], group=group)
 
     for sensor in chunk.sensors:
         configure_fisheye_sensor(sensor)
@@ -714,11 +693,15 @@ def station_distances(chunk):
     return distances
 
 
-def alignment_type_metrics(chunk):
+def alignment_type_metrics(chunk, aligned_camera_keys=None):
+    aligned_keys = set(aligned_camera_keys) if aligned_camera_keys is not None else None
     panorama_cameras = [
         camera
         for camera in chunk.cameras
-        if camera.sensor and camera.sensor.type == Metashape.Sensor.Type.Fisheye
+        if camera.sensor and camera.sensor.type in {
+            Metashape.Sensor.Type.Fisheye,
+            panorama_sensor_type(),
+        }
     ]
     frame_cameras = [
         camera
@@ -727,21 +710,35 @@ def alignment_type_metrics(chunk):
     ]
     return {
         "panorama_cameras": len(panorama_cameras),
-        "panorama_aligned": sum(camera.transform is not None for camera in panorama_cameras),
+        "panorama_aligned": sum(
+            camera_key(camera) in aligned_keys if aligned_keys is not None else camera.transform is not None
+            for camera in panorama_cameras
+        ),
         "frame_cameras": len(frame_cameras),
-        "frame_aligned": sum(camera.transform is not None for camera in frame_cameras),
+        "frame_aligned": sum(
+            camera_key(camera) in aligned_keys if aligned_keys is not None else camera.transform is not None
+            for camera in frame_cameras
+        ),
     }
 
 
-def write_alignment_summary(chunk, export_dir, project_path, alignment_mode=None, selected_component_key=None):
-    aligned = [camera for camera in chunk.cameras if camera.transform is not None]
-    type_metrics = alignment_type_metrics(chunk)
+def write_alignment_summary(
+    chunk,
+    export_dir,
+    project_path,
+    alignment_mode=None,
+    selected_component_key=None,
+    component_inspection=None,
+):
+    inspection = component_inspection or inspect_components(chunk)
+    aligned_keys = inspection.aligned_camera_keys
+    type_metrics = alignment_type_metrics(chunk, aligned_keys)
     distances = station_distances(chunk)
     lines = [
         "xPano Metashape alignment summary",
         f"project={project_path}",
         f"cameras={len(chunk.cameras)}",
-        f"aligned={len(aligned)}",
+        f"aligned={inspection.aligned_camera_count}",
         f"panorama_cameras={type_metrics['panorama_cameras']}",
         f"panorama_aligned={type_metrics['panorama_aligned']}",
         f"frame_cameras={type_metrics['frame_cameras']}",
@@ -764,12 +761,15 @@ def write_alignment_summary(chunk, export_dir, project_path, alignment_mode=None
             f"pixel={sensor.pixel_width},{sensor.pixel_height},focal={sensor.focal_length},"
             f"calib_f={getattr(calib, 'f', None)},fixed={list(sensor.fixed_params)}"
         )
-    inventory = component_inventory(chunk.cameras, getattr(chunk, "components", None))
-    selected_component_key = select_component_key(inventory, selected_component_key)
-    warnings = []
-    if len(inventory) > 1:
-        warnings.append("Multiple Metashape components found; manual PSX alignment is recommended.")
-    if aligned and len(aligned) < len(chunk.cameras):
+    selected_component_key = resolve_component_key(
+        inspection,
+        selected_component_key,
+        strict=selected_component_key is not None,
+    )
+    inventory = [component.as_dict() for component in inspection.components]
+    selected = next(item for item in inspection.components if item.component_key == selected_component_key)
+    warnings = list(inspection.warnings)
+    if inspection.aligned_camera_count < len(chunk.cameras):
         warnings.append("Some cameras were not aligned; the completed partial result remains exportable.")
     lines.extend([
         f"selected_component={selected_component_key or ''}",
@@ -777,12 +777,16 @@ def write_alignment_summary(chunk, export_dir, project_path, alignment_mode=None
     ])
     (export_dir / "xpano_alignment_summary.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {
-        "aligned": len(aligned),
+        "aligned": inspection.aligned_camera_count,
         "total": len(chunk.cameras),
-        "rate": (len(aligned) / len(chunk.cameras) * 100.0) if chunk.cameras else 0.0,
+        "rate": (inspection.aligned_camera_count / len(chunk.cameras) * 100.0) if chunk.cameras else 0.0,
+        "unaligned": inspection.unaligned_camera_count,
+        "inventoryComplete": inspection.inventory_complete,
         "components": inventory,
         "selectedComponentKey": selected_component_key,
+        "selectedComponentAlignedCameras": selected.aligned_camera_count,
         "warnings": warnings,
+        "alignedCameraKeys": aligned_keys,
         **type_metrics,
     }
 
@@ -821,10 +825,7 @@ def main():
         mode = normalize_alignment_mode(args.alignment_mode)
         alignment_mode = mode
         print(f">>> Metashape alignment mode: {mode}", flush=True)
-        if mode == ALIGNMENT_MODE_MIXED:
-            run_mixed_alignment(chunk, manifest, args)
-        else:
-            run_backbone_alignment(chunk, manifest, args)
+        run_backbone_alignment(chunk, manifest, args)
     elif args.input_root:
         station_groups = import_legacy_frames(chunk, Path(args.input_root), args.max_frames)
         if not chunk.cameras:
@@ -845,41 +846,53 @@ def main():
 
     emit_stage("metashape.project.save", "正在保存 Metashape 工程", 93)
     ensure_project(project_path)
-    metrics = write_alignment_summary(
-        chunk,
-        export_dir,
-        project_path,
-        alignment_mode=alignment_mode,
-        selected_component_key=args.component_key,
+    emit_stage("metashape.component.select", "正在检查并选择对齐 Component", 94)
+    inspection = inspect_components(chunk)
+    selected_component_key = resolve_component_key(
+        inspection,
+        args.component_key,
+        strict=args.component_key is not None,
     )
-    report = {
-        "schemaVersion": 1,
-        "processSucceeded": False,
-        "state": "aligned",
-        "projectPath": str(project_path),
-        "totalCameras": metrics["total"],
-        "alignedCameras": metrics["aligned"],
-        "alignmentRate": metrics["rate"],
-        "panoramaCameras": metrics["panorama_cameras"],
-        "panoramaAligned": metrics["panorama_aligned"],
-        "frameCameras": metrics["frame_cameras"],
-        "frameAligned": metrics["frame_aligned"],
-        "components": metrics["components"],
-        "selectedComponentKey": metrics["selectedComponentKey"],
-        "warnings": metrics["warnings"],
-    }
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    emit_alignment_rate(chunk)
+    with activated_component(chunk, selected_component_key):
+        metrics = write_alignment_summary(
+            chunk,
+            export_dir,
+            project_path,
+            alignment_mode=alignment_mode,
+            selected_component_key=selected_component_key,
+            component_inspection=inspection,
+        )
+        report = {
+            "schemaVersion": 2,
+            "processSucceeded": False,
+            "state": "aligned",
+            "projectPath": str(project_path),
+            "totalCameras": metrics["total"],
+            "alignedCameras": metrics["aligned"],
+            "unalignedCameras": metrics["unaligned"],
+            "alignmentRate": metrics["rate"],
+            "panoramaCameras": metrics["panorama_cameras"],
+            "panoramaAligned": metrics["panorama_aligned"],
+            "frameCameras": metrics["frame_cameras"],
+            "frameAligned": metrics["frame_aligned"],
+            "inventoryComplete": metrics["inventoryComplete"],
+            "components": metrics["components"],
+            "selectedComponentKey": metrics["selectedComponentKey"],
+            "selectedComponentAlignedCameras": metrics["selectedComponentAlignedCameras"],
+            "warnings": metrics["warnings"],
+        }
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        emit_alignment_rate(chunk, aligned_camera_keys=metrics["alignedCameraKeys"])
 
-    print(">>> 自动地平面校正", flush=True)
-    emit_stage("coordinate.auto_level", "正在自动校正地面方向", 96, phase="export")
-    try:
-        align_ground_plane.main(up_axis=args.up_axis)
-    except Exception as exc:
-        print(f"WARN: 地平面校正失败，继续导出: {exc}", flush=True)
+        print(">>> 自动地平面校正", flush=True)
+        emit_stage("coordinate.auto_level", "正在自动校正地面方向", 96, phase="export")
+        try:
+            align_ground_plane.main(up_axis=args.up_axis)
+        except Exception as exc:
+            print(f"WARN: 地平面校正失败，继续导出: {exc}", flush=True)
 
-    print(">>> 导出 COLMAP/Cubemap", flush=True)
-    export_project_outputs(export_dir, metrics["selectedComponentKey"])
+        print(">>> 导出 COLMAP/Cubemap", flush=True)
+        export_project_outputs(export_dir, metrics["selectedComponentKey"])
     report["processSucceeded"] = True
     report["state"] = "complete"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

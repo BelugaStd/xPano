@@ -62,7 +62,7 @@ export function configFromProject(
     ...defaultReconstructionConfig,
     backend,
     metashapePath: normalizeExecutablePath(value.metashapePath),
-    alignmentMode: value.alignmentMode === 'mixed' ? 'mixed' : 'backbone',
+    alignmentMode: 'backbone',
     metashapeKeypointLimit: numberValue(value.metashapeKeypointLimit, 40000),
     metashapeTiepointLimit: numberValue(value.metashapeTiepointLimit, 0),
     upAxis: typeof value.upAxis === 'string' ? value.upAxis : '+Y',

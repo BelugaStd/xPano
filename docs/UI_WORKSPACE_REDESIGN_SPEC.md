@@ -401,34 +401,22 @@ ETA 计算：
 1. `input.validate`：校验选择项和文件。
 2. `metashape.project.create`：创建工程与 chunk。
 3. `metashape.pano.import`：导入左右鱼眼和全景组。
-4. `metashape.frame.import`：导入普通视频帧/照片/航拍。
-5. `metashape.pano.station`：将全景组设为 Station。
-6. `metashape.all.match`：对新建 chunk 中的全部相机仅做一次视觉匹配。
-7. `metashape.pano.align`：仅求解全景骨架。
-8. `metashape.pano.release`：保持全景 Station 约束。
-9. `metashape.pano.optimize`：骨架优化。
-10. `metashape.frame.align`：仅增量求解平面相机。
-11. `metashape.all.optimize`：全局优化。
-12. `metashape.project.save`：保存 PSX。
-13. `coordinate.auto_level`：自动地面方向。
-14. `export.images`：切图和普通帧导出。
-15. `export.colmap`：写 cameras/images/points3D。
-16. `output.validate`：记录数、文件和相机对齐率验证。
+4. `metashape.pano.station`：将全景组设为 Station。
+5. `metashape.pano.match`：匹配全景素材并保留关键点。
+6. `metashape.pano.align`：求解全景骨架。
+7. `metashape.pano.release`：将全景组恢复为 Folder。
+8. `metashape.pano.optimize`：优化全景骨架。
+9. `metashape.frame.import`：导入普通视频帧/照片/航拍。
+10. `metashape.frame.match`：匹配新增平面素材并复用已保留的全景关键点。
+11. `metashape.frame.align`：不重置已有解，增量接入平面相机。
+12. `metashape.all.optimize`：全局优化。
+13. `metashape.project.save`：保存 PSX。
+14. `coordinate.auto_level`：自动地面方向。
+15. `export.images`：切图和普通帧导出。
+16. `export.colmap`：写 cameras/images/points3D。
+17. `output.validate`：记录数、文件和相机对齐率验证。
 
-若只有全景，跳过 8-11 的平面分支。若只有平面素材，跳过 3-7，执行平面导入、匹配、对齐和优化。
-
-#### Metashape：混合模式
-
-1. 校验输入。
-2. 导入所有素材。
-3. 设置全景 Station。
-4. 全部素材联合匹配。
-5. 联合对齐。
-6. 保持全景 Station 约束。
-7. 全局优化。
-8. 保存、坐标处理、导出和验证。
-
-UI 必须标记混合模式为高级选项。对空间相同但时间无对应关系的混合素材，默认仍使用骨架模式。
+若只有全景，跳过平面导入、匹配、接入和全局优化节点。若只有平面素材，跳过全景分支，执行平面导入、匹配、对齐和优化。旧工程中的 `mixed` 配置在加载时归一化为同一稳定分阶段流程，UI 不再暴露联合匹配入口。
 
 #### COLMAP：全景
 
@@ -775,10 +763,10 @@ t' = -R' * C'
   "backend": "metashape",
   "nodes": [
     {
-      "stageId": "metashape.all.match",
-      "label": "联合匹配全部素材",
-      "dependsOn": ["metashape.pano.station"],
-      "weight": 0.28,
+      "stageId": "metashape.frame.match",
+      "label": "匹配新增普通素材",
+      "dependsOn": ["metashape.frame.import"],
+      "weight": 0.17,
       "progressMode": "indeterminate",
       "slowHint": true,
       "skipReason": null
@@ -955,7 +943,7 @@ scripts/
 
 ### 14.2 对齐工作区
 
-- 四种输入组合分别生成正确流程：仅全景、仅平面、全景+平面骨架、混合模式。
+- 三种输入组合分别生成正确流程：仅全景、仅平面、全景+平面分阶段模式；旧 `mixed` 配置生成相同的分阶段流程。
 - 所有后台长节点每秒至少有 heartbeat，UI 不出现静默假死。
 - 没有真实内部计数的节点显示不确定进度，不伪装为精确百分比。
 - 任务成功后自动进入成果页；失败后停留并定位失败节点。

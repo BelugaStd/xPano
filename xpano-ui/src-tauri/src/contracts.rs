@@ -5,6 +5,7 @@ use std::path::{Component, Path};
 pub const PROJECT_SCHEMA_VERSION: u32 = 3;
 pub const JOB_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const EXECUTION_PLAN_SCHEMA_VERSION: u32 = 1;
+pub const DJI_OSMO_360_DLOGM_REC709_PRESET: &str = "builtin:dji-osmo360-dlogm-rec709";
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +102,147 @@ pub enum JobState {
     Interrupted,
 }
 
+pub const BATCH_QUEUE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchQueueState {
+    #[default]
+    Idle,
+    Running,
+    Stopping,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchTaskState {
+    #[default]
+    Draft,
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchStageStatus {
+    #[default]
+    Disabled,
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchStages {
+    pub media: bool,
+    pub reconstruction: bool,
+    pub training: bool,
+}
+
+impl BatchStages {
+    pub fn validate_prefix(&self) -> Result<(), String> {
+        if !self.media && !self.reconstruction && !self.training {
+            return Err("batch task must enable at least the media stage".to_string());
+        }
+        if self.reconstruction && !self.media {
+            return Err("batch stages must enable media before reconstruction".to_string());
+        }
+        if self.training && !self.reconstruction {
+            return Err("batch stages must enable reconstruction before training".to_string());
+        }
+        if !self.media && (self.reconstruction || self.training) {
+            return Err("batch stages must form a contiguous prefix".to_string());
+        }
+        Ok(())
+    }
+
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchStageStatuses {
+    pub media: BatchStageStatus,
+    pub reconstruction: BatchStageStatus,
+    pub training: BatchStageStatus,
+}
+
+impl BatchStageStatuses {
+    pub fn for_stages(stages: &BatchStages) -> Self {
+        Self {
+            media: if stages.media { BatchStageStatus::Pending } else { BatchStageStatus::Disabled },
+            reconstruction: if stages.reconstruction { BatchStageStatus::Pending } else { BatchStageStatus::Disabled },
+            training: if stages.training { BatchStageStatus::Pending } else { BatchStageStatus::Disabled },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProgress {
+    pub percent: f64,
+    pub message: String,
+    pub current: Option<u64>,
+    pub total: Option<u64>,
+    pub eta_seconds: Option<u64>,
+    pub elapsed_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchError {
+    pub code: String,
+    pub stage: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchPipelineInput {
+    #[serde(default)]
+    pub media_track_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTask {
+    pub task_id: String,
+    pub project_id: String,
+    pub project_root: String,
+    pub label: String,
+    pub order: u64,
+    pub configured_revision: u64,
+    pub stages: BatchStages,
+    pub stage_status: BatchStageStatuses,
+    pub state: BatchTaskState,
+    pub current_stage: Option<String>,
+    #[serde(default)]
+    pub stage_job_ids: serde_json::Map<String, serde_json::Value>,
+    pub progress: BatchProgress,
+    pub last_error: Option<BatchError>,
+    pub pipeline: BatchPipelineInput,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchQueueFile {
+    pub schema_version: u32,
+    pub revision: u64,
+    pub state: BatchQueueState,
+    pub active_task_id: Option<String>,
+    pub tasks: Vec<BatchTask>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressMode {
@@ -137,6 +279,14 @@ pub struct ProjectTrim {
 pub struct ExtractionSettings {
     pub frames_per_second: f64,
     pub frame_limit: u64,
+    #[serde(
+        default,
+        alias = "colorLutPath",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub style_lut_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_lut_preset: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -234,6 +384,10 @@ pub struct GeometryState {
 #[serde(rename_all = "camelCase")]
 pub struct JobSnapshot {
     pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub workspace: ProjectWorkspace,
     pub state: JobState,
     pub stage_id: Option<String>,
@@ -279,6 +433,30 @@ impl XpanoProjectV2 {
             }
             if track.extraction.frames_per_second <= 0.0 || !track.extraction.frames_per_second.is_finite() {
                 return Err(format!("invalid extraction frame rate for track {}", track.id));
+            }
+            if let Some(style_lut_path) = track.extraction.style_lut_path.as_deref() {
+                let path = Path::new(style_lut_path.trim());
+                if style_lut_path.trim().is_empty()
+                    || !path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("cube"))
+                {
+                    return Err(format!("invalid style LUT path for track {}", track.id));
+                }
+            }
+            if let Some(color_lut_preset) = track.extraction.color_lut_preset.as_deref() {
+                let is_osv_panorama = track.track_type == ProjectTrackType::PanoramicVideo
+                    && Path::new(&track.source_path)
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("osv"));
+                if color_lut_preset != DJI_OSMO_360_DLOGM_REC709_PRESET || !is_osv_panorama {
+                    return Err(format!(
+                        "color LUT preset is only valid for .osv panorama tracks: {}",
+                        track.id
+                    ));
+                }
             }
             if let Some(trim) = &track.trim {
                 if trim.start < 0.0 || trim.end <= trim.start || !trim.start.is_finite() || !trim.end.is_finite() {
@@ -398,7 +576,11 @@ pub struct JobEvent {
     pub sequence: u64,
     pub timestamp: String,
     pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
     pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub workspace: ProjectWorkspace,
     pub kind: JobEventKind,
     pub stage_id: Option<String>,
@@ -541,10 +723,53 @@ mod tests {
             "../../../schemas/fixtures/xpano_project_v3.example.json"
         ))
         .unwrap();
+        assert_eq!(project.tracks[0].extraction.style_lut_path, None);
         project.validate().unwrap();
 
         project.geometry.variants[0].canonical_path = "D:/machine/points3D.bin".to_string();
         assert!(project.validate().unwrap_err().contains("project-relative"));
+    }
+
+    #[test]
+    fn style_lut_is_optional_for_every_imported_track_and_migrates_legacy_paths() {
+        let mut project: XpanoProjectV2 = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/xpano_project_v3.example.json"
+        ))
+        .unwrap();
+        project.tracks[0].extraction.style_lut_path = Some("camera.CUBE".to_string());
+        project.validate().unwrap();
+
+        project.tracks[0].track_type = ProjectTrackType::StandardPhotos;
+        project.validate().unwrap();
+
+        let mut legacy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/xpano_project_v3.example.json"
+        ))
+        .unwrap();
+        legacy["tracks"][0]["extraction"]["colorLutPath"] = serde_json::json!("legacy.cube");
+        let migrated: XpanoProjectV2 = serde_json::from_value(legacy).unwrap();
+        assert_eq!(migrated.tracks[0].extraction.style_lut_path.as_deref(), Some("legacy.cube"));
+        let serialized = serde_json::to_value(migrated).unwrap();
+        assert_eq!(serialized["tracks"][0]["extraction"]["styleLutPath"], "legacy.cube");
+        assert!(serialized["tracks"][0]["extraction"].get("colorLutPath").is_none());
+    }
+
+    #[test]
+    fn bundled_dji_lut_preset_is_valid_only_for_osv_panorama_tracks() {
+        let mut project: XpanoProjectV2 = serde_json::from_str(include_str!(
+            "../../../schemas/fixtures/xpano_project_v3.example.json"
+        ))
+        .unwrap();
+        project.tracks[0].source_path = "D:/captures/DJI_0001.OSV".to_string();
+        project.tracks[0].extraction.color_lut_preset =
+            Some("builtin:dji-osmo360-dlogm-rec709".to_string());
+        project.validate().unwrap();
+
+        project.tracks[0].source_path = "D:/captures/VID_0001_00_0.insv".to_string();
+        assert!(project
+            .validate()
+            .unwrap_err()
+            .contains("only valid for .osv panorama tracks"));
     }
 
     #[test]

@@ -17,8 +17,8 @@ class LichtfeldDensifyConfig:
     out_name: str = "points3D_dense.ply"
     roma_setting: str = "fast"
     num_refs: float = 0.75
-    nns_per_ref: int = 4
-    matches_per_ref: int = 12000
+    nns_per_ref: int = 3
+    matches_per_ref: int = 10000
     certainty_thresh: float = 0.20
     reproj_thresh: float = 1.5
     sampson_thresh: float = 5.0
@@ -194,7 +194,6 @@ def run_densify_command(config, progress_cb=None, log_cb=None, runner=None):
     command = build_densify_command(config)
     plugin_dir = Path(config.plugin_dir) if config.plugin_dir else locate_densify_plugin()
     log_cb(f"LichtFeld densification: {' '.join(str(part) for part in command)}")
-    progress_cb(90)
     if runner is None:
         result = _run_command_streaming(command, plugin_dir, log_cb)
     else:

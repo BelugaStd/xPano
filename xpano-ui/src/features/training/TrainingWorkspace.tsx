@@ -4,6 +4,8 @@ import { FolderOpen } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useJob } from '../../app/useJob'
 import { useProject } from '../../app/useProject'
+import { useBatch } from '../../app/useBatch'
+import { useBatchTaskLock } from '../batch/useBatchTaskLock'
 import { joinDisplayPath } from '../../lib/paths'
 import { TrainingSetupView } from './TrainingSetupView'
 import { TrainingTaskView } from './TrainingTaskView'
@@ -25,13 +27,16 @@ function isTauriRuntime() {
 }
 
 export function TrainingWorkspace() {
+  const { queue: batchQueue } = useBatch()
+  const batchActive = batchQueue.state === 'running' || batchQueue.state === 'stopping'
+  const { locked: taskInputLocked, reason: taskInputLockReason } = useBatchTaskLock()
   const navigate = useNavigate()
   const { project, projectRoot } = useProject()
   const { progress, running, logs, startTraining, cancel } = useJob()
   const [config, setConfig] = useState<TrainingConfig>(DEFAULT_TRAINING_CONFIG)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [configureNext, setConfigureNext] = useState(false)
-  const [readiness, setReadiness] = useState<TrainingReadiness>({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false })
+  const [readiness, setReadiness] = useState<TrainingReadiness>({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false, outputAvailable: false })
   const [checking, setChecking] = useState(true)
   const [readinessRevision, setReadinessRevision] = useState(0)
 
@@ -43,7 +48,7 @@ export function TrainingWorkspace() {
   useEffect(() => {
     if (!projectRoot || !isTauriRuntime()) {
       const available = Boolean(project)
-      setReadiness({ runtimeAvailable: available, datasetAvailable: available, geometryAvailable: available })
+      setReadiness({ runtimeAvailable: available, datasetAvailable: available, geometryAvailable: available, outputAvailable: available, cudaAvailable: available, vulkanAvailable: available })
       setChecking(false)
       return
     }
@@ -51,7 +56,7 @@ export function TrainingWorkspace() {
     setChecking(true)
     invoke<TrainingReadiness>('get_training_readiness', { projectRoot })
       .then((value) => { if (!disposed) setReadiness(value) })
-      .catch(() => { if (!disposed) setReadiness({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false }) })
+      .catch(() => { if (!disposed) setReadiness({ runtimeAvailable: false, datasetAvailable: false, geometryAvailable: false, outputAvailable: false }) })
       .finally(() => { if (!disposed) setChecking(false) })
     return () => { disposed = true }
   }, [project, projectRoot, readinessRevision])
@@ -61,7 +66,11 @@ export function TrainingWorkspace() {
   const persistedMode = trainingWorkspaceMode(trainingStatus, trainingRunning)
   const mode = configureNext && !trainingRunning ? 'setup' : persistedMode
   const preset = deriveTrainingPreset(config)
-  const blocker = trainingStartBlocker(Boolean(project && projectRoot), readiness, running)
+  const blocker = batchActive
+    ? { reason: '批量队列正在运行，请先停止队列', action: null }
+    : taskInputLocked
+      ? { reason: taskInputLockReason, action: null }
+    : trainingStartBlocker(Boolean(project && projectRoot), readiness, running)
   const percent = trainingDisplayPercent(trainingStatus, project?.training.lastIteration ?? 0, project?.training.totalIterations ?? 0, trainingRunning, progress.percent)
   const iteration = progress.current ?? project?.training.lastIteration ?? 0
   const total = progress.total ?? project?.training.totalIterations ?? config.iterations
@@ -125,6 +134,7 @@ export function TrainingWorkspace() {
           checking={checking}
           advancedOpen={advancedOpen}
           blocker={blocker}
+          inputsDisabled={taskInputLocked}
           onAdvancedOpenChange={setAdvancedOpen}
           onSelectPreset={selectPreset}
           onChange={update}

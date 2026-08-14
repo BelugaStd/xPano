@@ -649,6 +649,17 @@ class LichtfieldStudioCliTests(unittest.TestCase):
 
 
 class LichtfeldDensifyCliTests(unittest.TestCase):
+    def test_romav2_uses_the_bundled_dinov3_source_without_network(self):
+        plugin = Path(__file__).resolve().parents[1] / "tools" / "lichtfeld-densification-plugin"
+        features = plugin / "RoMaV2" / "src" / "romav2" / "features.py"
+        repository = plugin / "third_party" / "dinov3"
+
+        self.assertTrue((repository / "hubconf.py").is_file())
+        self.assertTrue((repository / "LICENSE.md").is_file())
+        source = features.read_text(encoding="utf-8")
+        self.assertIn("repo_or_dir=_bundled_dinov3_repository()", source)
+        self.assertIn('source="local"', source)
+
     def test_locates_default_project_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -809,7 +820,7 @@ class LichtfeldDensifyCliTests(unittest.TestCase):
         )
 
         self.assertEqual(calls[0][0], command)
-        self.assertEqual(progress, [90, 100])
+        self.assertEqual(progress, [100])
         self.assertTrue(any("LichtFeld densification" in line for line in logs))
 
     def test_standalone_runner_forwards_plugin_help(self):

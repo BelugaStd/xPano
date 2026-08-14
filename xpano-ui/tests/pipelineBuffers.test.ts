@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { appendBoundedLog, mergeMediaItemBatch } from '../src/lib/pipelineBuffers.ts'
 import { DEFAULT_PROJECT_PATH } from '../src/app/routes.ts'
@@ -11,8 +12,16 @@ function item(id: string) {
   }
 }
 
-test('the application defaults to the media import workspace', () => {
+test('the application defaults to the manual media workspace', () => {
   assert.equal(DEFAULT_PROJECT_PATH, '/project/media')
+})
+
+test('release routing redirects legacy batch URLs to the manual workspace', () => {
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
+
+  assert.match(app, /<Route path="\/batch\/\*" element={<Navigate to={DEFAULT_PROJECT_PATH} replace \/>} \/>/)
+  assert.doesNotMatch(app, /element={<BatchShell/)
+  assert.doesNotMatch(app, /element={<BatchTaskEditor/)
 })
 
 test('mergeMediaItemBatch deduplicates updates and keeps a bounded live window', () => {

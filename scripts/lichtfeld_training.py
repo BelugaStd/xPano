@@ -31,12 +31,39 @@ _FATAL_ERROR_MARKERS = (
     "unhandled exception",
 )
 
+_LFS_ENVIRONMENT_REMOVALS = (
+    "CONDA_PREFIX",
+    "CONDA_DEFAULT_ENV",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "QT_PLUGIN_PATH",
+    "QT_QPA_PLATFORM_PLUGIN_PATH",
+    "VIRTUAL_ENV",
+    "XPANO_PYTHON",
+    "XPANO_ROOT",
+)
+
+_LFS_STARTUP_INACTIVITY_SECONDS = 300
+
+
+def _is_lfs_environment_override(name):
+    normalized = str(name).upper()
+    return (
+        normalized in _LFS_ENVIRONMENT_REMOVALS
+        or normalized in {"CUDA_HOME", "CUDA_ROOT"}
+        or normalized.startswith("CUDA_PATH")
+        or normalized.startswith("VULKAN_")
+        or normalized.startswith("VK_")
+    )
+
 
 @dataclass(frozen=True)
 class LichtfeldTrainingConfig:
     executable: Path
     data_path: Path
     output_path: Path
+    profile_root: Path | None = None
     output_name: str = "xpano_gaussian"
     iterations: int = 30000
     strategy: str = "mrnf"
@@ -56,6 +83,33 @@ class LichtfeldTrainingConfig:
     background_color: str = "#000000"
     gui: bool = True
     close_on_finish: bool = True
+
+
+def build_lichtfeld_environment(executable, profile_root, inherited=None):
+    executable = Path(executable).resolve(strict=False)
+    profile_root = Path(profile_root).resolve(strict=False)
+    roaming = profile_root / "AppData" / "Roaming"
+    local = profile_root / "AppData" / "Local"
+    for directory in (profile_root, roaming, local):
+        directory.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ if inherited is None else inherited)
+    for name in list(environment):
+        if _is_lfs_environment_override(name):
+            environment.pop(name, None)
+    for name in ("HOMEDRIVE", "HOMEPATH"):
+        environment.pop(name, None)
+    system_root = Path(environment.get("SystemRoot", r"C:\\Windows"))
+    environment["PATH"] = os.pathsep.join(
+        [str(executable.parent), str(system_root / "System32"), str(system_root)]
+    )
+    environment["HOME"] = str(profile_root)
+    environment["USERPROFILE"] = str(profile_root)
+    environment["APPDATA"] = str(roaming)
+    environment["LOCALAPPDATA"] = str(local)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8:replace"
+    return environment
 
 
 def _append_value(command, flag, value):
@@ -266,6 +320,101 @@ def _query_runtime_state(port, request_id):
     return parse_runtime_state_result(result)
 
 
+class LichtfeldStartupWatchdog:
+    def __init__(self, timeout_seconds=_LFS_STARTUP_INACTIVITY_SECONDS, started_at=None):
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.last_activity_at = time.monotonic() if started_at is None else float(started_at)
+        self.last_activity = "LichtFeld GUI process started"
+
+    def touch(self, activity, now=None):
+        self.last_activity_at = time.monotonic() if now is None else float(now)
+        self.last_activity = str(activity)
+
+    def expired(self, now=None):
+        current = time.monotonic() if now is None else float(now)
+        return current - self.last_activity_at >= self.timeout_seconds
+
+    def failure_message(self, now=None):
+        current = time.monotonic() if now is None else float(now)
+        inactive = max(0, int(current - self.last_activity_at))
+        return (
+            "LFS_STARTUP_STALLED: LichtFeld GUI made no startup progress for "
+            f"{inactive} seconds (last activity: {self.last_activity})"
+        )
+
+
+def classify_lichtfeld_failure(error):
+    message = str(error)
+    normalized = message.casefold()
+    if "out of memory" in normalized or "cuda oom" in normalized:
+        return "LFS_GPU_OUT_OF_MEMORY"
+    if "vulkan" in normalized:
+        return "LFS_VULKAN_RUNTIME_FAILED"
+    if "nvcuda" in normalized or "cuda" in normalized or "nvidia" in normalized:
+        return "LFS_CUDA_RUNTIME_FAILED"
+    if "dll" in normalized or "specified module" in normalized or "loadlibrary" in normalized:
+        return "LFS_RUNTIME_LOADER_FAILED"
+    match = re.search(r"\b(LFS_[A-Z_]+)\b", message)
+    if match:
+        return match.group(1)
+    return "LFS_TRAINING_FAILED"
+
+
+def _scrub_diagnostic_text(value, config):
+    text = str(value)
+    protected = [
+        config.data_path,
+        config.output_path,
+        config.profile_root,
+        Path(os.environ.get("USERPROFILE", "")) if os.environ.get("USERPROFILE") else None,
+        Path(os.environ.get("HOME", "")) if os.environ.get("HOME") else None,
+    ]
+    for path in sorted((item for item in protected if item), key=lambda item: len(str(item)), reverse=True):
+        text = text.replace(str(path), "<path>")
+    text = re.sub(r"(?i)\b[a-z]:\\[^\r\n\"']+", "<path>", text)
+    text = re.sub(r"(?<!\w)/(?:users|home)/[^\s\r\n\"']+", "<path>", text, flags=re.IGNORECASE)
+    return text
+
+
+def build_lichtfeld_diagnostic(config, error, log_lines):
+    message = _scrub_diagnostic_text(error, config)
+    exit_match = re.search(r"LFS_PROCESS_EXITED:(-?\d+)", str(error))
+    return {
+        "schemaVersion": 1,
+        "runtime": {
+            "name": "LichtFeld Studio",
+            "executable": config.executable.name,
+        },
+        "failure": {
+            "code": classify_lichtfeld_failure(error),
+            "message": message,
+            "exitCode": int(exit_match.group(1)) if exit_match else None,
+        },
+        "launch": {
+            "iterations": config.iterations,
+            "strategy": config.strategy,
+            "shDegree": config.sh_degree,
+            "maxGaussians": config.max_gaussians,
+            "resizeFactor": config.resize_factor,
+            "maxWidth": config.max_width,
+            "gui": config.gui,
+        },
+        "recentLog": [_scrub_diagnostic_text(line, config) for line in list(log_lines)[-200:]],
+    }
+
+
+def write_lichtfeld_diagnostic(config, error):
+    log_path = config.output_path.resolve(strict=False) / "lichtfeld.log"
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    payload = build_lichtfeld_diagnostic(config, error, lines)
+    path = config.output_path.resolve(strict=False) / "xpano-lfs-diagnostic.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
 class LichtfeldLogTracker:
     def __init__(self, expected_iterations):
         self.total = max(0, int(expected_iterations))
@@ -363,14 +512,16 @@ def _latest_artifact(output_path):
 
 
 def _drain_output(lines):
+    activity_seen = False
     while True:
         try:
             raw_line = lines.get_nowait()
         except queue.Empty:
-            return
+            return activity_seen
         if raw_line:
             line = raw_line.rstrip()
             if line:
+                activity_seen = True
                 print(line, flush=True)
 
 
@@ -417,10 +568,8 @@ def run_lichtfeld_training(config):
     log_path = output_path / "lichtfeld.log"
     log_path.unlink(missing_ok=True)
     command = build_lichtfeld_training_command(config)
-    environment = os.environ.copy()
-    environment["PATH"] = str(executable.parent) + os.pathsep + environment.get("PATH", "")
-    environment["PYTHONUTF8"] = "1"
-    environment["PYTHONIOENCODING"] = "utf-8:replace"
+    profile_root = config.profile_root or output_path.parent / ".xpano-lfs-profile"
+    environment = build_lichtfeld_environment(executable, profile_root)
     _emit_pipeline_event({
         "phase": "train",
         "stage": "training.launch",
@@ -462,17 +611,23 @@ def run_lichtfeld_training(config):
     next_mcp_poll_at = 0.0
     mcp_request_id = 3
     mcp_poll_failures = 0
-    startup_deadline = time.monotonic() + 120
+    startup_watchdog = LichtfeldStartupWatchdog()
 
     while True:
-        _drain_output(output_lines)
+        if _drain_output(output_lines):
+            startup_watchdog.touch("LichtFeld standard output is active")
+        previous_log_offset = log_offset
         log_offset, pending, new_lines = _read_new_log_lines(log_path, log_offset, pending)
+        if log_offset > previous_log_offset:
+            startup_watchdog.touch("LichtFeld log is growing")
         for line in new_lines:
             mcp_match = _MCP_LISTENING.search(line)
             if mcp_match:
                 mcp_port = int(mcp_match.group(1))
+                startup_watchdog.touch("LichtFeld MCP server is available")
             if _DATASET_LOADED.search(line):
                 dataset_ready = True
+                startup_watchdog.touch("LichtFeld dataset load completed")
             event = tracker.parse_line(line)
             if event is None:
                 continue
@@ -502,6 +657,7 @@ def run_lichtfeld_training(config):
                 _close_managed_process(process)
                 raise
             training_started = True
+            startup_watchdog.touch("xPano training parameters were applied")
             next_mcp_poll_at = time.monotonic() + 1.0
 
         now = time.monotonic()
@@ -518,6 +674,7 @@ def run_lichtfeld_training(config):
                 event = tracker.update_from_mcp_state(state)
                 _emit_pipeline_event(event)
                 mcp_poll_failures = 0
+                startup_watchdog.touch("LichtFeld runtime state is available")
             except RuntimeError as error:
                 mcp_request_id += 1
                 mcp_poll_failures += 1
@@ -525,9 +682,9 @@ def run_lichtfeld_training(config):
                 if mcp_poll_failures == 1 or mcp_poll_failures % 10 == 0:
                     print(f"WARNING:LichtFeld progress polling failed: {error}", flush=True)
 
-        if not training_started and time.monotonic() > startup_deadline:
+        if not training_started and startup_watchdog.expired():
             _close_managed_process(process)
-            raise RuntimeError("LichtFeld GUI did not finish loading the dataset within 120 seconds")
+            raise RuntimeError(startup_watchdog.failure_message())
 
         if tracker.fatal_error:
             _close_managed_process(process)
@@ -565,8 +722,8 @@ def run_lichtfeld_training(config):
                     "artifactPath": str(artifact),
                 }, ensure_ascii=False), flush=True)
                 return
-            detail = tracker.fatal_error or f"LichtFeld Studio exited with code {return_code}"
-            raise RuntimeError(detail)
+            detail = tracker.fatal_error or "LichtFeld Studio exited before training completed"
+            raise RuntimeError(f"LFS_PROCESS_EXITED:{return_code}: {detail}")
 
         time.sleep(0.1)
 
@@ -576,6 +733,7 @@ def build_arg_parser():
     parser.add_argument("--executable", required=True)
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-path", required=True)
+    parser.add_argument("--profile-root")
     parser.add_argument("--project-root")
     parser.add_argument("--output-name", default="xpano_gaussian")
     parser.add_argument("--iterations", type=int, default=30000)
@@ -605,6 +763,7 @@ def main(argv=None):
         executable=Path(args.executable),
         data_path=Path(args.data_path),
         output_path=Path(args.output_path),
+        profile_root=Path(args.profile_root) if args.profile_root else None,
         output_name=args.output_name,
         iterations=args.iterations,
         strategy=args.strategy,
@@ -628,7 +787,13 @@ def main(argv=None):
     try:
         run_lichtfeld_training(config)
     except Exception as error:
-        print(f"ERROR:{error}", flush=True)
+        code = classify_lichtfeld_failure(error)
+        try:
+            diagnostic = write_lichtfeld_diagnostic(config, error)
+            print(f"LFS_DIAGNOSTIC:{diagnostic}", flush=True)
+        except OSError:
+            pass
+        print(f"ERROR:{code}: {_scrub_diagnostic_text(error, config)}", flush=True)
         return 1
     return 0
 

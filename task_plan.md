@@ -4,7 +4,7 @@
 在保留现有用户改动的前提下，完整实现 `docs/UI_WORKSPACE_REDESIGN_SPEC.md` 的阶段 3（对齐工作区）和阶段 4（成果与后处理），使用 `D:\3DRegistration\test` 的真实素材打通抽帧、对齐、点云预览和致密化；随后实现可重复、可诊断、安装即用的 Windows 安装器。CUDA、torch、Open3D 等致密化大依赖不随包发布，缺失时按受控镜像源自动配置；本任务期间禁止实际下载大包，使用下载计划、假源和小型探针验收。
 
 ## Current Phase
-Phase 52 complete
+Phase 66 complete
 
 ## Phases
 
@@ -990,3 +990,375 @@ Ship the accepted training UI and camera/runtime fixes as `1.0.0-preview`, inclu
 
 - The first post-fix source search passed an `rg` pattern beginning with `--executable` before the option terminator, so `rg` rejected it as a flag. Retried with a literal search form.
 - `cargo fmt --check` is unavailable because `rustfmt` is not installed for `stable-x86_64-pc-windows-gnu`. This is a local tooling gap, not a source failure; verification will use an available formatter toolchain if present plus compiler and diff checks.
+
+# Phase 55: 0.1.0/current alignment-quality differential and Component inventory diagnosis
+
+## Goal
+
+Establish evidence-backed root causes for current xPano producing lower Metashape alignment quality than `0.1.0` with the same Metashape version. Audit the complete import-to-export behavior and independently determine why a PSX with two Components is represented as one Component in xPano. This phase is diagnosis-only and must not change product behavior.
+
+## Plan
+
+- [x] Inventory the authoritative `0.1.0` and current entrypoints, manifests, extraction scripts, defaults, and persisted reconstruction artifacts.
+- [x] Build an exact behavior matrix for import grouping, image dimensions/encoding/EXIF, sensor creation, camera model/group assignment, Metashape match/alignment/optimization calls, retries, and camera state transitions.
+- [x] Compare available old-good and new-bad workspaces to distinguish input/preprocessing differences from solver-policy differences.
+- [x] Trace Component enumeration from Metashape PSX through summary/report persistence, Rust project state, and frontend selector rendering.
+- [x] Rank confirmed causes and contributing risks by evidence and blast radius; explicitly separate proven defects from hypotheses.
+- [x] Report the smallest maintainable correction boundaries and required regression coverage without editing product code or packaging.
+
+**Status:** complete; the current solver contract and Component inventory/export defects are isolated with native Metashape 2.3 evidence. No product behavior or release artifact was changed.
+
+## Errors Encountered
+
+- The first calibration probe used a raw Windows string ending in a backslash and failed at parse time. The path was split at a safe boundary and the probe then ran successfully under Metashape 2.3.0.
+- A local Metashape 2.2.1 runner does not expose `EquidistantFisheye`; the compatibility comparison was rerun with the installed 2.3.0 build used by the old-good/current-bad evidence.
+
+# Phase 56: restore 0.1.0 Metashape alignment contract and progress truthfulness
+
+## Goal
+
+Restore the proven `0.1.0` panorama calibration bootstrap and panorama-first incremental alignment behavior, while making the execution plan, stage events and frontend progress display describe the actual Metashape calls. Component inventory/export is intentionally outside this phase.
+
+## Plan
+
+- [x] Add failing regression tests for legacy-compatible panorama calibration, panorama-only behavior, and mixed-material incremental call ordering.
+- [x] Add failing plan/progress tests proving mixed reconstruction exposes separate panorama match/align and flat incremental match/align stages.
+- [x] Implement the smallest compatibility helper and sequential alignment flow without adding a second solver abstraction.
+- [x] Synchronize backend execution plans, development preview stages and user-facing stage labels with the restored flow.
+- [x] Run focused tests, complete Python/frontend/Rust gates appropriate to the touched layers, static compile checks and diff hygiene.
+- [x] Perform a five-axis review and record remaining risks; do not build or publish a release.
+
+**Status:** complete; the `0.1.0` calibration/alignment contract and truthful progress graph are restored. Static and automated source gates passed; no installer was built.
+
+# Phase 57: correct Component inventory, selection and re-export plan
+
+## Goal
+
+Design the smallest maintainable repair that makes xPano enumerate every Metashape Component correctly, lets the user select a Component based on real per-Component camera counts, exports the selected Component reliably, and refreshes stale PSX-derived state without mixing Component logic into alignment.
+
+## Plan
+
+- [x] Re-audit the Python Component helper, alignment report writer, initial export and PSX re-export call sites against Metashape's active-Component semantics.
+- [x] Re-audit Rust persistence and frontend selector behavior, including when reports become stale after manual PSX edits.
+- [x] Define one activation/restoration boundary and exact failure semantics for missing, empty or changed Components.
+- [x] Specify data-contract changes, stage/progress changes and backward compatibility for existing projects.
+- [x] Specify RED tests and static/native acceptance cases in implementation order.
+- [x] Record a complete implementation plan with explicit non-goals and common implementation mistakes; do not change product behavior in this phase.
+
+**Status:** complete; implementation plan recorded in `docs/METASHAPE_COMPONENT_REPAIR_PLAN.md`. No product behavior or release artifact was changed.
+
+# Phase 58: implement Component inventory, selection and export repair
+
+## Goal
+
+Implement the approved Phase 57 design end to end: truthful active-Component inventory, selected-Component leveling/export, live PSX inspection before re-export, strict key revalidation, truthful progress stages and regression coverage. Do not package a release.
+
+## Plan
+
+- [x] Add RED Python tests for active-scoped inventory, restoration, strict selection and selected export behavior.
+- [x] Implement the Python activation/inventory boundary and integrate initial/re-export reporting and export.
+- [x] Add the read-only PSX inspection entrypoint and release-staging guard.
+- [x] Add RED Rust tests, then implement validated asynchronous inspection and execution-plan stages.
+- [x] Add frontend view-model tests, then implement live inspection and conditional Component confirmation UI.
+- [x] Run focused and full Python/Rust/frontend gates, native read-only inspection where available, diff hygiene and five-axis review.
+
+**Status:** complete; Component inventory, selection and export now use the live active-Component contract end to end. No installer was built.
+
+## Errors Encountered
+
+- The first new release-staging regression called a nonexistent `self.fixture` helper. It was corrected to use the file's existing `make_fixture` pattern before confirming the intended missing-resource RED failure.
+- The first focused Rust run correctly exposed one older exact-stage-list assertion that had not yet included `metashape.component.select`; the expectation was updated and the full reconstruction module returned green.
+- `rustup` is not available on this machine, so no new formatter component could be queried or installed. Compiler, tests, lint, production build and `git diff --check` all passed without rewriting unrelated files.
+
+# Phase 59: package 2.0.0-preview Windows release
+
+## Goal
+
+Synchronize the application version to `2.0.0-preview`, run the repository's full release gates, build a new dependency-complete Windows x64 installer containing the restored alignment and Component repairs, and independently verify its manifest and SHA-256. Do not commit, tag or publish externally.
+
+## Plan
+
+- [x] Audit every authoritative version source and the existing standard release command.
+- [x] Add/execute version-consistency evidence, then update only authoritative version files to `2.0.0-preview`.
+- [x] Run Python, Rust and frontend source gates plus release-staging coverage.
+- [x] Build the standard dependency-complete Windows x64 installer with the existing release pipeline.
+- [x] Independently verify installer name/version/hash, staged manifest closure and critical Component scripts.
+- [x] Perform the five-axis release review and record final artifact details.
+
+**Status:** complete; the verified `2.0.0-preview` standard dependency-complete Windows x64 installer and SHA-256 sidecar are ready in `dist`. No commit, tag or external publication was performed.
+
+## Errors Encountered
+
+- A PowerShell `rg` version probe parsed embedded quotes as path fragments and failed after the npm/Tauri values had already been printed. Retried Cargo versions with `Select-String`; all six authoritative values are `2.0.0-preview`.
+- Two PowerShell runtime inventory attempts used a `foreach (...) { ... } |` construct rejected by this host as an empty pipe element. No files changed; subsequent inventory stores loop output in an explicit array before formatting.
+- The first installer build passed source tests and Rust release compilation but release staging rejected `tools/offline-wheels/metashape/numpy-1.26.4-cp39-cp39-win_amd64.whl` as missing or corrupt. No installer was produced; the exact manifest artifact is being restored from a hash-matching local payload before retrying.
+- A diagnostic wheel-tree inventory repeated the host-incompatible `foreach (...) { ... } |` PowerShell shape and failed without changing files. A manifest-driven retry found all five required Metashape wheels absent and verified exact size/SHA-256 matches for all five in the prior local full-offline payload.
+- The second installer attempt passed bundled-wheel validation but failed closed on `runtime/windows-x64/msvcp140.dll`. This revealed a broader source-payload cleanup; the entire Windows runtime manifest will be audited and restored in one pass before another build attempt.
+- The first combined source-closure probe had a PowerShell/Python nested-quote syntax error and changed nothing. The corrected probe validated both manifests, then found three further source omissions: bundled `python.exe`, bundled `tqdm` and the app `tqdm` wheel. The complete bundled Python tree is being compared before missing-only restoration.
+
+# Phase 60: investigate original LUT restoration support
+
+## Goal
+
+Determine exactly how the updated upstream `pano_extractor_GUI.py` implements LUT restoration, whether the behavior can be integrated into xPano without regressing extraction speed, preview consistency or alignment inputs, and produce a maintainable implementation plan. This phase is research/design only and must not change product behavior.
+
+## Plan
+
+- [x] Reverse-engineer the upstream LUT file contract, validation, image transform and GUI state flow.
+- [x] Trace xPano's current panorama import, extraction, thumbnail, manifest and alignment-input boundaries.
+- [x] Compare dependencies, color/depth/geometry behavior, hardware acceleration constraints and large-media performance.
+- [x] Select the smallest integration boundary and define compatibility, fallback and failure semantics.
+- [x] Record an implementation sequence, regression tests and static/runtime acceptance criteria with explicit non-goals.
+
+**Status:** complete; feasibility is confirmed and the implementation sequence is recorded in `docs/LUT_RESTORATION_INTEGRATION_PLAN.md`. No product code or behavior was changed.
+
+## Errors Encountered
+
+- The first synthetic FFmpeg LUT probe decoded subprocess stderr with the Windows GBK default. FFmpeg echoed the Unicode/special-character test path as UTF-8, causing `UnicodeDecodeError` and then a diagnostic-only `None.strip()` failure. No product files changed; the probe will be rerun with explicit UTF-8 replacement decoding.
+- The first identity-LUT pixel comparison used blue-fastest cube ordering, which is not the `.cube` red-fastest ordering expected by FFmpeg and produced an intentional-looking channel swap. The test fixture was corrected before drawing any color-fidelity conclusion.
+- A source read targeted nonexistent `scripts/prepare_project.py`; repository search identified the actual project media entrypoint as `scripts/run_xpano_prepare_project.py`. No files changed; subsequent tracing uses the registered entrypoint.
+
+# Phase 61: implement per-video LUT restoration
+
+## Goal
+
+Implement the approved LUT restoration plan end to end while preserving the exact no-LUT extraction path, existing decoder fallback, preview/alignment consistency and project v3 compatibility. Do not package or publish a release.
+
+## Plan
+
+- [x] Add RED Rust contract, validation and track-invalidation tests.
+- [x] Add RED Python filter, safe-path snapshot, fallback and project-propagation tests.
+- [x] Implement the minimal Rust and Python data/extraction path and turn focused tests green.
+- [x] Add RED frontend helper tests, then implement video-only LUT selection/edit/clear controls.
+- [x] Run focused and full Python/Rust/frontend gates, build, diff hygiene and final code review.
+
+**Status:** complete; LUT restoration is implemented and verified across contracts, extraction, project preparation and media UI. Baseline source commit `6157b7e` remains the pre-feature checkpoint; no installer was built.
+
+# Phase 62: bundled camera LUT presets
+
+## Goal
+
+Extend the completed per-video LUT feature so a user can enable one simple color-restoration switch while importing an `.osv` panorama video. It selects an xPano-bundled DJI Osmo 360 D-Log M -> Rec.709 preset. `.insv` remains manual-LUT-only. Never store an installation-specific resource path in a project, and fail visibly if the selected bundled resource is absent or corrupt.
+
+## Plan
+
+- [x] Inspect the existing per-track LUT contract, import type detection, resource resolver, release staging and the upstream reference implementation.
+- [x] Obtain the user-supplied DJI D-Log M -> Rec.709 `.cube` asset and record its source/hash. Its header identifies Mavic 3 Pro rather than Osmo 360; retain that caveat in the bundled LUT documentation.
+- [x] Add a stable builtin preset identifier to the project contract alongside the existing manual path, with strict mutual-exclusion, old-project compatibility and stale/invalidation tests.
+- [x] Resolve builtin identifiers only at runtime through the packaged resource resolver; validate the selected resource hash before the media job becomes running.
+- [x] Update panorama import and track editing UI: restoration switch is available for `.osv` panorama tracks only and defaults off; enabling assigns the DJI builtin preset. `.insv` keeps the current manual selection control and no automatic preset.
+- [x] Stage the LUT assets into the release resources and add release-manifest coverage.
+- [x] Run full suites, production build and static packaging checks. A real FFmpeg extraction through the bundled LUT has passed.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Switch defaults off; automatic preset applies only to `.osv` | User explicitly scoped automatic restoration to DJI Osmo 360 D-Log M. `.insv` stays manual because Insta360's official download page ships distinct LUT archives by model. |
+| Persist `builtin:<id>` rather than a packaged path | Application resources move between development, NSIS installation and upgrades. A stable ID keeps projects portable and lets the runtime resolve the local installed asset. |
+| Builtin and custom selections are mutually exclusive | One effective LUT is easy to explain and prevents accidental LUT stacking. |
+| Missing/tampered builtin LUT fails the job | Continuing without selected restoration would silently create different pixels than the project configuration promises. |
+
+**Status:** complete. The supplied LUT is packaged exactly as provided and bound to the `.osv` switch by product decision; its non-Osmo 360 header remains disclosed in `luts/README.md`. No installer was built.
+
+## Errors Encountered
+
+- A read-only PowerShell size inventory used a host-incompatible `foreach (...) { ... } |` pipeline and failed without changing files. Commit scope was verified instead through Git status and explicit staging.
+- The first focused Cargo command passed two test filters even though Cargo accepts one; it changed nothing and was rerun with the shared `color_lut` filter, which produced the intended RED failure.
+- A repository search used Unix-style wildcard path arguments that Windows `rg` rejected. The retry used `-g '*.rs'` and found the complete Rust literal surface.
+- The first project-propagation test returned a mocked frame outside the project root, correctly triggering the existing artifact-containment guard. The fixture was moved under `work/frames`; product code was unchanged.
+- The first real special-path probe sent literal Chinese characters through a PowerShell stdin encoding boundary, turning them into Windows-invalid `?` characters before Python ran. The retry used ASCII `\u` escapes, created the intended Unicode path, and completed successfully.
+- Playwright's default Chrome channel exited during startup with code 13. The same CLI workflow was rerun with the installed Edge channel and completed desktop-width UI inspection and screenshots.
+- `cargo fmt --check` remains unavailable because `cargo-fmt.exe` is not installed for `stable-x86_64-pc-windows-gnu`. Rust compilation and all 104 Rust tests pass; no toolchain component was installed or repository formatting rewritten.
+
+# Phase 63: restoration and style LUT chain
+
+## Goal
+
+Allow every video track to apply one optional user-selected style LUT. An `.osv` panorama track may additionally apply the existing bundled restoration preset first. Non-Log video must be able to use only the style LUT. Preserve old projects that use `colorLutPath`, keep the no-LUT path unchanged, and limit the product to two ordered transforms rather than an arbitrary LUT graph.
+
+## Design
+
+| Layer | Stored setting | Applies to | Order |
+|-------|----------------|------------|-------|
+| Restoration | existing `colorLutPreset` | `.osv` panorama only | first |
+| Style | new `styleLutPath` | panorama and ordinary video | second |
+
+`colorLutPath` is the old single-manual-LUT key. It migrates to `styleLutPath` when an old project is read or next saved. `colorLutPreset` remains the existing stable packaged-resource identifier, avoiding a needless rename of the portable preset contract.
+
+The FFmpeg graph is conditional: `fps -> [restore lut3d] -> [style lut3d] -> yuvj420p`. A non-Log source with only a style LUT uses `fps -> style lut3d -> yuvj420p`; a source with neither LUT retains the current `fps`-only graph and no temporary LUT directory.
+
+## Plan
+
+- [ ] Add RED contract/migration tests: old `colorLutPath` becomes `styleLutPath`, serializes only the new key, and restoration may coexist with style.
+- [ ] Replace the single manual-path field across Rust, TypeScript and Python with `styleLutPath`, retaining old-key read compatibility and clearing both layers when a track becomes non-video.
+- [ ] Keep strict preflight: style must be an existing `.cube` on a video track; restoration remains `.osv`-only and hash-checked; failures occur before status/marker mutation.
+- [ ] Propagate separate restoration/style paths through project preparation and track builders.
+- [ ] Replace the one-file extractor staging with one safe temporary bundle (`restore.cube`, `style.cube`), validate each through FFmpeg, and reuse the ordered graph for both panorama eyes/streams and normal-video frames.
+- [ ] Redesign media controls: `.osv` gets a default-off restoration toggle plus style picker; `.insv` and ordinary video get only the style picker. Leaving eligible `.osv` clears restoration but preserves style.
+- [ ] Test direct style usage, restoration-plus-style order, legacy migration, special paths, no-LUT baseline, eye parity, and preflight non-mutation; then run all gates and a real two-stage FFmpeg smoke extraction.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Maximum two stages | Covers the real workflow without an unbounded, slow and hard-to-explain LUT graph. |
+| Fixed restoration-before-style order | Style LUTs are normally authored for display-referred Rec.709/sRGB imagery, not camera Log input. |
+| Style works without restoration | Required for Rec.709/non-Log footage; it does not impose a D-Log transform. |
+| Preserve the no-LUT fast path | LUT processing is CPU work; material without either option keeps current extraction cost and output behavior. |
+
+**Status:** planned only. No Phase 63 product code has been written and no release build is in scope.
+
+# Phase 66: user-facing README
+
+## Goal
+
+Replace the repository README with a concise Chinese guide written from the perspective of an xPano user. It must explain the normal workflow, major capabilities, project/output layout, supported inputs, external-tool requirements, and safety/quality limits without documenting developer implementation details.
+
+## Plan
+
+- [x] Inventory current user-visible workflows from UI, Tauri commands, scripts, packaging resources, and existing product documents.
+- [x] Cross-check import types, processing stages, project artifacts, environment dependencies, and recovery boundaries against source code.
+- [x] Draft the root README with task-oriented sections: prerequisites, quick start, feature map, project files, and important notes.
+- [x] Review every factual statement against source, then run Markdown and repository-status checks.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Write for end users, not developers | The requested document should help a new user complete a project instead of exposing internal architecture. |
+| Document current limitations explicitly | Alignment quality, external Metashape ownership, and on-demand densification setup affect whether a user can finish safely. |
+| Keep the guide concise | The README should be a first-use guide; advanced implementation detail belongs in `docs/`. |
+
+**Status:** complete. The root README is now a concise source-backed Chinese user guide. No application code, package, or release artifact changed.
+# Phase 67: LFS launch and packaging reliability hardening
+
+## Goal
+
+Make the bundled LichtFeld Studio v0.5.3 runtime reproducible, isolated, diagnosable, and release-gated on Windows x64. Keep Gaussian training and on-demand densification as separate runtime chains. Do not change LFS training semantics or upgrade the upstream runtime during this phase.
+
+## Detailed Plan
+
+### A. Freeze the LFS supply chain and release boundary
+
+- [x] Baseline the exact v0.5.3 archive, upstream commit, license, complete portable layout, and current parameter/progress behavior as regression fixtures.
+- [x] Replace the untracked-directory build input with a pinned, content-addressed archive and tracked manifest. The manifest records the upstream commit, archive name/size/SHA-256, sentinels, and the filtered per-file inventory.
+- [x] Route installer assembly through one staging contract. The former portable assembler delegates to the installer path so no package variant can silently omit `runtime/lichtfeld-studio`.
+- [x] Make staging fail closed for missing, modified, extra, non-portable, or incomplete LFS files; retain PE import-closure, architecture, license, resource-layout, and relocated-tree checks.
+- [ ] Add an explicit release-signing gate. A production release must either carry the configured signing identity or fail; an unsigned development build must be visibly marked and excluded from promotion.
+
+### B. Establish one production runtime boundary
+
+- [ ] Introduce a small Rust `LichtfeldRuntime` resolver used by readiness, start-training, and diagnostics. It returns only the packaged executable, bundled supervisor Python/scripts, resource root, profile root, normal Windows executable path, and the manifest version.
+- [ ] Move duplicated path/file checks out of `run_lichtfeld_preflight`, `training_readiness_blocking`, and `start_training_job_blocking` into that resolver. Keep `plain_windows_path` on the third-party executable and its working directory; do not reintroduce `\\?\\` paths.
+- [ ] Make production resolution package-first and non-overridable. Development overrides remain available only behind an explicit development-build switch, never through ordinary environment variables or the user PATH.
+- [ ] Launch the bundled Python supervisor with an allowlisted child environment: remove Conda/venv/Python/plugin/DLL-injection variables, keep Windows system variables and GPU-driver discovery, set only the required UTF-8 and user-site controls, and record the sanitized launch contract in diagnostics without serializing the environment itself.
+
+### C. Isolate persistent LFS state without breaking normal GUI use
+
+- [ ] Verify the upstream-supported config/profile controls with a native LFS launch before changing ownership. Do not invent unsupported command-line flags or modify the bundled LFS tree at runtime.
+- [ ] Keep xPano-owned LFS state under `%LOCALAPPDATA%\\xPano\\lichtfeld-studio\\<manifest-version>`, separate from any globally installed LichtFeld profile. Split stable GUI preferences from per-run temporary state so a stale training session cannot affect the next run.
+- [ ] Allocate per-job launch metadata and log directories under the existing project training run. Clean only xPano-created stale lock/process metadata after proving the owning process has exited; never erase a user LFS profile or previous training artifacts.
+- [ ] Add an upgrade rule: a manifest-version change creates a fresh xPano profile, preserves the prior one for rollback, and gives a deterministic migration/cleanup notice rather than sharing incompatible state.
+
+### D. Make readiness one authoritative, bounded protocol
+
+- [ ] Keep full hashing in staging; at runtime hash only the manifest sentinels and verify the executable's normal-path resource layout. Cache a successful check by manifest version plus sentinel metadata, then invalidate it if the install changes.
+- [ ] Expand `runtime_readiness.py lichtfeld-probe` into the sole structured preflight: manifest/resource mismatch, executable `--version`, CUDA driver load/device count, Vulkan loader/device count, valid COLMAP input, writable output, profile creation, and child startability.
+- [ ] Give every terminal preflight failure a stable public code, a concise recovery action, and raw technical detail for the diagnostic bundle. Distinguish runtime corruption, missing VC/DLL dependency, driver missing, unsupported GPU, Vulkan failure, bad dataset, and unwritable output.
+- [ ] Have AppShell and the training workspace consume the same cached result. The start action must rerun the fast critical checks immediately before writing job state, then fail before `begin_job_impl` on a non-ready runtime.
+
+### E. Make launch, progress, cancellation, and restart robust
+
+- [ ] Preserve the current GUI-first command and MCP-based parameter application. Do not retry or restart a native LFS process automatically after a crash or user close.
+- [ ] Replace the absolute 120-second start limit with an inactivity watchdog. Valid stdout, log growth, MCP listener availability, dataset-load completion, parameter acknowledgement, and runtime progress refresh activity; a live but slow large dataset is allowed to continue.
+- [ ] Retain a separate hard upper bound for a completely silent child and configurable short graceful-shutdown/kill bounds for cancel. A timeout always records the last meaningful activity, elapsed idle time, process ID, and native exit code.
+- [ ] Treat manual LFS-window closure and child exit as one terminal state. Drain final stdout/log bytes, capture exit code, mark the project job failed or interrupted exactly once, release the pipeline lock, and leave the next Start action enabled.
+- [ ] Keep progress polling non-fatal. MCP failures remain visible diagnostics while stdout/log progress continues; training only fails on explicit LFS fatal output, native exit, inactivity timeout, or missing completed artifact.
+
+### F. Add actionable diagnostics and support artifacts
+
+- [ ] Write a per-run structured launch record before spawning: app/LFS/manifest versions, resolved normal paths, selected GPU probe result, command flags with data paths redacted to project-relative form, profile generation, timestamps, and preflight result.
+- [ ] On failure, collect bounded stdout/stderr tail, LFS log tail, exit status, watchdog history, sentinel outcomes, GPU/Vulkan diagnostics, and process-tree information. Do not collect user environment variables, unrelated file names, or complete media paths.
+- [ ] Provide one UI action to open/export this diagnostic bundle, and map public failure codes to recovery text that never claims a DLL is missing when the true fault is a driver, asset, stale state, or process crash.
+
+### G. Keep densification isolated and validate the installed product
+
+- [ ] Do not merge LFS GUI training with the on-demand Torch/Open3D densification runtime. The two have independent manifests, Python activators, logs, cache roots, and recovery messages.
+- [ ] On densification startup, revalidate the selected CPU/CUDA profile and issue a CUDA probe only for the CUDA profile; retain CPU fallback semantics where the task remains meaningful.
+- [ ] Add regression tests before each implementation boundary, then run unit/integration tests for Python, Rust, and frontend contracts; use staged-layout tests rather than source-only tests for packaging claims.
+- [ ] Run installed/relocated smoke tests from paths containing spaces and Chinese characters, with a polluted host Python/PATH and pre-existing user LFS state; cover a missing sentinel, DLL/driver failure, invalid Vulkan, manual close, silent timeout, slow-progress startup, rerun after failure, and upgrade/profile-version separation.
+- [ ] Only after all gates pass: construct a signed preview installer, verify the staged and installed manifests, retain the previous installer plus hashes for rollback, collect a small preview cohort's diagnostic bundles, and promote only if no runtime-class failure remains unexplained.
+
+## Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Pin v0.5.3 instead of upgrading LFS | The observed defects are packaging, isolation, readiness, and diagnostics failures. An upstream upgrade would add an unrelated compatibility variable. |
+| One staging implementation for installer and portable outputs | Duplicate packagers already produce different LFS capabilities and are a direct release risk. |
+| Full validation at build time, fast sentinel validation at startup | Hashing the entire 576 MB runtime on every page visit is unnecessary; build-time closure plus cached critical-file verification gives reliability without startup regressions. |
+| Fail fast on corrupt bundled files or unsupported GPU | Continuing can only crash or produce an invalid training run; there is no semantically equivalent fallback for GUI LFS training. |
+| Do not bundle `nvcuda.dll` or install a CUDA toolkit | `nvcuda.dll` belongs to the NVIDIA display driver. Copying it app-local would hide the real driver incompatibility and is not a valid repair. |
+| No automatic training retry | Retrying native crashes can duplicate GPU allocations or create competing output writers without correcting the cause. |
+
+**Status:** supply-chain/staging, runtime-boundary, supervisor isolation, readiness caching, terminal-error retention, and production-signing gates are implemented and source/installed/relocated development acceptance has passed. Production release remains intentionally blocked until a real signing certificate and timestamp service are configured.
+
+---
+
+# Phase 68: 批量任务调度模式调研与方案
+
+## Goal
+
+在不破坏现有四栏手动工作区的前提下，增加一个全局“任务列表”入口，支持多个项目串行执行抽帧、对齐、训练；单个任务失败后记录失败并自动继续下一个任务；用户可随时进入单任务详情或切回手动模式。
+
+## Scope for this phase
+
+- [ ] 盘点现有前端工作区、项目持久化、Rust 作业调度、Python 入口和事件恢复能力。
+- [ ] 评估至少两种批量调度方案并记录自我迭代与取舍。
+- [ ] 形成最终 UI 规范、状态模型、调度 seam、失败/恢复契约和分阶段落地计划。
+- [ ] 本阶段只产出调研与方案，不修改产品代码、不打包。
+
+## Decisions resolved in `docs/BATCH_MODE_DESIGN_PLAN.md`
+
+- Task-list data location and schema versioning。
+- Whether batch task outputs are created at task-add time or run-start time。
+- Queue cancellation semantics and per-task retry policy。
+
+**Status:** complete
+
+## Phase 68 decisions and research checkpoint
+
+- [x] Read prior session catch-up and preserve the dirty worktree boundary.
+- [x] Inspect router/shell/providers and confirm batch must be a top-level route.
+- [x] Inspect Rust pipeline/job seams and confirm one global serial executor.
+- [x] Inspect all three stage entrypoints and identify media's missing registered-job lifecycle.
+- [x] Compare two queue designs and record the second iteration/decision in `findings.md`.
+- [x] Finalize queue schema, UI specification, failure/recovery contract and implementation phases in `docs/BATCH_MODE_DESIGN_PLAN.md`.
+- [x] Queue data location: versioned atomic JSON under Tauri `app_local_data_dir()/batch/queue.json`.
+- [x] Task outputs: create a dedicated xPano project when the task is saved, using a unique user-selectable project root.
+- [x] Cancellation: stop current and continue, or stop the whole queue; no automatic retry; app-close recovery is explicit.
+- [x] Valid stage combinations are strict prefixes: media, media+reconstruction, or media+reconstruction+training.
+- [x] No product code or package was changed in this research phase.
+
+---
+
+# Phase 69: Full Offline Densification Installer
+
+## Goal
+
+Build and validate a Windows x64 NSIS installer that embeds the existing offline CPU/CUDA densification artifacts, without modifying the user's pending batch-mode source changes.
+
+## Plan
+
+- [x] Verify the installer path supports `-FullOffline` and locate the complete 5.007 GB artifact cache.
+- [x] Confirm disk capacity and required application runtime inputs.
+- [x] Attempt the full-offline NSIS development installer; NSIS 3.12 failed on the 3.224 GB CUDA wheel memory map.
+- [x] Build a 7-Zip SFX full-offline installer from the same validated payload.
+- [x] Verify the generated installer contains the runtime manifest, artifact cache, LFS runtime and essential binaries.
+- [x] Produce hashes and record the version/source relationship for release handoff.
+
+## Decision
+
+Use the existing application version `2.0.1-4kfix` because the package metadata has not been updated for the pending batch-mode changes. The release artifact will be explicitly named `full-offline-sfx-unsigned-dev`; it must not be represented as a signed NSIS production release.
+
+**Status:** complete. The validated 7-Zip SFX installer is ready for manual installation testing. No source commit, tag, or GitHub upload was performed.

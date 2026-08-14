@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import uuid
+import zipfile
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,7 @@ EXCLUDED_PARTS = {".git", "__pycache__", "_downloads"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".pdb"}
 RUNTIME_POWERSHELL = {"configure_environment.ps1", "install_lfs_densify.ps1"}
 SUPPORTED_METASHAPE_ABIS = {"cp39", "cp310", "cp311", "cp312"}
+LICHTFELD_MANIFEST_RELATIVE_PATH = Path("runtime") / "lichtfeld-studio-manifest.json"
 
 
 def _wheel_supports_abi(filename, target_abi):
@@ -73,14 +75,17 @@ def _portable_file(relative, source, kind):
     return True
 
 
-def _copy_tree(source, destination, kind):
+def _copy_tree(source, destination, kind, excluded_top_levels=()):
     source = Path(source)
     if not source.is_dir():
         raise ReleaseStagingError(f"Required release directory is missing: {source}")
+    excluded_top_levels = set(excluded_top_levels)
     for item in source.rglob("*"):
         if not item.is_file():
             continue
         relative = item.relative_to(source)
+        if relative.parts and relative.parts[0] in excluded_top_levels:
+            continue
         if _portable_file(relative, item, kind):
             _copy_file(item, destination / relative)
 
@@ -154,6 +159,195 @@ def _validate_bundled_runtime_manifest(root):
     return manifest
 
 
+def _manifest_relative_path(value, label):
+    if not isinstance(value, str) or not value:
+        raise ReleaseStagingError(f"LichtFeld runtime manifest {label} is invalid")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts or relative.name in {"", "."}:
+        raise ReleaseStagingError(f"LichtFeld runtime manifest {label} escapes the runtime root")
+    return relative
+
+
+def _load_lichtfeld_runtime_manifest(root):
+    root = Path(root)
+    manifest_path = root / LICHTFELD_MANIFEST_RELATIVE_PATH
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ReleaseStagingError(
+            f"LichtFeld runtime manifest is missing or invalid: {manifest_path}"
+        ) from exc
+    if (
+        manifest.get("schemaVersion") != 1
+        or manifest.get("runtime") != "lichtfeld-studio"
+        or not isinstance(manifest.get("version"), str)
+        or not manifest["version"].strip()
+        or not isinstance(manifest.get("upstreamCommit"), str)
+        or not manifest["upstreamCommit"].strip()
+    ):
+        raise ReleaseStagingError("LichtFeld runtime manifest metadata is unsupported")
+    archive = manifest.get("archive")
+    if not isinstance(archive, dict):
+        raise ReleaseStagingError("LichtFeld runtime manifest archive metadata is missing")
+    archive_filename = archive.get("filename")
+    archive_size = archive.get("size")
+    archive_hash = str(archive.get("sha256", "")).lower()
+    if (
+        not isinstance(archive_filename, str)
+        or not archive_filename.endswith(".zip")
+        or not isinstance(archive_size, int)
+        or archive_size <= 0
+        or not _is_sha256(archive_hash)
+    ):
+        raise ReleaseStagingError("LichtFeld runtime manifest archive metadata is invalid")
+    sentinels = manifest.get("sentinels")
+    if not isinstance(sentinels, list) or not sentinels:
+        raise ReleaseStagingError("LichtFeld runtime manifest sentinels are missing")
+    sentinel_paths = [_manifest_relative_path(value, "sentinel") for value in sentinels]
+    if len({path.as_posix() for path in sentinel_paths}) != len(sentinel_paths):
+        raise ReleaseStagingError("LichtFeld runtime manifest sentinels must be unique")
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files:
+        raise ReleaseStagingError("LichtFeld runtime manifest file inventory is missing")
+    records = {}
+    for item in files:
+        if not isinstance(item, dict):
+            raise ReleaseStagingError("LichtFeld runtime manifest file entry is invalid")
+        relative = _manifest_relative_path(item.get("path"), "file path")
+        key = relative.as_posix()
+        size = item.get("size")
+        digest = str(item.get("sha256", "")).lower()
+        if key in records or not isinstance(size, int) or size < 0 or not _is_sha256(digest):
+            raise ReleaseStagingError("LichtFeld runtime manifest file entry is invalid")
+        records[key] = {"path": relative, "size": size, "sha256": digest}
+    missing_sentinels = [path.as_posix() for path in sentinel_paths if path.as_posix() not in records]
+    if missing_sentinels:
+        raise ReleaseStagingError(
+            "LichtFeld runtime manifest sentinels are absent from the inventory: "
+            + ", ".join(missing_sentinels)
+        )
+    return {"manifest": manifest, "records": records, "sentinels": sentinel_paths}
+
+
+def _is_sha256(value):
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _validate_lichtfeld_runtime_tree(tree, contract, label, portable_only=False):
+    tree = Path(tree)
+    expected = contract["records"]
+    if portable_only:
+        expected = {
+            key: record
+            for key, record in expected.items()
+            if _portable_file(record["path"], record["path"], "runtime")
+        }
+    actual = {
+        path.relative_to(tree).as_posix(): path
+        for path in tree.rglob("*")
+        if path.is_file()
+    }
+    missing = sorted(set(expected) - set(actual))
+    unexpected = sorted(set(actual) - set(expected))
+    corrupt = []
+    for key in sorted(set(expected) & set(actual)):
+        record = expected[key]
+        path = actual[key]
+        if path.stat().st_size != record["size"] or _sha256(path) != record["sha256"]:
+            corrupt.append(key)
+    if missing or unexpected or corrupt:
+        details = []
+        for name, values in (("missing", missing), ("unexpected", unexpected), ("corrupt", corrupt)):
+            if values:
+                preview = ", ".join(values[:5])
+                suffix = " ..." if len(values) > 5 else ""
+                details.append(f"{name} ({len(values)}): {preview}{suffix}")
+        raise ReleaseStagingError(
+            f"LichtFeld runtime {label} differs from the pinned manifest: " + "; ".join(details)
+        )
+    sentinel_root = tree
+    missing_sentinels = [
+        path.as_posix() for path in contract["sentinels"] if not (sentinel_root / path).is_file()
+    ]
+    if missing_sentinels:
+        raise ReleaseStagingError(
+            "LichtFeld runtime "
+            + label
+            + " is missing required resources: "
+            + ", ".join(missing_sentinels)
+        )
+
+
+def _validate_lichtfeld_archive(archive_path, contract):
+    archive_path = Path(archive_path)
+    metadata = contract["manifest"]["archive"]
+    if not archive_path.is_file():
+        raise ReleaseStagingError(f"Pinned LichtFeld archive is missing: {archive_path}")
+    if archive_path.name != metadata["filename"]:
+        raise ReleaseStagingError(
+            "Pinned LichtFeld archive filename does not match the runtime manifest: "
+            + archive_path.name
+        )
+    if archive_path.stat().st_size != metadata["size"] or _sha256(archive_path) != metadata["sha256"]:
+        raise ReleaseStagingError(f"Pinned LichtFeld archive is corrupt: {archive_path}")
+    try:
+        with zipfile.ZipFile(archive_path) as package:
+            entries = {}
+            for info in package.infolist():
+                if info.is_dir():
+                    continue
+                relative = _manifest_relative_path(info.filename.replace("\\", "/"), "archive entry")
+                key = relative.as_posix()
+                if key in entries:
+                    raise ReleaseStagingError(
+                        f"Pinned LichtFeld archive contains duplicate entry: {key}"
+                    )
+                entries[key] = info
+    except ReleaseStagingError:
+        raise
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ReleaseStagingError(f"Pinned LichtFeld archive is unreadable: {archive_path}") from exc
+    expected = contract["records"]
+    missing = sorted(set(expected) - set(entries))
+    unexpected = sorted(set(entries) - set(expected))
+    wrong_size = [
+        key
+        for key in sorted(set(expected) & set(entries))
+        if entries[key].file_size != expected[key]["size"]
+    ]
+    if missing or unexpected or wrong_size:
+        details = []
+        for name, values in (("missing", missing), ("unexpected", unexpected), ("wrong size", wrong_size)):
+            if values:
+                preview = ", ".join(values[:5])
+                suffix = " ..." if len(values) > 5 else ""
+                details.append(f"{name} ({len(values)}): {preview}{suffix}")
+        raise ReleaseStagingError(
+            "Pinned LichtFeld archive differs from the runtime manifest: " + "; ".join(details)
+        )
+    return archive_path
+
+
+def _stage_lichtfeld_archive(archive_path, destination, contract):
+    archive_path = _validate_lichtfeld_archive(archive_path, contract)
+    destination = Path(destination)
+    with zipfile.ZipFile(archive_path) as package:
+        for key, record in contract["records"].items():
+            target = destination / record["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with package.open(key) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+    _validate_lichtfeld_runtime_tree(destination, contract, "extracted archive")
+    for path in sorted(destination.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_file() and not _portable_file(path.relative_to(destination), path, "runtime"):
+            path.unlink()
+        elif path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+
 def _release_manifest(stage, version):
     files = []
     for path in sorted((item for item in stage.rglob("*") if item.is_file()), key=lambda item: item.relative_to(stage).as_posix()):
@@ -212,9 +406,19 @@ def stage_release_resources(
     webview2_loader,
     version,
     full_offline_artifacts=None,
+    lichtfeld_archive=None,
 ):
     root = Path(root).resolve(strict=True)
     _validate_bundled_runtime_manifest(root)
+    lichtfeld_contract = _load_lichtfeld_runtime_manifest(root)
+    if lichtfeld_archive:
+        _validate_lichtfeld_archive(lichtfeld_archive, lichtfeld_contract)
+    else:
+        _validate_lichtfeld_runtime_tree(
+            root / "runtime" / "lichtfeld-studio",
+            lichtfeld_contract,
+            "source tree",
+        )
     try:
         load_windows_runtime(root)
     except WindowsRuntimeError as exc:
@@ -243,7 +447,25 @@ def stage_release_resources(
             temporary / "tools" / "lichtfeld-densification-plugin",
             "plugin",
         )
-        _copy_tree(root / "runtime", temporary / "runtime", "runtime")
+        _copy_tree(
+            root / "runtime",
+            temporary / "runtime",
+            "runtime",
+            excluded_top_levels={"lichtfeld-studio"} if lichtfeld_archive else (),
+        )
+        if lichtfeld_archive:
+            _stage_lichtfeld_archive(
+                lichtfeld_archive,
+                temporary / "runtime" / "lichtfeld-studio",
+                lichtfeld_contract,
+            )
+        _validate_lichtfeld_runtime_tree(
+            temporary / "runtime" / "lichtfeld-studio",
+            lichtfeld_contract,
+            "staged tree",
+            portable_only=True,
+        )
+        _copy_tree(root / "luts", temporary / "luts", "luts")
         try:
             deploy_windows_runtime(
                 root,
@@ -279,23 +501,29 @@ def stage_release_resources(
             temporary / "scripts" / "lichtfeld_training.py",
             temporary / "scripts" / "export_image_cache.py",
             temporary / "scripts" / "export_remap.py",
+            temporary / "scripts" / "fisheye_geometry.py",
             temporary / "scripts" / "metashape_runtime_env.py",
             temporary / "scripts" / "metashape_runtime_probe.py",
             temporary / "scripts" / "metashape_pipeline.py",
             temporary / "scripts" / "reexport_colmap_from_project.py",
+            temporary / "scripts" / "inspect_metashape_components.py",
             temporary / "scripts" / "component_selection.py",
             temporary / "tools" / "colmap" / "bin" / "colmap.exe",
             temporary / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe",
             temporary / "tools" / "ffmpeg" / "bin" / "ffprobe.exe",
             temporary / "tools" / "lichtfeld-densification-plugin" / "densify.py",
+            temporary / "tools" / "lichtfeld-densification-plugin" / "third_party" / "dinov3" / "hubconf.py",
+            temporary / "tools" / "lichtfeld-densification-plugin" / "third_party" / "dinov3" / "LICENSE.md",
             temporary / "tools" / "offline-wheels" / "app" / "tqdm-4.68.3-py3-none-any.whl",
             temporary / "runtime" / "densify-runtime-manifest.json",
             temporary / "runtime" / "pip.pyz",
             temporary / "runtime" / "bundled-runtime-manifest.json",
             temporary / "runtime" / "windows-runtime-manifest.json",
+            temporary / "runtime" / "lichtfeld-studio-manifest.json",
             temporary / "runtime" / "THIRD_PARTY_NOTICES.txt",
             temporary / "runtime" / "lichtfeld-studio" / "bin" / "LichtFeld-Studio.exe",
             temporary / "runtime" / "lichtfeld-studio" / "LICENSE",
+            temporary / "luts" / "dji-osmo360-dlogm-rec709-v1.cube",
             temporary / "WebView2Loader.dll",
         ]
         missing = [str(path) for path in required if not path.is_file()]
@@ -325,6 +553,7 @@ def main(argv=None):
     parser.add_argument("--webview2-loader", required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--full-offline-artifacts")
+    parser.add_argument("--lichtfeld-archive")
     args = parser.parse_args(argv)
     manifest = stage_release_resources(
         args.root,
@@ -334,6 +563,7 @@ def main(argv=None):
         args.webview2_loader,
         args.version,
         args.full_offline_artifacts,
+        args.lichtfeld_archive,
     )
     print(manifest, flush=True)
     return 0

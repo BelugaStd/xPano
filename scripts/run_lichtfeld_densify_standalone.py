@@ -168,9 +168,11 @@ def main(argv=None):
         _load_plugin_argparser(args.plugin_dir).print_help()
         return 0
 
+    print("PROGRESS:2.0:Loading LichtFeld densification components", flush=True)
     _install_lichtfeld_stub()
     densify = _load_plugin_densify(args.plugin_dir)
     plugin_parser = densify.build_argparser()
+    print("PROGRESS:5.0:Starting LichtFeld densification", flush=True)
 
     def progress(percent, message):
         print(f"PROGRESS:{float(percent):.1f}:{message}", flush=True)

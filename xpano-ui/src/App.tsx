@@ -9,6 +9,7 @@ import { AppShell } from './app/AppShell'
 import { JobProvider } from './app/JobProvider'
 import { useJob } from './app/useJob'
 import { ProjectProvider } from './app/ProjectProvider'
+import { BatchProvider } from './app/BatchProvider'
 import { DEFAULT_PROJECT_PATH } from './app/routes'
 import type { ResolvedTheme, ThemeMode } from './lib/types'
 
@@ -38,6 +39,7 @@ function AppContent({ themeMode, resolvedTheme, onThemeModeChange }: AppContentP
       <ParticleBackground active={running} phase={progress.phase} />
       <DragTrail />
       <Routes>
+        <Route path="/batch/*" element={<Navigate to={DEFAULT_PROJECT_PATH} replace />} />
         <Route element={<AppShell themeMode={themeMode} resolvedTheme={resolvedTheme} onThemeModeChange={onThemeModeChange} />}>
           <Route path="/project/media" element={<MediaWorkspace />} />
           <Route path="/project/reconstruction" element={<ReconstructionWorkspace />} />
@@ -125,7 +127,9 @@ function App() {
     <HashRouter>
       <ProjectProvider>
         <JobProvider>
-          <AppContent themeMode={themeMode} resolvedTheme={resolvedTheme} onThemeModeChange={setThemeMode} />
+          <BatchProvider>
+            <AppContent themeMode={themeMode} resolvedTheme={resolvedTheme} onThemeModeChange={setThemeMode} />
+          </BatchProvider>
         </JobProvider>
       </ProjectProvider>
     </HashRouter>

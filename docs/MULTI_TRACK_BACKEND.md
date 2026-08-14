@@ -37,12 +37,13 @@ Panorama track:
 - Creates two sensors:
   - `<track_id>_left`
   - `<track_id>_right`
-- Sensor type is `Metashape.Sensor.Type.Fisheye`.
+- Sensor type is `Metashape.Sensor.Type.EquidistantFisheye` when supported, matching the initial release. Older Metashape builds fall back to `Fisheye`.
+- The imported source calibration is copied before the equidistant model and fixed parameters are applied.
 - Pixel size is `0.0024`.
 - Focal length is `2.5`.
 - Fixed params are exactly `["B1", "B2", "K4"]`.
 - Each sampled frame creates one CameraGroup with two cameras.
-- These groups are switched to `Station` before matching/alignment and remain `Station` through mixed-material optimization/export.
+- These groups are switched to `Station` before panorama matching/alignment, then restored to `Folder` before panorama optimization.
 
 Photo/aerial track:
 
@@ -54,7 +55,7 @@ Photo/aerial track:
 Unused auto-created Metashape sensors are pruned after import so the project does not contain misleading empty sensors.
 New cameras are identified by stable Metashape camera keys rather than `chunk.cameras` list position. Every import also verifies camera count and source-photo paths before sensor assignment.
 
-Metashape alignment defaults to `backbone`: panorama tracks and Frame tracks are both imported before matching. One clean visual matching pass covers the fresh chunk, without retaining keypoints for a second match. Frame cameras are temporarily disabled while the Station-constrained panorama cameras are aligned and optimized, then restored and aligned from the already-created visual overlaps before global optimization. This preserves the panorama backbone without reusing mixed-resolution matching state or synthesizing temporal/frame-index pairs. The old one-stage mixed alignment remains available as `mixed`.
+Metashape uses the initial-release staged workflow: it imports, Station-matches, aligns, releases, and optimizes panorama cameras first with `keep_keypoints=True`. Only then are Frame cameras imported. A second visual match retains the panorama keypoints, and `alignCameras(reset_alignment=False)` incrementally attaches the new cameras before final optimization. Stored `mixed` configuration values remain accepted for project compatibility but are normalized to this one stable workflow.
 
 ## Export Rules
 

@@ -59,11 +59,8 @@ export function BackendSettings({ config, probes, tracks, running, dirty, onChan
             </section>
             <section>
               <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase text-muted"><Sparkles className="h-3.5 w-3.5" /> 对齐策略</div>
-              <FieldLabel help={{ title: '对齐策略', description: '骨架模式先对齐全景，再按视觉重叠增量接入普通帧和照片。混合模式会把全部素材同时匹配。', recommendation: hasFlatMedia ? '当前包含混合素材，推荐骨架模式。' : '纯全景素材仍推荐骨架模式。', tradeoff: '混合模式搜索范围更大，内存和误匹配风险更高。' }}>策略</FieldLabel>
-              <select disabled={running} value={config.alignmentMode} onChange={(event) => update('alignmentMode', event.target.value as ReconstructionConfigDraft['alignmentMode'])} className={inputClass}>
-                <option value="backbone">骨架模式（推荐）</option>
-                <option value="mixed">混合模式（高级）</option>
-              </select>
+              <FieldLabel help={{ title: '对齐策略', description: '先完成全景站点对齐，再按视觉重叠增量接入普通帧和照片。', recommendation: hasFlatMedia ? '当前包含混合素材，将采用分阶段对齐。' : '当前将采用全景站点对齐。', tradeoff: '分阶段处理会增加一次匹配，但能避免平面素材干扰全景骨架。' }}>策略</FieldLabel>
+              <div className={`${inputClass} flex items-center`}>稳定分阶段模式</div>
             </section>
 
             <section>

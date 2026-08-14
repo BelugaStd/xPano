@@ -841,6 +841,173 @@
 - The xPano launch chain is the affected boundary: Tauri resolves `runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe` to a `PathBuf`, Python then calls `config.executable.resolve(strict=False)`, and the child inherits the verbatim extended executable path. The source/manual launch uses a normal drive path and therefore does not trigger the LFS/MinGW mixed-separator bug.
 - The minimal repair boundary is xPano's Windows child-process launch: convert bundled executable, script and working-directory paths from the `\\?\` form to normal drive/UNC syntax before invoking Python/LFS, while retaining extended paths for user data where needed. Patching the third-party LFS resource code would be broader and would not fix other bundled tools that receive the same path form.
 
+# Phase 66 README research
+
+- The README must describe the product as an xPano project workflow, not as a standalone Metashape or LichtFeld wrapper.
+- Current source and release evidence confirm that core application, FFmpeg, COLMAP, bundled Python, LFS, and Metashape helper wheels ship with the application; Metashape itself remains an external licensed installation.
+- Densification is a separate on-demand runtime. The standard package does not include its large Torch/RoMa payload, so the guide must say that first use requires a network connection and free space instead of claiming offline availability.
+- The current root `README.md` is a long, stale technical/release document. It still refers to retired light/full packages and an old one-pass mixed workflow, so it must be replaced rather than incrementally edited.
+- Product-facing reference material is concentrated in `GUI_QUICKSTART.md`, `docs/VERIFIED_WORKFLOW.md`, `docs/MULTI_TRACK_BACKEND.md`, `docs/COLMAP_DENSIFICATION.md`, and the current UI/source implementation.
+- The normal GUI path is: import materials -> prepare frames/photos -> align and export -> inspect point cloud/results -> optionally densify or train. A finished xPano project retains the Metashape `.psx`, manifest, generated images, COLMAP `sparse/0`, and run summary under the selected output folder.
+- Panorama material is processed as original dual-fisheye imagery, not ERP/cubemap during alignment. Mixed projects use a panorama-first incremental Metashape workflow; ordinary photos/videos are added afterward as Frame cameras.
+- The old documentation contains developer CLI, test fixture, and release-build instructions. The replacement README should link to the GUI workflow and omit those details.
+- Current UI confirms four material categories: panoramic `.osv`/`.insv`, ordinary video, standard photos, and aerial photos. Ordinary video exposes a wide/standard initial-view choice; all imported visual tracks can use a style `.cube` LUT, while the bundled restoration LUT is only for `.osv` panorama material.
+- The product has four user workspaces: materials, reconstruction, results/point-cloud management, and Gaussian training. The default route is the materials workspace.
+- Densification is explicitly non-destructive: it first loads a candidate preview, then the user may save it as a version. Gaussian training is separately gated by runtime, prepared dataset, and a selected usable point-cloud version.
+- Source confirms the user path for manual Metashape correction: open the generated PSX, save edits in Metashape, then use the reconstruction workspace's PSX re-export action. When more than one usable Component exists, xPano asks the user to choose one and defaults to the largest.
+- The COLMAP backend is intentionally blocked for mixed material in the current UI. README wording must present Metashape as the supported choice for panorama-plus-photo/video projects and COLMAP as the bundled panorama-only alternative.
+- The style-LUT chain is active in the source: restoration is applied first, then the user style LUT. The bundled DJI restoration preset is valid only for `.osv` panorama material.
+- Packaging/source configuration sets the supported release boundary to Windows 10/11 x64. The application bundles its base Python, FFmpeg, COLMAP and WebView2; it does not require system Python, FFmpeg, COLMAP, CUDA Toolkit, Git, or administrator rights for the core workflow.
+- Metashape itself is intentionally external and licensed by the user. The package has the helper wheels needed by the Metashape script chain; xPano should be documented as automatically checking/configuring this support rather than asking the user to manually install Python packages into Metashape.
+- Project design keeps artifacts relative to the selected project root and preserves job snapshots/logs under `work/`. The user guide should advise retaining the complete project directory and using the built-in project-open path rather than moving isolated output files.
+- An xPano project persists its state in `xpano_project.json`; it also exposes compatible previously generated projects through `xpano_manifest.json`, `xpano_run_summary.json`, `work/xpano_manifest.json`, or `work/xpano.psx`. The standard reopen instruction can therefore be "open or drag the project root folder".
+- Source creation currently places a new project directory beside the first material unless it is explicitly created/opened elsewhere. README must tell users to plan a dedicated project/output location before importing a large job.
+- Gaussian training defaults to the LichtFeld Studio GUI (`gui: true`) and its normal presets are 10k / 30k / 60k iterations. The README should mention the GUI launch and progress display, not imply that xPano provides an embedded training viewer.
+
+## Phase 66 README verification
+
+- The rewritten README has 124 UTF-8 lines. It contains the required user-facing workflow, input categories, backend boundary, project persistence, LUT, densification, and training guidance.
+- All three internal reference links exist. Required terminology and sections were programmatically checked; `git diff --check` passed.
+- No application source, package configuration, installer artifact, or untracked runtime payload was changed.
+- Windows 10/11 x64 is the supported product boundary. The packaged app includes its basic Python, FFmpeg, COLMAP, LFS, and Metashape helper wheels; it does not include Metashape itself or the large densification runtime.
+- Source contracts treat project artifacts as relative paths beneath the chosen project directory, including reconstruction output, training output, and point-cloud variants. The README should instruct users to keep the entire output directory intact and move/copy it as one unit.
+
+# Phase 59 release findings
+
+- The standard `scripts/build_installer.ps1` path produces the dependency-complete release used for `1.0.0-preview`; `-FullOffline` only adds the optional densification payload and is not required for this release request.
+- All six authoritative version values now read `2.0.0-preview`: npm package, npm lock top-level, npm lock root package, Cargo manifest, xPano Cargo lock package and Tauri configuration.
+- Release staging copies the complete `runtime` tree but explicitly rejects a stage missing `runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe` or `LICENSE`. The current source runtime is incomplete, while `D:/FastPrograms/LichtFeld-Studio-windows-v0.5.3` is the canonical complete payload.
+- Runtime restoration must be missing-only from the canonical payload. Existing source files may contain xPano-specific additions or deliberate changes and must not be replaced; staging independently filters `.git`, `__pycache__`, `_downloads`, bytecode and debug-symbol files.
+- The source runtime has 235 files and is an exact hash-identical subset of the 1,450-file canonical runtime: zero source-only files and zero common-file hash differences. It lacks 1,215 canonical files, including the executable, license and resource tree.
+- The previous valid stage differs from canonical only by 205 generated/excluded files plus its stage-only `XPANO_BUNDLE_INFO.md`; the sampled omissions are `__pycache__`/`.pyc`, matching release filters. This confirms the canonical payload plus current staging filters reproduces the known-good runtime shape.
+- Missing-only hydration completed with 1,215 copies and 235 preserved files. A full post-copy SHA-256 comparison reports zero missing or different files, and the restored executable is 25,724,928 bytes.
+- The bundled runtime manifest declares five Metashape artifacts: four ABI-specific NumPy wheels (cp39-cp312) and one OpenCV abi3 wheel. All five are absent from the source wheel directory, while `dist/xPano-full-offline` contains exact filename, size and SHA-256 matches for every artifact. Restoring these immutable, manifest-addressed files repairs the offline dependency closure without weakening validation.
+- The Windows runtime manifest declares six VC++ 14.44.35211.0 x64 DLLs, and the source `runtime/windows-x64` payload is empty. Both the installed `E:/FastProgram/xPano/runtime/windows-x64` payload and Windows System32 provide exact size/hash matches for all six; the installed xPano runtime is the cleanest package-shaped recovery source.
+- After applying the same staging filters, the bundled Python source contains only 49 of the 667 files present in the installed, known-working xPano runtime. All 49 common portable files are hash-identical; 618 files are missing and can be restored without overwriting any source file.
+- The app offline-wheel source contains only 2 of the 11 wheels in the installed package. The installed set includes the required `tqdm` wheel plus NumPy cp39-cp312, OpenCV abi3, piexif and Pillow cp39-cp312, so missing-only hydration restores the full offline app repair set rather than merely satisfying one required-file check.
+
+## 2.0.0-preview release acceptance
+
+- The installer is 728,701,363 bytes with ProductVersion/FileVersion `2.0.0-preview` and SHA-256 `5A4A39C7594B68114D7D1D41B92EE4CABE83BF2726D06E7F2444E04A89648C68`; the independently read sidecar matches.
+- The staged manifest is `2.0.0-preview`/`windows-x86_64` with 2,201 declared and 2,201 actual files. Independent existence, size and SHA-256 verification found zero failures.
+- Six critical Metashape/Component scripts in stage are byte-identical to source. The staged LFS payload has 1,245 portable files totaling 570,680,012 bytes, all ten sampled runtime-closure resources exist, and no cache/debug/forbidden payload entered stage.
+- Staged Python imports OpenCV, NumPy, Pillow, piexif and tqdm successfully; staged Windows and bundled-runtime manifest validators also pass. The installer is Authenticode `NotSigned`, so Windows may show an unknown-publisher prompt.
+- Five-axis review found no release blocker. Correctness is covered by 288 Python, 100 Rust and 50 frontend tests plus full manifest verification; the existing release architecture remains unchanged; restored payloads are immutable/hash-validated; no new security or performance surface was introduced.
+
+# Phase 60 LUT restoration investigation
+
+- The supplied upstream file is 20,514 bytes/476 lines, SHA-256 `06FAA3EFC96578694ADD314B5BB294316D616667D42BDC71F7079D0A601A2CAF`.
+- Its “LUT restoration” is a color transform, not a geometric remap: the UI accepts one `.cube` 3D LUT and appends FFmpeg `lut3d=file='...'` after the `fps` filter.
+- The same LUT is applied independently to every left/right video stream before JPEG encoding, so stereo/fisheye geometry and dimensions are intentionally unchanged.
+- Upstream validates only that the selected path exists and, in drag/drop, that its suffix is `.cube`. It does not parse/validate cube headers or dimensions before processing, expose interpolation/intensity, persist the choice, or distinguish an invalid LUT from a general FFmpeg extraction failure.
+- The `-hwaccel cuda` option affects input decoding only; the shown `fps,lut3d` filter chain is not itself a CUDA implementation. Performance and fallback behavior must therefore be evaluated against xPano's current decode/filter pipeline rather than copied verbatim.
+- The upstream script parses successfully under Python AST. Its LUT state is process-local GUI state only: browse/drop sets a path, start-time checks existence, and one shared path is passed to every concurrent FFmpeg task.
+- xPano currently has no product LUT field or `.cube` handling. The active extractor is `scripts/xpano_extract.py`, which already centralizes FFmpeg command construction, streamed progress, output polling and decoder fallback (`cuda` -> `d3d11va` -> software on Windows).
+- `scripts/pano_extractor.py` is a separate older utility and must not be patched as the integration point. Product extraction is invoked through the multi-track job chain, while Rust also owns separate lightweight video-thumbnail commands that should not silently diverge from prepared-media semantics.
+- Both panorama and ordinary-video extraction already converge on command factories in `scripts/xpano_extract.py`; their only image filter today is `fps=<rate>`. The hardware fallback rebuilds and retries the full command, so a deterministic LUT filter added at this boundary would automatically survive CUDA/D3D11/software decoder fallback.
+- FFmpeg writes the final JPEGs directly into the track workspace; extraction polling and preview callbacks observe those generated files, and the alignment manifest later references them. Applying LUT before JPEG encoding at this boundary therefore keeps prepared preview and Metashape input byte-consistent without a second image-processing pass.
+- The durable owner should be per-video `ExtractionSettings`, not a global project flag: xPano already stores trim/FPS/frame-limit per track and supports multiple panorama/ordinary-video sources that may require different camera LUTs.
+- Rust compares the complete extraction settings when a track is edited; a LUT field there will naturally mark only that track stale, advance the media revision and invalidate downstream reconstruction. This is the required behavior, unlike camera-profile changes which intentionally preserve extracted pixels.
+- The CLI already represents per-track settings as repeated, arity-checked `--pano-*` and `--ordinary-*` options mapped by resolved source path. LUT propagation can extend this existing contract without a second configuration channel.
+- The project schema is currently v3. An optional LUT path can remain backward-compatible if Rust/TypeScript/Python all treat omission/null as “no LUT”; a schema bump is unnecessary unless the implementation makes LUT mandatory or changes existing field meaning.
+- The bundled release FFmpeg exposes the `lut3d` video filter with slice threading and nearest/trilinear/tetrahedral/pyramid/prism interpolation; its default is tetrahedral. No new native dependency is required.
+- A Unicode/special-path feasibility probe exposed an upstream robustness gap before filter validation: `subprocess(..., text=True)` can decode FFmpeg diagnostics with GBK and fail when FFmpeg echoes a UTF-8 path. xPano should explicitly read FFmpeg output as UTF-8 with replacement semantics so the real parser error remains visible.
+- The upstream direct-path escaping is not sufficient for the full Windows path domain: a `.cube` path containing Chinese text, spaces, comma, brackets and an apostrophe was mis-decoded/rewritten by FFmpeg and could not be opened. A temporary safe basename (`lut.cube`) with `cwd` set to its directory succeeded, giving a simpler and more reliable integration boundary than expanding ad hoc escaping rules.
+- With corrected red-fastest `.cube` ordering, an identity LUT changed only 2 of 12,288 RGB bytes by a maximum of 1 level, confirming `lut3d` is geometrically neutral and essentially color-neutral for an identity transform.
+- A synthetic 3840x3840, six-frame JPEG run took 0.371 s without LUT and 0.797 s with default tetrahedral LUT (2.15x for this filter/encode microbenchmark, still 7.53 output fps). The LUT branch produced materially larger JPEGs, so output pixel-format negotiation must be inspected and explicitly stabilized before integration; the raw LUT transform itself does not explain that size increase.
+- Pixel-format diagnosis confirmed the upstream filter alone changes MJPEG output from existing `yuvj420p` to `yuvj444p`, increasing a 384x384 test JPEG from 13,946 to 21,206 bytes. Appending `format=yuvj420p` after `lut3d` restores the existing output format and near-baseline size (13,759 bytes). The LUT-enabled branch must explicitly end in the existing 4:2:0 JPEG format; the no-LUT branch must remain byte-for-byte command-equivalent to today.
+- The actual project media-preparation entrypoint is `scripts/run_xpano_prepare_project.py`, started by Rust `media::start_media_job`. `run_xpano_tracks_job.py` is not the primary GUI preparation path, so the plan must flow LUT from persisted project tracks through this entrypoint rather than only adding legacy CLI flags.
+- xPano's active `_run_ffmpeg` already sets `encoding="utf-8", errors="replace"`; the GBK diagnostic failure belongs to the upstream standalone script and does not require a new xPano encoding fix. It does need an optional `cwd` parameter so the filter can reference a controlled ASCII LUT basename.
+- `run_xpano_prepare_project.py` is the right propagation boundary because it reads the target track's persisted extraction settings. The shared extractor should own the temporary LUT snapshot so every panorama/ordinary-video caller gets the same path-safe behavior; staging must always copy rather than hardlink so source edits cannot change later frames within one extraction.
+- Project media preparation reads extraction settings directly from `xpano_project.json`; no new Tauri command-line argument is required for the primary GUI path. The LUT field must propagate project JSON -> prepare entrypoint -> panorama/ordinary builder -> shared extractor.
+- A repeated 3840x3840 JPEG microbenchmark with explicit `yuvj420p` measured 0.649 s/9.25 fps without LUT and 1.079 s/5.56 fps with tetrahedral LUT (1.66x), while total JPEG bytes stayed near baseline. This is a synthetic filter/encode ceiling, not an end-to-end video benchmark, but it establishes that enabled LUT work is material and no-LUT command identity must be preserved.
+- Because `fps` precedes `lut3d`, LUT cost scales with selected output frames rather than every decoded source frame. At xPano's common 1 fps setting, the measured single-stream filter throughput leaves useful headroom; dual-eye processing will still be slower and must remain visibly optional.
+- Current project-open validation reports missing primary media sources only. The smallest reliable behavior is to validate a chosen LUT on import/update and recheck targeted LUTs synchronously before a media job is marked running; expanding the global validation-report schema is not required for the first implementation.
+- Existing Python, Rust and frontend test surfaces already cover extractor commands/fallback, track building, project preparation, media invalidation and pure frontend helpers. The feature can be regression-tested without introducing a new test framework.
+- Feasibility is confirmed. The maintainable first implementation is an optional per-video-track `colorLutPath`, propagated through the existing project preparation chain and applied in the shared extractor as `fps -> lut3d(tetrahedral) -> yuvj420p`. The source LUT is copied to a temporary ASCII basename and prevalidated with bundled FFmpeg; invalid LUTs fail visibly and never fall back to ungraded extraction.
+- The complete implementation order, file-level changes, regression matrix, runtime acceptance criteria and explicit non-goals are recorded in `docs/LUT_RESTORATION_INTEGRATION_PLAN.md`.
+
+# Phase 61 LUT restoration implementation
+
+- Project schema remains v3. Rust `ExtractionSettings` now deserializes a missing `colorLutPath` as `None` and omits `None` during serialization, so old projects retain their existing JSON shape.
+- LUT ownership is per panorama/ordinary-video track. Import/update validates a regular `.cube` file; photo tracks reject LUT state; editing or clearing the LUT uses existing extraction equality and stales only the target track plus downstream reconstruction.
+- Media-job preflight rechecks the selected LUT before writing `work/media_job.json` or changing track status, so a moved/deleted LUT cannot leave a false running state.
+- The shared extractor copies the selected file to one temporary `lut.cube`, validates that snapshot with FFmpeg, and retains the same working directory through CUDA, D3D11VA and software attempts. Temporary content is removed on success or failure.
+- The enabled filter is exactly `fps=<rate>,lut3d=file=lut.cube:interp=tetrahedral,format=yuvj420p`; the no-LUT filter remains exactly `fps=<rate>` with no temporary snapshot or changed working directory.
+- Prepared panorama eyes use identical filter graphs. Ordinary-video frames, streamed prepared previews, generated thumbnails and later alignment inputs all derive from the same transformed JPEG files.
+- The existing ready-track settings button now opens a real edit state. Both import and edit surfaces provide one compact video-only LUT picker/clear control; cancelling restores persisted values.
+
+# Phase 62 bundled camera LUT presets
+
+- The current upstream reference does not bundle or identify camera-specific LUTs; it accepts one manually selected `.cube` path for all jobs.
+- The repository and `C:\Users\Beluga\Downloads` contain no `.cube` or `.3dl` LUT asset available for packaging.
+- Existing panorama extension detection is reliable at the family level: `.insv` maps to Insta360 and `.osv` maps to DJI/Osmo. It is not proof of a clip's capture color profile, so it cannot safely auto-enable a Log/Flat restoration LUT.
+- The current release path already has the required primitives: `tool_resolver::resolve_resource_path` resolves Tauri resources and portable roots, while `scripts/release_staging.py` copies a staged tree and hashes every release file in `release-manifest.json`.
+- The durable design is a stable builtin preset ID resolved at runtime, not a path under an installation-specific Tauri resource directory. Manual `colorLutPath` remains an explicit advanced override.
+- Official source evidence: `https://www.insta360.com/cn/download/i-log` publishes separate I-Log LUT archives for multiple camera models, including ONE X, ONE X2, X3, X5, ONE R and ONE RS. This confirms that `.insv` is not a sufficient key for a single correct builtin LUT.
+- DJI's initial direct product-download URL resolved to an official 404 page, so no DJI LUT file or redistribution term was accepted into the project. This failed lookup is logged; it must not be replaced by an unofficial mirror.
+- User narrowed the product scope: `.insv` stays manual LUT selection; only `.osv` maps to the DJI Osmo 360 D-Log M -> Rec.709 builtin preset when the user enables restoration.
+- Asset retrieval attempts failed independently: DJI product/download paths did not expose a LUT asset, direct GitHub raw/API requests timed out, the configured `127.0.0.1:7897` proxy is unavailable, and a shallow Git clone could not connect. No LUT was added to the repository. The implementation is blocked until the user supplies the approved `.cube` file or a reachable official source.
+- Real FFmpeg acceptance succeeded with a Unicode/space/comma/apostrophe source path, two extracted frames and `yuvj420p` output. Full gates passed with 296 Python, 104 Rust and 52 frontend tests plus lint/build/compile/diff checks.
+
+# Phase 55 alignment-quality and Component investigation
+
+- The old `0.1.0` source tree is locally available, so the investigation can compare executable behavior and exact parameter construction rather than infer from release history.
+- Alignment-quality diagnosis and Component-selector diagnosis are separate evidence tracks. A selector that only exposes the chosen export Component can hide other Components without itself causing the solver to split; conversely, a multi-Component solve can be real even if the UI inventory is wrong.
+- The current default `backbone` workflow is not behaviorally equivalent to `0.1.0`. Old mixed alignment first imports/matches/aligns panorama cameras with `keep_keypoints=True`, then adds flat photos, matches again and aligns incrementally with reset disabled. Current `backbone` imports both classes before one global match, disables flat cameras only after that match, solves the panorama subset, then solves flat cameras from the same global graph. The optional current `mixed` mode also imports everything before a single global match/solve. Neither preserves the old incremental contract documented by Metashape 2.3.
+- Disabling flat cameras after global matching cannot undo candidate-pair selection and geometric filtering already influenced by the flat-image population. This is the primary mixed-material regression boundary and explains why the current staging can be worse even though the numeric `matchPhotos` limits look unchanged.
+- The official 2.3 manual requires key points to be kept before initial processing and reset alignment to remain unchecked when extra photos are later subaligned. Old `0.1.0` follows that workflow; current `backbone` explicitly uses `keep_keypoints=False` and never performs the documented add-then-incremental-match sequence.
+- The pure-panorama path also changed before its first solve. On the same 3840x3840 frame, old initialization produces `Sensor.Type.EquidistantFisheye` with a copied Frame calibration at `f=6275.7163`; current initialization produces legacy `Sensor.Type.Fisheye` with Fisheye calibration at `f=1041.6667`. Metashape 2.3 exposes the enums as distinct even though direct projection and distortion probes give the same numeric equations. The regression boundary is therefore the complete calibration/model bootstrap, not image resolution.
+- For panorama-only alignment, `keep_keypoints` only controls descriptor persistence and Station-to-Folder release happens after the initial `alignCameras`; neither can explain Components already created by that first solve. The materially different pre-solve state is the sensor/calibration bootstrap. The exact field within that coupled bootstrap still requires a controlled full-data A/B before changing production semantics.
+- Old-good and new-bad summaries for the same named OSV both contain 880 3840x3840 fisheye images and two sensors. Old reports 880/880 in one reconstruction; current reports only the active 458-camera Component. Extraction defaults remain 1 fps with no frame limit, and sampled CUDA/software JPEG decodes are pixel-identical. Resolution reduction, hardware decode and JPEG quality are ruled out as general causes.
+- Standard photo imports are staged by hardlink/copy without resizing. Current grouping uses dimensions, make/model, lens and focal EXIF and then partitions unexpected geometry. This is not the general regression. The removed old MPF-JPEG sanitization remains a narrow compatibility risk for multi-picture JPEGs only.
+- Ordinary-video frames are a new path absent from old `0.1.0`; current code forces a guessed 70-degree or 105-degree initial horizontal FOV, defaulting to 105 degrees. A wrong user/default profile can degrade that track, but it cannot explain the confirmed single-panorama regression.
+- Native Metashape 2.3 inspection of `D:\3DRegistration\test\xPano\work\xpano.psx` finds three real Components with 458, 221 and 177 member cameras plus 24 unassigned cameras. Thus 856/880 cameras are aligned within some Component; xPano's reported 458/880 counts only the active Component and conflates global connectivity with camera alignment.
+- Metashape exposes `camera.transform` and the active tie-point cloud only for `chunk.component`. Switching the active Component changes visible transform counts from 458 to 221 to 177 and tie-point counts from 132270 to 94262 to 74148. Current inventory never activates each Component, so inactive Components are serialized as zero aligned and every Component tie-point count is incorrectly zero.
+- Component export has the same defect: selecting a key does not assign `chunk.component` before filtering `camera.transform`. An inactive valid Component can therefore export no cameras. The correct boundary is to activate the requested Component, inventory/export it in that context, and restore the original active Component afterward.
+- The frontend reads only the persisted `project.reconstruction.config.alignmentReport`; it never inspects the PSX live. Components created, merged or changed manually in Metashape are invisible until xPano regenerates the report. This explains a PSX visibly containing two Components while xPano still displays the older one-Component report.
+- The maintainable correction boundaries are: restore a true panorama-first incremental solver contract; separately baseline the old pure-panorama calibration bootstrap before altering it; and centralize active-Component inspection/export behind one helper. Do not patch this with UI-only counts, transform summation without activation, or another post-match enable/disable retry.
+
+# Phase 56 restored alignment contract
+
+- Panorama sensors now copy the calibration imported by Metashape and use `EquidistantFisheye` when the installed API exposes it, reproducing the `0.1.0` bootstrap while retaining a `Fisheye` fallback for older supported builds.
+- Runtime order is again panorama import -> Station -> retained-keypoint match -> align -> Folder -> optimize, followed by Frame import -> retained-keypoint match -> non-resetting incremental align -> global optimize.
+- The one-pass `mixed` implementation and its execution-plan graph were removed. Existing persisted/CLI `mixed` values remain accepted but normalize to `backbone`, so old projects do not fail and cannot silently re-enter the regressed path.
+- Stage events, Rust execution-plan nodes, development previews and active workflow documentation now describe the same native calls. The UI exposes one stable Metashape strategy rather than a second misleading route.
+- Component enumeration and component-scoped export remain a separate known defect; this phase intentionally does not alter report or export selection behavior.
+
+# Phase 57 Component planning findings
+
+- `component_selection.component_inventory` assumes `camera.component`/`component_id` and `camera.transform` are simultaneously meaningful for every Component. Native Metashape evidence disproves that assumption: transforms and tie points reflect only `chunk.component`, so inactive Components are reported with zero aligned cameras and zero tie points.
+- Both initial alignment reporting and PSX re-export call the same invalid inventory helper without activating each Component. The defect therefore exists before Rust persistence or frontend rendering; a UI-only fix cannot recover the missing counts.
+- `export_colmap.run_mixed_export` chooses a key and filters `camera.transform` without first assigning `chunk.component`. Selecting an inactive valid Component can consequently produce no cameras or export the wrong active state.
+- Rust correctly persists the report it receives and validates that the selected key exists with a positive aligned count. The frontend correctly renders the persisted list, but it has no command that re-inspects the current PSX; manual Metashape changes remain invisible until a re-export job regenerates the report.
+- The repair should centralize temporary Component activation and restoration in the Python Metashape layer. Inventory, selection validation, alignment counts, tie-point counts and export must all use that same active-Component boundary instead of teaching Rust or React Metashape-specific semantics.
+- Rust finalization requires the selected key to exist in `components` with `alignedCameraCount > 0`; once Python emits truthful inventory, this validation can remain unchanged and becomes useful corruption protection.
+- The current selector is populated only from `project.reconstruction.config.alignmentReport`. A manual PSX edit cannot update it before the user chooses a Component, so a correct flow needs an explicit PSX inspection step separate from export, or a re-export preflight that returns refreshed inventory before committing a selected export.
+- Existing re-export publication is transactional: it stages new outputs and rolls back failed publication while preserving the PSX. Component work should reuse this job boundary rather than add direct frontend filesystem inspection.
+- Current unit tests model camera membership as globally visible and therefore cannot reproduce Metashape's active-Component behavior. New tests need a fake chunk whose `camera.transform` and `chunk.tie_points` change when `chunk.component` changes, plus restoration assertions on success and failure.
+- Initial alignment does not pass a prior Component key, so it can safely auto-select the largest newly discovered Component. PSX re-export does pass the user's selected key and must reject a now-missing key rather than silently export another Component.
+- `align_ground_plane.main` reads `chunk.tie_points`, so it is also active-Component-scoped. The selected Component must be activated before auto-level and remain active through COLMAP/image export; fixing only the export camera filter would still orient from the wrong Component.
+- Initial alignment saves the PSX before auto-level/export. Temporary Component activation can therefore be restored after export without changing which Component is persisted as active, while exported coordinates remain based on the selected Component.
+- The cleanest stale-PSX UX is preflight-on-action: clicking “从 PSX 重新导出” first runs a read-only Metashape inspection, then shows a Component confirmation only when multiple Components exist. Re-export must independently revalidate the key to close the time-of-check/time-of-use gap.
+- A read-only async Tauri command is feasible with existing `spawn_blocking`, tool-resolution and hidden-process patterns. It should return inspection data without mutating the project; the successful transactional re-export remains the only operation that replaces outputs and persists the new alignment report.
+- The monitor should distinguish “当前已导出的 Component” from “下一次重新导出的目标”. Reusing a stale persisted dropdown as if it described the live PSX is the current conceptual UI bug.
+- Release staging copies every `.py` under `scripts`, so a new inspection entrypoint would be included automatically. It should still be added to the required-file validation and staging regression fixture so a partial package fails before release.
+- Existing pipeline code already has Windows hidden-process and Metashape runtime argument helpers, but they are private to `pipeline.rs`. The implementation should extract only the minimal shared command configuration needed by the new read-only inspector rather than duplicate environment/console behavior.
+
+# Phase 58 Component implementation findings
+
+- A single `activated_component` context now owns Metashape's mutable active-Component boundary. Inventory activates each native Component, reads transforms and `chunk.tie_points`, and restores the original even when inspection or export raises.
+- Schema-v2 inventory counts the global aligned population as a union of camera keys rather than a sum. This preserves the meaning of 856/880 even when one camera can appear in more than one Component.
+- Initial leveling and export run while the selected Component is active. Explicit PSX re-export keys are strict, so a Component removed after UI inspection fails before transactional publication rather than silently switching targets.
+- The read-only inspector imports no OpenCV or NumPy, never saves the document, writes UTF-8 JSON atomically, and is now a required staged resource.
+- Rust validates revision, current PSX, selected executable, schema version, totals, unique keys and usable default before returning live inventory. The external Metashape process runs inside `spawn_blocking`, uses discrete arguments for Unicode/space-bearing paths, hides its console on Windows, and removes its temporary JSON on both success and failure.
+- Persisted `alignmentReport` remains the description of the currently published result. Live inspection is transient frontend state and does not overwrite project configuration.
+- The monitor now displays the currently exported Component as read-only state. Re-export always inspects the live PSX; one usable Component proceeds directly, while multiple Components open a radio-row confirmation dialog with the largest result preselected.
+- Native Metashape 2.2.1 and 2.3.0 inspections both returned the exact known baseline: Components 458/221/177, global aligned 856/880, unaligned 24 and tie points 132270/94262/74148. The PSX descriptor timestamp and SHA-256 remained unchanged after both runs.
+- Final five-axis review found no blocker: activation/restoration and strict failure semantics cover correctness; the Python/Rust/React boundaries remain narrow; commands use validated discrete arguments without a shell; inspection is off the UI thread; and inventory work is linear in cameras times the small native Component list.
+
 ## 1.0.0-preview release acceptance
 
 - The final installer is `dist/xPano-1.0.0-preview-windows-x64-setup.exe`, 728,650,129 bytes, SHA-256 `F9AA3E252E57232DC1C040C80EAB4CA76804370B5304A10ACE442F5ADAFE0D89`; its sidecar contains the same digest.
@@ -851,3 +1018,60 @@
 - A MinGW C++ probe matches the failure exactly: `std::filesystem::exists` returns true for the normal path and for an extended path using backslashes, but returns false (without an error code) for the mixed form produced by LFS (`\\?\E:\...\\locales/en.json` and `\\?\E:\...\\assets\\rmlui/rendering.rml`). LFS creates that mixed form because `getAssetPath()` appends slash-bearing asset names and `LocalizationManager` builds `locales_dir + "/" + language + ".json"`.
 - The xPano launch chain is the affected boundary: Tauri resolves `runtime/lichtfeld-studio/bin/LichtFeld-Studio.exe` to a `PathBuf`, Python then calls `config.executable.resolve(strict=False)`, and the child inherits the verbatim extended executable path. The source/manual launch uses a normal drive path and therefore does not trigger the LFS/MinGW mixed-separator bug.
 - The minimal repair boundary is xPano's Windows child-process launch: convert bundled executable, script and working-directory paths from the `\\?\` form to normal drive/UNC syntax before invoking Python/LFS, while retaining extended paths for user data where needed. Patching the third-party LFS resource code would be broader and would not fix other bundled tools that receive the same path form.
+# Phase 67 LFS reliability planning findings
+
+- The formal installer currently stages a complete local LFS tree and the present source/stage/installed critical hashes match, so the reliability work must not be framed as one known missing DLL.
+- The runtime input is nevertheless an untracked, manually hydrated directory with no LFS-specific immutable artifact manifest; builds are not reproducible from the tracked repository.
+- `release_staging.py` checks only the LFS executable and license as required resources. Recursive PE import closure passes for the current tree but cannot validate dynamically loaded DLLs, RML/shader/locale assets, GPU drivers, or Vulkan devices.
+- `build_installer.ps1` copies the complete runtime, while the legacy portable `build_release.ps1` does not copy the LFS GUI runtime. The release process therefore has two incompatible assembly contracts.
+- General startup readiness runs `LichtFeld-Studio.exe --version`, but training readiness only checks that the executable exists. Neither proves GUI resources, CUDA/Vulkan initialization, or dataset loading.
+- Production process resolution can inherit `XPANO_ROOT`, `XPANO_PYTHON`, the host `PATH`, and user-level `~/.lichtfeld/plugins`, creating machine-specific script, Python, DLL, and plugin behavior.
+- The training supervisor has an absolute 120-second startup deadline. A healthy large dataset that has not yet reached the dataset-ready marker can be terminated solely for taking longer than two minutes.
+- The release manifest is generated but never verified after installation. The unsigned installer and executables leave antivirus quarantine or partial installation indistinguishable from a source packaging defect.
+- LFS GUI training directly imports the NVIDIA driver API and Vulkan loader. Driver/hardware incompatibility must be reported separately from bundled-file corruption; `nvcuda.dll` must not be copied from another machine.
+- The on-demand densification runtime is a separate versioned Python/Torch chain and should remain separate. Its follow-up gap is CUDA-profile revalidation, not the LFS GUI resource layout.
+
+# Phase 68 批量模式调研
+
+本阶段调研结果将追加在此处；先保留历史阶段记录不改写。
+
+- 当前应用只有 `/project/*` 路由，默认进入 `/project/media`；四个工作区由同一个 `AppShell`、`ProjectProvider` 和 `JobProvider` 承载。批量页若要真正独立，应作为 `/batch` 顶层路由，不套用项目四栏底栏。
+- `ProjectProvider` 只持有一个当前 `projectRoot/project`；`JobProvider` 也只为当前项目创建一个 `usePipeline(projectRoot)`。因此不能把批量调度写成在前端循环切换当前项目，否则路由切换、组件卸载或应用最小化都会破坏夜间运行。
+- 项目 schema v3 已持久化 tracks、抽帧设置、reconstruction config、training config、jobs 和 revisions；这允许批量项只引用 `projectRoot` 与阶段开关，不必复制一套素材/参数模型。
+- 每个项目已有 durable `JobSnapshot`/`JobEvent`、恢复命令和互斥 job 语义。批量调度应复用这些 project-scoped job 作为执行单元，并额外持久化一个 application-scoped queue；队列不应替代项目 job 状态。
+- 现有 `activeWorkspace` 是项目详情的最后停留页，适合在从任务列表点入详情时恢复；批量调度本身不应通过修改 `activeWorkspace` 驱动阶段执行。
+- Rust `AppState` 只有一个 `PipelineState`，`ensure_startable()` 明确拒绝第二个进程；这是现成且正确的全局串行 seam。批量模式应在该 seam 之上排队，不应新增并发 pipeline 或用前端定时器抢锁。
+- `PipelineState` 已能关联一个 project-scoped `JobContext`，重建和训练都使用 registered job；取消会终止完整 Windows 进程树。调度器可以通过同一 active process 生命周期等待终态，然后推进队列。
+- 素材准备目前仍走未注册的 `pipeline.start()`，项目只持久化 track running/ready/failed 和 media marker，没有与重建/训练同级的 durable `JobSnapshot`。若批量模式直接复用它，任务列表在重启后难以精确区分“正在抽帧”“进程已丢失”“结果已落盘待提交”；这是落地前需要补齐的最小一致性缺口。
+- 全局单 pipeline 意味着任务详情与批量页可以并行查看，但手动模式不得在批量队列运行时启动另一任务。UI 应显示“批量队列占用执行器”，而不是让手动按钮点击后才报 `ALREADY_RUNNING`。
+
+## Phase 68 architecture evidence (2026-08-10)
+
+- The only application routes are `/project/*`; `AppShell` owns the four-workspace footer and `ProjectProvider`/`JobProvider` are mounted once above the router. A batch list must be a top-level route with a separate shell, not another footer workspace.
+- `ProjectProvider` and `usePipeline(projectRoot)` model one active project. Switching that root in a frontend loop would tear down listeners and make overnight orchestration dependent on route/UI lifetime.
+- Rust `AppState` owns one `PipelineState`; `ensure_startable()` rejects a second process. This is the correct serial execution seam and should be reused by a queue, not bypassed with parallel processes or frontend timers.
+- Reconstruction and training use registered `JobContext`/`JobSnapshot`/`JobEvent` lifecycles. `start_media_job` still uses a media marker plus track status and calls unregistered `pipeline.start()`, so media needs the smallest registered-job adapter before queue recovery can be reliable.
+- Existing project schema v3 already persists tracks, extraction settings, reconstruction/training config, revisions and project jobs. A batch task should reference a project root plus stage switches and a config snapshot/hash, not copy a second material/parameter model.
+- Native stage boundaries are already explicit: `start_media_job`, `start_reconstruction_job` (execution plan), and `start_training_job`; each has a backend terminal watcher that commits success/failure. The queue should wait on those durable terminal states, then atomically advance or fail one task.
+- The project-level `activeWorkspace` is a detail-page resume hint. Batch execution must not mutate it to drive stages; opening a task can still navigate to the saved workspace.
+
+## Phase 68 design iterations
+
+### Iteration 1: React-owned queue (rejected)
+
+- Proposed shape: `/batch` stores tasks in React/localStorage, listens to `pipeline:*`, calls `start_media_job`, then builds/starts reconstruction, then starts training.
+- It minimizes initial Rust work, but the queue would depend on one active `ProjectProvider` and UI listener lifetime. A reload, route switch or frontend exception could lose orchestration even while the child process remains alive.
+- Global `pipeline:*` events do not identify a project or queue task, and media is not a registered durable job. Correlation and recovery would therefore be guesswork.
+- Failure-continuation, cancellation and revision conflict policy would be spread across React effects. This is a shallow module with a large interface and poor locality, so it fails the overnight reliability requirement.
+
+### Iteration 2: application-scoped Rust coordinator (selected)
+
+- Add one deep `batch` module behind a small command/event interface. It owns a versioned queue store under Tauri `app_local_data_dir`, one worker loop, task/stage transitions and queue-level cancellation.
+- Reuse the existing single `PipelineState` as the execution seam. The coordinator never starts two native processes and manual commands consult the same batch occupancy before launch.
+- A task is created/configured as a real xPano project before enqueue. The queue stores project identity/root, a frozen project revision, stage switches and execution status; media/reconstruction/training parameters remain authoritative in the project schema.
+- Add the missing persisted training-config save command and convert media preparation to a registered project job. The coordinator then treats all three stages through the same start -> durable terminal snapshot -> advance/fail contract.
+- The frontend owns presentation and editing only. `batch:snapshot`/`batch:event` carry queue/task/stage identity, progress, elapsed, ETA and error summaries; detailed logs remain project-job logs and are read lazily.
+
+### Rejected alternative: external supervisor script
+
+- A standalone Python/PowerShell supervisor could survive frontend reloads, but it would duplicate environment resolution, project transactions, process-tree cancellation and job/event persistence already implemented in Rust. The deletion test shows this would move existing complexity into a second implementation rather than deepen the current execution module.

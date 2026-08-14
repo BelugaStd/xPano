@@ -97,7 +97,7 @@ export function TrainingTaskView({ mode, training, config, progress, percent, it
             <span className={`mx-auto grid h-12 w-12 place-items-center rounded-full ${interrupted ? 'bg-warning/12 text-warning' : 'bg-danger/12 text-danger'}`}><CircleAlert className="h-5 w-5" /></span>
             <h1 className="mt-4 text-[18px] font-semibold text-ink">{interrupted ? '训练已中断' : '训练失败'}</h1>
             <p className="mx-auto mt-2 max-w-[520px] text-[12px] leading-6 text-muted">{friendlyError(training.error, mode)}</p>
-            <button type="button" onClick={onConfigure} className="motion-press mt-5 inline-flex h-10 items-center gap-2 rounded-comfortable bg-brand px-5 text-[12px] font-semibold text-white"><RotateCcw className="h-4 w-4" />返回设置</button>
+            <div className="mt-5 flex justify-center gap-2"><button type="button" onClick={onConfigure} className="motion-press inline-flex h-10 items-center gap-2 rounded-comfortable bg-brand px-5 text-[12px] font-semibold text-white"><RotateCcw className="h-4 w-4" />返回设置</button>{!interrupted && <button type="button" onClick={onOpenOutput} className="glass-control motion-press inline-flex h-10 items-center gap-2 rounded-comfortable px-4 text-[12px] font-medium text-ink/75"><FolderOpen className="h-4 w-4" />打开诊断目录</button>}</div>
           </div>
         </div>
         <TrainingDiagnosticsDrawer logs={logs} elapsed={progress.elapsed} defaultOpen={mode === 'failed'} />

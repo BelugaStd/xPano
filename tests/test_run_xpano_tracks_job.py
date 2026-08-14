@@ -295,7 +295,7 @@ class RunXpanoTracksJobTests(unittest.TestCase):
             job = runner.call_args.args[0]
             self.assertEqual(job.metashape_alignment_mode, "backbone")
 
-    def test_main_accepts_legacy_metashape_mixed_alignment(self):
+    def test_main_maps_legacy_metashape_mixed_alignment_to_backbone(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pano = root / "a.osv"
@@ -318,7 +318,7 @@ class RunXpanoTracksJobTests(unittest.TestCase):
                 main()
 
             job = runner.call_args.args[0]
-            self.assertEqual(job.metashape_alignment_mode, "mixed")
+            self.assertEqual(job.metashape_alignment_mode, "backbone")
 
     def test_main_accepts_ordinary_video_tracks_and_extract_settings(self):
         with tempfile.TemporaryDirectory() as tmp:

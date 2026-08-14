@@ -8,10 +8,12 @@ from scripts.verify_metashape_backbone_acceptance import verify_backbone_accepta
 
 
 MIXED_BACKBONE_STAGES = [
-    "metashape.all.match",
+    "metashape.pano.match",
     "metashape.pano.align",
     "metashape.pano.release",
     "metashape.pano.optimize",
+    "metashape.frame.import",
+    "metashape.frame.match",
     "metashape.frame.align",
     "metashape.all.optimize",
     "output.validate",
@@ -23,14 +25,17 @@ def write_count_header(path, count):
     path.write_bytes(struct.pack("<Q", count))
 
 
-def write_backbone_log(path, stages=MIXED_BACKBONE_STAGES, match_calls=1, error_line=None):
+def write_backbone_log(path, stages=MIXED_BACKBONE_STAGES, match_calls=2, error_line=None):
     lines = []
     for stage in stages:
         if stage == "output.validate":
             lines.append("PIPELINE_EVENT:" + json.dumps({"stage": "export.images"}))
         lines.append("PIPELINE_EVENT:" + json.dumps({"stage": stage}))
-        if stage == "metashape.all.match":
-            lines.extend("MatchPhotos: test policy" for _ in range(match_calls))
+        if stage in {"metashape.pano.match", "metashape.frame.match"}:
+            lines.append("MatchPhotos: test policy")
+    if match_calls != 2:
+        lines = [line for line in lines if not line.startswith("MatchPhotos:")]
+        lines.extend("MatchPhotos: test policy" for _ in range(match_calls))
     if error_line:
         lines.append(error_line)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -97,21 +102,21 @@ class VerifyMetashapeBackboneAcceptanceTests(unittest.TestCase):
         expected.update(overrides)
         return verify_backbone_acceptance(**expected)
 
-    def test_accepts_complete_single_match_mixed_backbone_evidence(self):
+    def test_accepts_complete_incremental_mixed_backbone_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.verify_success_fixture(Path(tmp))
 
-        self.assertEqual(result["match_calls"], 1)
+        self.assertEqual(result["match_calls"], 2)
         self.assertEqual(result["stages"], list(MIXED_BACKBONE_STAGES))
         self.assertEqual(result["alignment_summary"]["aligned"], 4)
         self.assertEqual(result["alignment_summary"]["panorama_aligned"], 2)
         self.assertEqual(result["alignment_summary"]["frame_aligned"], 2)
         self.assertEqual(result["output"]["colmap_points"], 7)
 
-    def test_rejects_a_second_native_match_call(self):
+    def test_rejects_missing_incremental_match_call(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(RuntimeError, "exactly one native MatchPhotos"):
-                self.verify_success_fixture(Path(tmp), log={"match_calls": 2})
+            with self.assertRaisesRegex(RuntimeError, "exactly two native MatchPhotos"):
+                self.verify_success_fixture(Path(tmp), log={"match_calls": 1})
 
     def test_rejects_native_failure_marker_even_when_export_files_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,11 +125,13 @@ class VerifyMetashapeBackboneAcceptanceTests(unittest.TestCase):
 
     def test_rejects_out_of_order_staged_alignment(self):
         stages = [
-            "metashape.all.match",
+            "metashape.pano.match",
             "metashape.pano.align",
             "metashape.pano.release",
             "metashape.pano.optimize",
             "metashape.all.optimize",
+            "metashape.frame.import",
+            "metashape.frame.match",
             "metashape.frame.align",
             "output.validate",
         ]
